@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import type { Strategy } from '../../types/strategy';
@@ -35,39 +35,47 @@ export default function StrategyDetailPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     if (!id) return;
-    const s = await api.getStrategy(Number(id));
-    setStrategy(s);
-
-    if (s.use_coin_pool) {
-      const source = s.coin_pool_source === 'both' ? undefined : s.coin_pool_source;
-      const p = await api.getCoinPool(source);
-      setPool(p);
-    }
-
-    // Fetch exchange positions directly (replaces local DB positions)
     try {
-      const ep = await api.getExchangePositions(Number(id));
-      setPositions(ep);
-    } catch { setPositions([]); }
+      const s = await api.getStrategy(Number(id));
+      setStrategy(s);
 
-    const tr = await api.listTrades({ strategy_id: Number(id), limit: 50 });
-    setTrades(tr.trades);
+      if (s.use_coin_pool) {
+        try {
+          const source = s.coin_pool_source === 'both' ? undefined : s.coin_pool_source;
+          const p = await api.getCoinPool(source);
+          setPool(p);
+        } catch { setPool([]); }
+      }
 
-    const l = await api.getStrategyLogs(Number(id), 100);
-    setLogs(l);
+      try {
+        const ep = await api.getExchangePositions(Number(id));
+        setPositions(ep);
+      } catch { setPositions([]); }
 
+      try {
+        const tr = await api.listTrades({ strategy_id: Number(id), limit: 50 });
+        setTrades(tr.trades);
+      } catch { setTrades([]); }
+
+      try {
+        const l = await api.getStrategyLogs(Number(id), 100);
+        setLogs(l);
+      } catch { setLogs([]); }
+    } catch {
+      setStrategy(null);
+    }
     setLoading(false);
-  };
+  }, [id]);
 
-  useEffect(() => { load(); }, [id]);
+  useEffect(() => { load(); }, [load]);
 
-  // Auto-refresh every 5 seconds
+  // Auto-refresh every 10 seconds
   useEffect(() => {
     const timer = setInterval(load, 10000);
     return () => clearInterval(timer);
-  }, [id]);
+  }, [load]);
 
   if (loading) {
     return <div className="text-center text-gray-400 py-20">加载中...</div>;
