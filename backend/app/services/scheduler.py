@@ -163,7 +163,27 @@ class StrategyScheduler:
                         strategy.status = "stopped"
                         await session.commit()
                         self._strategy_tasks.pop(strategy_id, None)
-                        logger.warning("Strategy %d stopped: margin %.2f below threshold %.2f", strategy_id, total_margin, strategy.margin_threshold)
+                        job_id = f"strategy_{strategy_id}"
+                        if self._scheduler.get_job(job_id):
+                            self._scheduler.remove_job(job_id)
+                        logger.warning("Strategy %d margin %.2f below threshold %.2f — stopping and closing all positions", strategy_id, total_margin, strategy.margin_threshold)
+                        # Close all open positions for this strategy
+                        try:
+                            eps = await auth_binance.fetch_positions()
+                            for ep in eps:
+                                contracts = float(ep.get("contracts", 0) or 0)
+                                if contracts <= 0:
+                                    continue
+                                sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
+                                side = (ep.get("side") or "").lower()
+                                ps = "LONG" if side == "long" else "SHORT"
+                                cs = "sell" if side == "long" else "buy"
+                                try:
+                                    await auth_binance.create_market_order(sym, cs, contracts, reduce_only=True, position_side=ps)
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.error("Margin stop: failed to close positions for strategy %d: %s", strategy_id, e)
                         return
                 except Exception as e:
                     logger.error("Strategy %d: balance check failed: %s", strategy_id, e)
