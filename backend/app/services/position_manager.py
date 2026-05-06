@@ -228,7 +228,7 @@ class PositionManager:
                 close_side = "sell" if position_side == "long" else "buy"
                 for attempt in range(2):  # retry once
                     try:
-                        tp_order = await auth_binance.create_limit_order(symbol, close_side, base_qty, tp_price, reduce_only=True, position_side=ps)
+                        tp_order = await auth_binance.create_limit_order(symbol, close_side, base_qty, tp_price, reduce_only=False, position_side=ps)
                         tp_order_id = tp_order.get("id", "")
                         if tp_order_id:
                             pos.tp_limit_order_id = tp_order_id
@@ -420,7 +420,7 @@ class PositionManager:
                 close_side = "sell" if pos_side == "long" else "buy"
                 for attempt in range(2):
                     try:
-                        tp_order = await auth_binance.create_limit_order(symbol, close_side, new_total, tp_price, reduce_only=True, position_side=ps)
+                        tp_order = await auth_binance.create_limit_order(symbol, close_side, new_total, tp_price, reduce_only=False, position_side=ps)
                         tp_order_id = tp_order.get("id", "")
                         if tp_order_id:
                             pos.tp_limit_order_id = tp_order_id
