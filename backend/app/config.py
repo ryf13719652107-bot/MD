@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     binance_secret: Optional[str] = None
     binance_testnet: bool = True
     cors_origins: str = "http://localhost:5173"
+    http_proxy: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
