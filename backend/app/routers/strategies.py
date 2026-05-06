@@ -224,4 +224,4 @@ async def get_exchange_positions(strategy_id: int, db: AsyncSession = Depends(ge
 @router.get("/{strategy_id}/logs")
 async def get_strategy_logs(strategy_id: int, limit: int = 50):
     from ..services.log_service import strategy_log_service
-    return strategy_log_service.get_logs(strategy_id, limit)
+    return strategy_log_service.get(strategy_id, limit)
