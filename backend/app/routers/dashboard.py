@@ -105,7 +105,7 @@ async def get_dashboard(
 
     # Leverage = total position notional / wallet balance
     if total_balance > 0 and total_notional > 0:
-        leverage_multiplier = round(total_notional / total_balance, 1)
+        leverage_multiplier = round(total_notional / total_balance, 2)
 
     # Daily trades and PnL (last 24h, filtered by account)
     since = now_beijing() - timedelta(hours=24)

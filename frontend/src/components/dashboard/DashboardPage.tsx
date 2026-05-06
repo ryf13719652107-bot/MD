@@ -30,7 +30,7 @@ export default function DashboardPage() {
   const stats = [
     { label: '钱包余额', value: `${data.total_balance.toFixed(2)} USDT`, icon: Wallet, color: 'text-blue-400' },
     { label: '可用余额', value: `${data.available_balance.toFixed(2)} USDT`, icon: PiggyBank, color: 'text-green-400' },
-    { label: '杠杆倍数', value: `${data.leverage_multiplier.toFixed(1)}x`, icon: Gauge, color: leverageColor },
+    { label: '杠杆倍数', value: `${data.leverage_multiplier.toFixed(2)}x`, icon: Gauge, color: leverageColor },
     { label: '当日盈亏', value: `${data.daily_pnl >= 0 ? '+' : ''}${data.daily_pnl.toFixed(2)} USDT`, icon: TrendingUp, color: data.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400' },
     { label: '胜率', value: `${data.win_rate_pct.toFixed(1)}%`, icon: Target, color: 'text-blue-400' },
     { label: '活跃策略', value: data.active_strategies, icon: Activity, color: 'text-yellow-400' },
