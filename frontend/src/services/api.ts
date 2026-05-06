@@ -1,7 +1,10 @@
 import type { Account, Position, Trade, DashboardData, CoinPoolEntry, KlineData } from '../types';
 import type { Strategy, StrategyFormData } from '../types/strategy';
 
-const BASE = '/api';
+// Dev: through Vite proxy; Prod: direct to backend port 8000
+const BASE = import.meta.env.DEV
+  ? '/api'
+  : `http://${window.location.hostname}:8000/api`;
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${url}`, {
