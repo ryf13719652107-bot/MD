@@ -150,12 +150,17 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
 
         for (symbol, side), contracts in grouped.items():
             try:
-                result = await binance.close_position(symbol, side)
-                if result and result.get("id"):
+                close_side = "sell" if side == "long" else "buy"
+                position_side = "LONG" if side == "long" else "SHORT"
+                order = await binance.create_market_order(
+                    symbol, close_side, abs(contracts),
+                    reduce_only=True, position_side=position_side
+                )
+                if order and order.get("id"):
                     closed += 1
                     logging.info("Panic close: closed %s %s (contracts=%s)", symbol, side, contracts)
                 else:
-                    errors.append(f"{symbol} {side}: no id in response")
+                    errors.append(f"{symbol} {side}: order returned no id")
             except Exception as e:
                 errors.append(f"{symbol} {side}: {e}")
     except Exception as e:
