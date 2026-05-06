@@ -8,7 +8,7 @@ class StrategyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: Literal["long", "short"]
     symbol: Optional[str] = None  # None = use coin pool
-    signal_source: Literal["rsi", "wavetrend"] = "rsi"
+    signal_source: Literal["rsi", "wavetrend"] = "wavetrend"
     rsi_period: int = Field(default=14, ge=5, le=50)
     timeframe: Literal["1m", "5m", "15m", "1h"] = "1m"
     margin_threshold: float = Field(default=0.0, ge=0)
@@ -25,9 +25,9 @@ class StrategyCreate(BaseModel):
     martingale_rsi_enabled: bool = False
     # Take profit
     take_profit_pct: float = Field(default=2.0, gt=0, le=50)
-    take_profit_limit_order: bool = False
+    take_profit_limit_order: bool = True
     # Stop loss
-    stop_loss_enabled: bool = True
+    stop_loss_enabled: bool = False
     stop_loss_pct: float = Field(default=5.0, gt=0, le=100)
     # Slippage protection
     slippage_pct: float = Field(default=0.5, ge=0, le=10)
@@ -35,7 +35,7 @@ class StrategyCreate(BaseModel):
     leverage: int = Field(default=20, ge=1, le=125)
     # Coin pool
     use_coin_pool: bool = True
-    coin_pool_source: Literal["gainers", "losers", "both"] = "both"
+    coin_pool_source: Literal["gainers", "losers", "both"] = "gainers"
     coin_pool_refresh_seconds: int = Field(default=3600, ge=30, le=86400)
     coin_pool_fetch_mode: Literal["immediate", "interval"] = "interval"
     coin_pool_top_n: int = Field(default=20, ge=1, le=50)

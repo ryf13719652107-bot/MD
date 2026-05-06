@@ -135,18 +135,24 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
     try:
         exchange_positions = await binance.fetch_positions()
         logging.info("Panic close: found %d raw positions", len(exchange_positions))
+
+        # Group by (symbol, side) and sum contracts
+        grouped: dict[tuple[str, str], float] = {}
         for ep in exchange_positions:
             contracts = float(ep.get("contracts", 0) or 0)
             if contracts <= 0:
                 continue
             symbol = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
             side = (ep.get("side") or "").lower()
-            ps = "LONG" if side == "long" else "SHORT"
-            cs = "sell" if side == "long" else "buy"
+            key = (symbol, side)
+            grouped[key] = grouped.get(key, 0) + contracts
+
+        for (symbol, side), contracts in grouped.items():
             try:
-                order = await binance.create_market_order(symbol, cs, contracts, reduce_only=True, position_side=ps)
-                if order and order.get("id"):
+                result = await binance.close_position(symbol, side)
+                if result and result.get("id"):
                     closed += 1
+                    logging.info("Panic close: closed %s %s (contracts=%s)", symbol, side, contracts)
                 else:
                     errors.append(f"{symbol} {side}: no id in response")
             except Exception as e:
