@@ -1,5 +1,13 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
+from datetime import datetime, timezone, timedelta
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def now_beijing() -> datetime:
+    """Return current Beijing time as naive datetime (for SQLite compatibility)."""
+    return datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
 
 class Settings(BaseSettings):
