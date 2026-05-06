@@ -37,7 +37,7 @@ export default function StatusBar() {
     };
 
     fetchDashboard();
-    const interval = setInterval(fetchDashboard, 10000);
+    const interval = setInterval(fetchDashboard, 30000);
     return () => clearInterval(interval);
   }, [selectedAccountId]);
 

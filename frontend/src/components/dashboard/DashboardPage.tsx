@@ -12,7 +12,7 @@ export default function DashboardPage() {
     const accountId = selectedAccountId ?? undefined;
     const load = () => api.listTrades({ limit: 5, account_id: accountId }).then((d) => setTrades(d.trades)).catch(() => {});
     load();
-    const timer = setInterval(load, 10000);
+    const timer = setInterval(load, 30000);
     return () => clearInterval(timer);
   }, [selectedAccountId]);
 

@@ -73,7 +73,7 @@ export default function StrategyDetailPage() {
 
   // Auto-refresh every 10 seconds
   useEffect(() => {
-    const timer = setInterval(load, 10000);
+    const timer = setInterval(load, 30000);
     return () => clearInterval(timer);
   }, [load]);
 
