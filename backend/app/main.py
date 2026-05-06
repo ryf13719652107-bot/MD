@@ -57,13 +57,17 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("=" * 50)
     logger.info("Smart Hedge Martin starting...")
+    logger.info("Step 1/6: init_db...")
     await init_db()
+    logger.info("Step 2/6: reset_stale...")
     await strategy_scheduler._reset_stale_running_strategies()
+    logger.info("Step 3/6: scheduler.start...")
     strategy_scheduler.start()
-    logger.info("Strategy scheduler started")
+    logger.info("Step 4/6: get_public_binance...")
     public_binance = get_public_binance()
 
     # Apply coin pool config from strategies
+    logger.info("Step 5/6: coin pool config...")
     async with async_session() as session:
         from sqlalchemy import select
         result = await session.execute(
@@ -76,6 +80,7 @@ async def lifespan(app: FastAPI):
                 pool_source=strategy_with_pool.coin_pool_source,
             )
 
+    logger.info("Step 6/6: start_auto_refresh...")
     await coin_pool_service.start_auto_refresh(public_binance)
     logger.info("Coin pool auto-refresh started")
     logger.info("Backend ready")

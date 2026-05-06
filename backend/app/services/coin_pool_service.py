@@ -92,9 +92,13 @@ class CoinPoolService:
     async def start_auto_refresh(self, binance_service: BinanceService):
         """Start periodic coin pool refresh."""
         async def _loop():
-            # Initial refresh immediately
+            # Initial refresh with 30s timeout
             try:
-                await self.refresh_pool(binance_service)
+                await asyncio.wait_for(self.refresh_pool(binance_service), timeout=30.0)
+            except asyncio.TimeoutError:
+                self._last_refresh_ok = False
+                self._last_error = "Initial refresh timed out after 30s"
+                logger.error("Coin pool initial refresh timed out")
             except Exception as e:
                 self._last_refresh_ok = False
                 self._last_error = str(e)[:200]
