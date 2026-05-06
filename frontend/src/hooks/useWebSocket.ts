@@ -6,7 +6,11 @@ export function useWebSocket(channel: string, onMessage: (data: any) => void) {
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/${channel}`;
+    // Dev: through Vite proxy; Prod: direct to backend port 8000
+    const host = import.meta.env.DEV
+      ? window.location.host
+      : `${window.location.hostname}:8000`;
+    const wsUrl = `${protocol}//${host}/ws/${channel}`;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
