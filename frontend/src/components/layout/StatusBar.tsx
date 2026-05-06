@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
+import { useWebSocket } from '../../hooks/useWebSocket';
 import { Power, Circle, ChevronDown } from 'lucide-react';
 import type { DashboardData, Account } from '../../types';
 
@@ -10,6 +11,14 @@ export default function StatusBar() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const fetchRef = useRef<() => void>(() => {});
+
+  // Connect dashboard WS to trigger re-fetch on snapshot
+  useWebSocket('dashboard', useCallback((msg: any) => {
+    if (msg.type === 'snapshot') {
+      fetchRef.current();
+    }
+  }, []));
 
   useEffect(() => {
     api.listAccounts().then((accs) => {
@@ -35,6 +44,7 @@ export default function StatusBar() {
         useDashboardStore.getState().setData({ exchange_positions: [] });
       });
     };
+    fetchRef.current = fetchDashboard;
 
     fetchDashboard();
     const interval = setInterval(fetchDashboard, 30000);

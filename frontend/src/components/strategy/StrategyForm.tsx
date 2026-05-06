@@ -27,7 +27,6 @@ const schema = z.object({
   take_profit_limit_order: z.coerce.boolean(),
   stop_loss_enabled: z.coerce.boolean(),
   stop_loss_pct: z.number().min(0.1).max(100),
-  slippage_pct: z.number().min(0).max(10),
   leverage: z.number().min(1).max(125),
   use_coin_pool: z.coerce.boolean(),
   coin_pool_source: z.enum(['gainers', 'losers', 'both']),
@@ -225,11 +224,14 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <input type="number" step="0.01" {...register('base_qty_value', { valueAsNumber: true })} className={inputClass} />
           </div>
           <div>
-            <label className={labelClass}>选币方式</label>
-            <select {...register('use_coin_pool')} className={inputClass}>
-              <option value="true">选币池自动</option>
-              <option value="false">固定交易对</option>
-            </select>
+            <label className={`${labelClass} flex items-center gap-2`}>
+              <span>选币方式</span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" {...register('use_coin_pool')} className="sr-only peer" />
+                <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+              </label>
+              <span className="text-xs text-gray-500">{watch('use_coin_pool') ? '选币池自动' : '固定交易对'}</span>
+            </label>
           </div>
         </div>
 
@@ -325,11 +327,14 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <span className="text-xs text-gray-600">{stopLossEnabled ? '止损已启用' : '止损已禁用'}</span>
           </div>
           <div>
-            <label className={labelClass}>止盈方式</label>
-            <select {...register('take_profit_limit_order')} className={inputClass}>
-              <option value="false">市价单</option>
-              <option value="true">限价单</option>
-            </select>
+            <label className={`${labelClass} flex items-center gap-2`}>
+              <span>止盈方式</span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" {...register('take_profit_limit_order')} className="sr-only peer" />
+                <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+              </label>
+              <span className="text-xs text-gray-500">{watch('take_profit_limit_order') ? '限价单' : '市价单'}</span>
+            </label>
           </div>
         </div>
 
@@ -343,11 +348,6 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <label className={labelClass}>合约杠杆</label>
             <input type="number" {...register('leverage', { valueAsNumber: true })} className={inputClass} />
             <span className="text-xs text-gray-600">如20表示20倍杠杆</span>
-          </div>
-          <div>
-            <label className={labelClass}>最大滑点 (%)</label>
-            <input type="number" step="0.1" {...register('slippage_pct', { valueAsNumber: true })} className={inputClass} />
-            <span className="text-xs text-gray-600">0=不限制, 超过则告警</span>
           </div>
         </div>
 

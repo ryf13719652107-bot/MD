@@ -196,10 +196,16 @@ class PositionManager:
         try:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
-                slippage_pct=strategy.slippage_pct if strategy.slippage_pct > 0 else None,
             )
             avg_price = float(order.get("average", current_price))
+        except Exception as e:
+            _clear_cooldown(strategy_id, symbol)
+            logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
+            return
 
+        # Order succeeded on exchange — ensure DB record is written even if TP order fails
+        try:
             eng = MartingaleEngine(base_quantity=base_qty, multiplier=strategy.martingale_mult, max_layers=strategy.max_layers, take_profit_pct=strategy.take_profit_pct)
             tp_price = eng.get_take_profit_price(avg_price, position_side)
 
@@ -211,37 +217,36 @@ class PositionManager:
             )
             session.add(pos)
             await session.flush()
-
-            # Place limit TP order
-            if strategy.take_profit_limit_order and tp_price > 0:
-                tp_placed = False
-                close_side = "sell" if position_side == "long" else "buy"
-                for attempt in range(2):  # retry once
-                    try:
-                        tp_order = await auth_binance.create_limit_order(symbol, close_side, base_qty, tp_price, reduce_only=False, position_side=ps)
-                        tp_order_id = tp_order.get("id", "")
-                        if tp_order_id:
-                            pos.tp_limit_order_id = tp_order_id
-                            await session.flush()
-                            strategy_log_service.info(strategy_id, f"{symbol} 挂止盈限价单 @{tp_price:.6f} id={tp_order_id}")
-                            tp_placed = True
-                            break
-                        else:
-                            strategy_log_service.warning(strategy_id, f"{symbol} 挂止盈单异常 — 返回无id: {tp_order}")
-                    except Exception as tp_err:
-                        logger.error("Strategy %d: TP limit order failed for %s (attempt %d): %s", strategy_id, symbol, attempt + 1, tp_err)
-                        if attempt == 0:
-                            await asyncio.sleep(0.5)  # brief wait before retry
-                if not tp_placed:
-                    strategy_log_service.warning(strategy_id, f"{symbol} 止盈挂单失败(已重试) — 下次tick将用市价止盈兜底")
-
-            logger.info("Strategy %d: opened %s %s qty=%.4f price=%.4f RSI=%.1f", strategy_id, side, symbol, base_qty, avg_price, rsi)
-            strategy_log_service.success(strategy_id, f"{symbol} 开{position_side}成功 qty={base_qty:.4f} price={avg_price:.4f} RSI={round(rsi,1)}")
         except Exception as e:
-            _clear_cooldown(strategy_id, symbol)
-            logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
-            strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
-            raise
+            logger.critical("Strategy %d: %s order filled on exchange but DB record failed: %s", strategy_id, symbol, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 开仓已成交但DB记录失败 — 请手动检查交易所仓位!")
+            return
+
+        # Place limit TP order (best-effort, non-fatal)
+        if strategy.take_profit_limit_order and tp_price > 0:
+            tp_placed = False
+            close_side = "sell" if position_side == "long" else "buy"
+            for attempt in range(2):
+                try:
+                    tp_order = await auth_binance.create_limit_order(symbol, close_side, base_qty, tp_price, reduce_only=False, position_side=ps)
+                    tp_order_id = tp_order.get("id", "")
+                    if tp_order_id:
+                        pos.tp_limit_order_id = tp_order_id
+                        await session.flush()
+                        strategy_log_service.info(strategy_id, f"{symbol} 挂止盈限价单 @{tp_price:.6f} id={tp_order_id}")
+                        tp_placed = True
+                        break
+                    else:
+                        strategy_log_service.warning(strategy_id, f"{symbol} 挂止盈单异常 — 返回无id: {tp_order}")
+                except Exception as tp_err:
+                    logger.error("Strategy %d: TP limit order failed for %s (attempt %d): %s", strategy_id, symbol, attempt + 1, tp_err)
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+            if not tp_placed:
+                strategy_log_service.warning(strategy_id, f"{symbol} 止盈挂单失败(已重试) — 下次tick将用市价止盈兜底")
+
+        logger.info("Strategy %d: opened %s %s qty=%.4f price=%.4f RSI=%.1f", strategy_id, side, symbol, base_qty, avg_price, rsi)
+        strategy_log_service.success(strategy_id, f"{symbol} 开{position_side}成功 qty={base_qty:.4f} price={avg_price:.4f} RSI={round(rsi,1)}")
 
     async def _manage_positions(
         self, session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines=None
@@ -388,9 +393,15 @@ class PositionManager:
         try:
             order = await auth_binance.create_market_order(
                 symbol, side, result.next_quantity, position_side=ps,
-                slippage_pct=strategy.slippage_pct if strategy.slippage_pct > 0 else None,
             )
             new_avg = float(order.get("average", current_price))
+        except Exception as e:
+            logger.error("Strategy %d: martingale add failed: %s", strategy_id, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 马丁加仓失败 — {e}")
+            return
+
+        # Order succeeded — ensure DB record
+        try:
             new_total = total_qty + result.next_quantity
             new_avg_entry = (avg_entry * total_qty + new_avg * result.next_quantity) / new_total
             tp_price = eng.get_take_profit_price(new_avg_entry, pos_side)
@@ -403,34 +414,34 @@ class PositionManager:
             )
             session.add(pos)
             await session.flush()
-
-            # Place new TP order
-            if strategy.take_profit_limit_order:
-                tp_placed = False
-                close_side = "sell" if pos_side == "long" else "buy"
-                for attempt in range(2):
-                    try:
-                        tp_order = await auth_binance.create_limit_order(symbol, close_side, new_total, tp_price, reduce_only=False, position_side=ps)
-                        tp_order_id = tp_order.get("id", "")
-                        if tp_order_id:
-                            pos.tp_limit_order_id = tp_order_id
-                            await session.flush()
-                            strategy_log_service.info(strategy_id, f"{symbol} 更新止盈挂单 @{tp_price:.6f} qty={new_total:.4f}")
-                            tp_placed = True
-                            break
-                        else:
-                            strategy_log_service.warning(strategy_id, f"{symbol} 更新止盈单异常 — 返回无id: {tp_order}")
-                    except Exception as tp_err:
-                        logger.error("Strategy %d: TP limit update failed for %s (attempt %d): %s", strategy_id, symbol, attempt + 1, tp_err)
-                        if attempt == 0:
-                            await asyncio.sleep(0.5)
-                if not tp_placed:
-                    strategy_log_service.warning(strategy_id, f"{symbol} 止盈挂单更新失败(已重试) — 下次tick将用市价止盈兜底")
-
-            logger.info("Strategy %d: martingale add layer %d for %s qty=%.4f price=%.4f drop=%.1f%%",
-                        strategy_id, result.next_layer, symbol, result.next_quantity, new_avg, result.price_drop_from_last)
-            strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓 L{result.next_layer} qty={result.next_quantity:.4f} 跌幅={result.price_drop_from_last:.1f}%")
         except Exception as e:
-            logger.error("Strategy %d: martingale add failed: %s", strategy_id, e)
-            strategy_log_service.error(strategy_id, f"{symbol} 马丁加仓失败 — {e}")
-            raise
+            logger.critical("Strategy %d: %s martingale order filled but DB record failed: %s", strategy_id, symbol, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 马丁加仓已成交但DB记录失败 — 请手动检查交易所仓位!")
+            return
+
+        # Place new TP order (best-effort)
+        if strategy.take_profit_limit_order:
+            tp_placed = False
+            close_side = "sell" if pos_side == "long" else "buy"
+            for attempt in range(2):
+                try:
+                    tp_order = await auth_binance.create_limit_order(symbol, close_side, new_total, tp_price, reduce_only=False, position_side=ps)
+                    tp_order_id = tp_order.get("id", "")
+                    if tp_order_id:
+                        pos.tp_limit_order_id = tp_order_id
+                        await session.flush()
+                        strategy_log_service.info(strategy_id, f"{symbol} 更新止盈挂单 @{tp_price:.6f} qty={new_total:.4f}")
+                        tp_placed = True
+                        break
+                    else:
+                        strategy_log_service.warning(strategy_id, f"{symbol} 更新止盈单异常 — 返回无id: {tp_order}")
+                except Exception as tp_err:
+                    logger.error("Strategy %d: TP limit update failed for %s (attempt %d): %s", strategy_id, symbol, attempt + 1, tp_err)
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+            if not tp_placed:
+                strategy_log_service.warning(strategy_id, f"{symbol} 止盈挂单更新失败(已重试) — 下次tick将用市价止盈兜底")
+
+        logger.info("Strategy %d: martingale add layer %d for %s qty=%.4f price=%.4f drop=%.1f%%",
+                    strategy_id, result.next_layer, symbol, result.next_quantity, new_avg, result.price_drop_from_last)
+        strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓 L{result.next_layer} qty={result.next_quantity:.4f} 跌幅={result.price_drop_from_last:.1f}%")

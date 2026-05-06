@@ -4,9 +4,10 @@ import type { DashboardData } from '../types';
 interface DashboardState {
   data: DashboardData;
   selectedAccountId: number | null;
+  _wsTick: number;
   setData: (data: Partial<DashboardData>) => void;
   setSelectedAccountId: (id: number | null) => void;
-  updateFromWs: (msg: any) => void;
+  bumpWsTick: () => void;
 }
 
 const defaultData: DashboardData = {
@@ -31,9 +32,6 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   selectedAccountId: null,
   setData: (data) => set((s) => ({ data: { ...s.data, ...data } })),
   setSelectedAccountId: (id) => set({ selectedAccountId: id }),
-  updateFromWs: (msg) => {
-    if (msg.type === 'snapshot') {
-      set((s) => ({ data: { ...s.data, ...msg } }));
-    }
-  },
+  _wsTick: 0,
+  bumpWsTick: () => set((s) => ({ _wsTick: s._wsTick + 1 })),
 }));
