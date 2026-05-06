@@ -43,7 +43,7 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
 
     api_key = decrypt(account.api_key_encrypted)
     api_secret = decrypt(account.api_secret_encrypted)
-    binance = get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+    binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
     # Cancel existing TP limit order before closing
     if position.tp_limit_order_id:

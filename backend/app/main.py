@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
     logger.info("Step 3/6: scheduler.start...")
     strategy_scheduler.start()
     logger.info("Step 4/6: get_public_binance...")
-    public_binance = get_public_binance()
+    public_binance = await get_public_binance()
 
     # Apply coin pool config from strategies
     logger.info("Step 5/6: coin pool config...")
@@ -139,7 +139,7 @@ async def get_klines(
     timeframe: str = Query(default="1m"),
     limit: int = Query(default=200, le=500),
 ):
-    binance = get_public_binance()
+    binance = await get_public_binance()
     klines = await binance.fetch_klines(symbol, timeframe, limit)
     return [
         {
@@ -156,7 +156,7 @@ async def get_klines(
 
 @app.get("/api/ticker")
 async def get_ticker(symbol: str = Query(...)):
-    binance = get_public_binance()
+    binance = await get_public_binance()
     ticker = await binance.fetch_ticker(symbol)
     return {
         "symbol": symbol,

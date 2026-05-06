@@ -57,7 +57,7 @@ class RiskManager:
             pnl_pct = ((current_price - entry_price) / entry_price) * 100
         else:
             pnl_pct = ((entry_price - current_price) / entry_price) * 100
-        return pnl_pct <= stop_loss_pct
+        return pnl_pct <= -abs(stop_loss_pct)
 
     def check_margin_threshold(self, total_margin: float, margin_threshold: float) -> bool:
         """Check if margin is below critical threshold."""

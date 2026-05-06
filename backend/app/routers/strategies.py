@@ -89,7 +89,7 @@ async def start_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
     # Immediate coin pool refresh if configured
     if strategy.use_coin_pool and strategy.coin_pool_fetch_mode == "immediate":
         try:
-            public_binance = get_public_binance()
+            public_binance = await get_public_binance()
             await coin_pool_service.refresh_pool(public_binance)
         except Exception:
             pass
@@ -129,7 +129,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
 
     api_key = decrypt(account.api_key_encrypted)
     api_secret = decrypt(account.api_secret_encrypted)
-    binance = get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+    binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
     closed = 0
     errors = []
@@ -198,7 +198,7 @@ async def get_exchange_positions(strategy_id: int, db: AsyncSession = Depends(ge
 
     api_key = decrypt(account.api_key_encrypted)
     api_secret = decrypt(account.api_secret_encrypted)
-    binance = get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+    binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
     try:
         positions = await binance.fetch_positions()

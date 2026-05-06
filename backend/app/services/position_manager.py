@@ -189,19 +189,6 @@ class PositionManager:
             strategy_log_service.info(strategy_id, f"{symbol} 冷却中，跳过")
             return
 
-        # Risk check
-        all_positions_stmt = select(Position).where(Position.closed_at.is_(None))
-        all_positions_result = await session.execute(all_positions_stmt)
-        all_open_positions = list(all_positions_result.scalars().all())
-
-        position_value = base_qty * current_price / leverage
-        risk_check = self.risk_mgr.can_open_position(all_open_positions, symbol, total_margin, position_value)
-        if not risk_check.passed:
-            logger.info("Strategy %d: risk check failed for %s: %s", strategy_id, symbol, risk_check.reason)
-            strategy_log_service.warning(strategy_id, f"{symbol} 风控拦截 — {risk_check.reason}")
-            _clear_cooldown(strategy_id, symbol)
-            return
-
         side = "buy" if signal == Signal.LONG else "sell"
         ps = "LONG" if signal == Signal.LONG else "SHORT"
         position_side = "long" if side == "buy" else "short"

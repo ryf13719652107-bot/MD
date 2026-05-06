@@ -19,7 +19,7 @@ async def refresh_coin_pool():
     from ..services.binance_service import get_public_binance
 
     try:
-        binance = get_public_binance()
+        binance = await get_public_binance()
         await coin_pool_service.refresh_pool(binance)
         return {"status": "ok", "message": "选币池刷新成功"}
     except Exception as e:
@@ -43,7 +43,7 @@ async def test_fetch_coin_pool():
     from ..services.binance_service import get_public_binance
 
     try:
-        binance = get_public_binance()
+        binance = await get_public_binance()
         movers = await binance.fetch_top_movers(source="both", limit=20)
         return {
             "success": True,

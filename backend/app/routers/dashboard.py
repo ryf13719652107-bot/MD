@@ -46,7 +46,7 @@ async def get_dashboard(
             try:
                 api_key = decrypt(account.api_key_encrypted)
                 api_secret = decrypt(account.api_secret_encrypted)
-                binance = get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+                binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
                 balance = await asyncio.wait_for(binance.fetch_balance(), timeout=8.0)
                 total_balance = float(balance.get("total", {}).get("USDT", 0) or 0)
                 available_balance = float(balance.get("free", {}).get("USDT", 0) or 0)

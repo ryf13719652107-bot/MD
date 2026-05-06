@@ -15,7 +15,7 @@ async def market_websocket(websocket: WebSocket, symbols: str = Query(default=""
 
     try:
         if symbol_list:
-            binance = get_public_binance()
+            binance = await get_public_binance()
             while True:
                 try:
                     tickers = await binance.watch_tickers(symbol_list)

@@ -305,7 +305,7 @@ _public_created_at: float = 0.0
 _INSTANCE_TTL = 600  # 10 minutes before forcing recreation
 
 
-def get_binance_service(api_key: str, secret: str, testnet: bool = True, hedge_mode: bool = True) -> BinanceService:
+async def get_binance_service(api_key: str, secret: str, testnet: bool = True, hedge_mode: bool = True) -> BinanceService:
     """Get a cached BinanceService for authenticated operations."""
     global _private_instances
     cache_key = f"{api_key[:8]}:{testnet}:{hedge_mode}"
@@ -316,18 +316,28 @@ def get_binance_service(api_key: str, secret: str, testnet: bool = True, hedge_m
         if now - created < _INSTANCE_TTL:
             return svc
         logger.info("Private BinanceService TTL expired for %s, recreating", cache_key[:10])
+        try:
+            await svc.close()
+        except Exception:
+            pass
 
     svc = BinanceService(api_key, secret, testnet, hedge_mode)
     _private_instances[cache_key] = (now, svc)
     return svc
 
 
-def get_public_binance(use_testnet: bool = False) -> BinanceService:
+async def get_public_binance(use_testnet: bool = False) -> BinanceService:
     """Get a cached BinanceService for public market data."""
     global _public_instance, _public_created_at
     from ..config import settings
     testnet = use_testnet if use_testnet else settings.binance_testnet
     now = time.time()
+
+    if _public_instance is not None and (now - _public_created_at) > _INSTANCE_TTL:
+        try:
+            await _public_instance.close()
+        except Exception:
+            pass
 
     if _public_instance is None or (now - _public_created_at) > _INSTANCE_TTL:
         _public_instance = BinanceService(api_key="", secret="", testnet=testnet)

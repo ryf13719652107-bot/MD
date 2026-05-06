@@ -120,7 +120,7 @@ class StrategyScheduler:
                 return None
             api_key = decrypt(account.api_key_encrypted)
             api_secret = decrypt(account.api_secret_encrypted)
-            service = get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+            service = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
             self._binance_services[strategy.account_id] = service
             return service
 
@@ -145,7 +145,7 @@ class StrategyScheduler:
             strategy_log_service.info(strategy_id, "执行周期开始")
 
             auth_binance = await self._get_binance_for_strategy(strategy)
-            public_binance = get_public_binance()
+            public_binance = await get_public_binance()
 
             if not auth_binance:
                 logger.warning("Strategy %d: no auth_binance (account %d)", strategy_id, sync_account_id)
