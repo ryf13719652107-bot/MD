@@ -30,16 +30,6 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db():
-    # Create tables for new deployments (no-op if already exist)
+    # Create tables from current model (no-op if already exist)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-    # Apply pending migrations via Alembic
-    try:
-        from alembic.config import Config
-        from alembic import command
-        alembic_cfg = Config(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
-        alembic_cfg.set_main_option("script_location", os.path.join(os.path.dirname(__file__), "..", "alembic"))
-        command.upgrade(alembic_cfg, "head")
-    except Exception as e:
-        logger.warning("Alembic migration skipped: %s", e)
