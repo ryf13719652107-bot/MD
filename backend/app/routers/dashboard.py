@@ -1,11 +1,12 @@
 import asyncio
-from fastapi import APIRouter, Depends
+import logging
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime, timedelta
+from datetime import timedelta
 from ..database import get_db
+from ..config import now_beijing
 from ..models.strategy import Strategy
-from ..models.position import Position
 from ..models.trade import Trade
 from ..models.bot_config import BotConfig
 from ..models.account import Account
@@ -17,19 +18,28 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("", response_model=DashboardSnapshot)
-async def get_dashboard(db: AsyncSession = Depends(get_db)):
+async def get_dashboard(
+    account_id: int | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
     total_balance = 0.0
     available_balance = 0.0
     leverage_multiplier = 0.0
     account_name = ""
     balance_status = "no_account"
+    account = None
     binance = None
-    # Try to fetch real balance from first account (with timeout)
+    filter_account_id = account_id
 
-        result = await db.execute(select(Account).limit(1))
-        account = result.scalar()
+    # Fetch balance and positions from Binance
+    try:
+        if filter_account_id:
+            result = await db.execute(select(Account).where(Account.id == filter_account_id))
+            account = result.scalar()
+        else:
             result = await db.execute(select(Account).limit(1))
             account = result.scalar()
+
         if account:
             account_name = account.name
             filter_account_id = account.id
@@ -44,32 +54,58 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
             except asyncio.TimeoutError:
                 balance_status = "error"
             except Exception as e:
-            except Exception:
+                logging.error("Balance fetch error for account %s: %s", account.name, e)
+                balance_status = "error"
     except Exception:
         balance_status = "error"
 
     # Active strategies count (filtered by account)
-    # Active strategies count
+    strat_stmt = select(func.count(Strategy.id)).where(Strategy.status == "running")
     if filter_account_id:
         strat_stmt = strat_stmt.where(Strategy.account_id == filter_account_id)
     result = await db.execute(strat_stmt)
     active_strategies = result.scalar() or 0
 
-    # Open positions count
-    result = await db.execute(
-        select(func.count(Position.id)).where(Position.closed_at.is_(None))
-    )
-    open_positions = result.scalar() or 0
+    # Open positions & unrealized PnL from EXCHANGE
+    open_positions = 0
+    unrealized_pnl = 0.0
+    total_notional = 0.0
+    exchange_positions = []
+    if binance:
+        try:
+            positions = await asyncio.wait_for(binance.fetch_positions(), timeout=8.0)
+            for p in positions:
+                contracts = float(p.get("contracts", 0) or 0)
+                if contracts > 0:
+                    open_positions += 1
+                    unrealized_pnl += float(p.get("unrealizedPnl", 0) or 0)
+                    entry_price = float(p.get("entryPrice", 0) or 0)
+                    mark_price = float(p.get("markPrice", 0) or 0)
+                    side = (p.get("side") or "").lower()
+                    symbol = (p.get("symbol") or "").replace("/", "").replace(":USDT", "")
+                    pnl_pct = 0.0
+                    if entry_price > 0:
+                        if side == "short":
+                            pnl_pct = (entry_price - mark_price) / entry_price * 100
+                        else:
+                            pnl_pct = (mark_price - entry_price) / entry_price * 100
+                    notional = float(p.get("notional", 0) or 0)
+                    total_notional += notional
+                    exchange_positions.append({
+                        "symbol": symbol,
+                        "side": side,
+                        "usdt": round(notional, 0),
+                        "entry_price": round(entry_price, 4),
+                        "mark_price": round(mark_price, 4),
+                        "unrealized_pnl": round(float(p.get("unrealizedPnl", 0) or 0), 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                    })
+        except Exception as e:
+            logging.error("Position fetch error for dashboard: %s", e)
 
-    # Unrealized PnL from open positions
-    result = await db.execute(
-        select(Position).where(Position.closed_at.is_(None))
-    )
-    positions = result.scalars().all()
-    unrealized_pnl = sum(p.unrealized_pnl or 0 for p in positions)
     # Leverage = total position notional / wallet balance
     if total_balance > 0 and total_notional > 0:
-    since = datetime.utcnow() - timedelta(hours=24)
+        leverage_multiplier = round(total_notional / total_balance, 1)
 
     # Daily trades and PnL (last 24h, filtered by account)
     since = now_beijing() - timedelta(hours=24)
@@ -105,6 +141,7 @@ async def get_dashboard(db: AsyncSession = Depends(get_db)):
         open_positions=open_positions,
         daily_trades=daily_trade_count,
         win_rate_pct=round(win_rate, 2),
+        leverage_multiplier=leverage_multiplier,
         master_switch=master_switch,
         account_name=account_name,
         balance_status=balance_status,
