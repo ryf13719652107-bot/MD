@@ -1,5 +1,5 @@
 import type { Account, Position, Trade, DashboardData, CoinPoolEntry, KlineData } from '../types';
-import type { Strategy } from '../types/strategy';
+import type { Strategy, StrategyFormData } from '../types/strategy';
 
 const BASE = '/api';
 
@@ -24,12 +24,12 @@ export const api = {
   deleteAccount: (id: number): Promise<void> => request<void>(`/accounts/${id}`, { method: 'DELETE' }),
 
   // Strategies
-  createStrategy: (data: any): Promise<Strategy> =>
+  createStrategy: (data: StrategyFormData): Promise<Strategy> =>
     request<Strategy>('/strategies', { method: 'POST', body: JSON.stringify(data) }),
   listStrategies: (status?: string, accountId?: number): Promise<Strategy[]> => {
     const qs = new URLSearchParams();
     if (status) qs.set('status', status);
-  updateStrategy: (id: number, data: any): Promise<Strategy> =>
+    if (accountId != null) qs.set('account_id', String(accountId));
     const q = qs.toString();
     return request<Strategy[]>(`/strategies${q ? `?${q}` : ''}`);
   },
@@ -38,6 +38,10 @@ export const api = {
     request<Strategy>(`/strategies/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteStrategy: (id: number): Promise<void> => request<void>(`/strategies/${id}`, { method: 'DELETE' }),
   startStrategy: (id: number): Promise<{ status: string }> =>
+    request(`/strategies/${id}/start`, { method: 'POST' }),
+  stopStrategy: (id: number): Promise<{ status: string }> =>
+    request(`/strategies/${id}/stop`, { method: 'POST' }),
+  panicCloseStrategy: (id: number): Promise<{ closed: number; errors: string[] }> =>
     request(`/strategies/${id}/panic-close`, { method: 'POST' }),
   getStrategyLogs: (id: number, limit?: number): Promise<{ time: string; level: string; message: string }[]> =>
     request(`/strategies/${id}/logs${limit ? `?limit=${limit}` : ''}`),
@@ -50,16 +54,22 @@ export const api = {
     if (params?.strategy_id) qs.set('strategy_id', String(params.strategy_id));
     if (params?.symbol) qs.set('symbol', params.symbol);
     if (params?.account_id != null) qs.set('account_id', String(params.account_id));
-  listTrades: (params?: { symbol?: string; limit?: number; offset?: number }): Promise<{ trades: Trade[]; total: number }> => {
+    const q = qs.toString();
+    return request<Position[]>(`/positions${q ? `?${q}` : ''}`);
   },
+  closePosition: (id: number): Promise<{ status: string }> =>
     request(`/positions/${id}/close`, { method: 'POST' }),
 
   // Trades
   listTrades: (params?: { strategy_id?: number; symbol?: string; account_id?: number; limit?: number; offset?: number }): Promise<{ trades: Trade[]; total: number }> => {
     const qs = new URLSearchParams();
+    if (params?.strategy_id) qs.set('strategy_id', String(params.strategy_id));
+    if (params?.symbol) qs.set('symbol', params.symbol);
     if (params?.account_id != null) qs.set('account_id', String(params.account_id));
     if (params?.limit) qs.set('limit', String(params.limit));
-  getDashboard: (): Promise<DashboardData> => request<DashboardData>('/dashboard'),
+    if (params?.offset) qs.set('offset', String(params.offset));
+    const q = qs.toString();
+    return request(`/trades${q ? `?${q}` : ''}`);
   },
   deleteTrade: (id: number): Promise<void> => request(`/trades/${id}`, { method: 'DELETE' }),
   deleteAllTrades: (): Promise<void> => request('/trades', { method: 'DELETE' }),

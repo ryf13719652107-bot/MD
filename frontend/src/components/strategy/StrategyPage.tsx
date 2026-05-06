@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { Strategy } from '../../types/strategy';
 import type { Account } from '../../types';
-import { Play, Square, AlertTriangle, Edit, Trash2, Plus } from 'lucide-react';
+import StrategyForm from './StrategyForm';
 import { Play, Square, AlertTriangle, Edit, Trash2, Plus, Eye } from 'lucide-react';
 
 export default function StrategyPage() {
@@ -20,8 +21,12 @@ export default function StrategyPage() {
     ]);
     setStrategies(s);
     setAccounts(a);
-    await api.startStrategy(id);
-    load();
+  };
+
+  useEffect(() => { load(); }, [selectedAccountId]);
+
+  const handleStart = async (id: number) => {
+    try {
       await api.startStrategy(id);
       load();
     } catch (e: any) {
@@ -83,13 +88,13 @@ export default function StrategyPage() {
         />
       )}
 
-                <h3 className="font-semibold">{s.name}</h3>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {strategies.map((s) => (
           <div key={s.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <div className="flex items-center justify-between mb-3">
               <div>
                 <Link to={`/strategies/${s.id}`} className="font-semibold hover:text-blue-400 transition-colors">{s.name}</Link>
-                <span className={`text-xs px-2 py-0.5 rounded ${
+                <span className={`ml-2 text-xs px-2 py-0.5 rounded ${
                   s.direction === 'long' ? 'bg-green-600/20 text-green-400' : 'bg-red-600/20 text-red-400'
                 }`}>
                   {s.direction === 'long' ? '做多' : '做空'}
@@ -98,6 +103,9 @@ export default function StrategyPage() {
                   s.status === 'running' ? 'bg-green-600/20 text-green-400' :
                   s.status === 'error' ? 'bg-red-600/20 text-red-400' :
                   'bg-gray-700 text-gray-400'
+                }`}>
+                  {s.status === 'running' ? '运行中' : s.status === 'error' ? '异常' : '已停止'}
+                </span>
               </div>
               <div className="flex items-center gap-1">
                 <Link to={`/strategies/${s.id}`} className="p-1.5 text-blue-400 hover:bg-blue-600/20 rounded" title="查看详情">
@@ -122,8 +130,12 @@ export default function StrategyPage() {
                   <Trash2 size={16} />
                 </button>
               </div>
-              <div>RSI周期: <span className="text-gray-200">{s.rsi_period}</span></div>
-              <div>RSI入场: <span className="text-gray-200">{s.direction === 'long' ? '<' : '>'} {s.rsi_entry_threshold}</span></div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs text-gray-400">
+              <div>交易对: <span className="text-gray-200">{s.symbol || '选币池自动'}</span></div>
+              <div>K线周期: <span className="text-gray-200">{s.timeframe}</span></div>
+              {s.signal_source === 'wavetrend' ? (
                 <div>WT参数: <span className="text-gray-200">通道{s.wt_channel_length} 均线{s.wt_average_length}</span></div>
               ) : (
                 <div>RSI周期: <span className="text-gray-200">{s.rsi_period}</span></div>
@@ -131,13 +143,12 @@ export default function StrategyPage() {
               <div>信号: <span className="text-gray-200">{s.signal_source === 'wavetrend' ? 'WaveTrend' : `RSI ${s.direction === 'long' ? '<' : '>'} ${s.rsi_entry_threshold}`}</span></div>
               <div>首单仓位: <span className="text-gray-200">{s.base_qty_type === 'margin_pct' ? `保证金${s.base_qty_value}%` : `${s.base_qty_value} USDT`}</span></div>
               <div>加仓倍数: <span className="text-gray-200">x{s.martingale_mult}</span></div>
-              <div>运行间隔: <span className="text-gray-200">{s.run_interval_seconds}秒</span></div>
               <div>最大层数: <span className="text-gray-200">{s.max_layers}</span></div>
               <div>跌幅触发: <span className="text-gray-200">{s.price_drop_pct}%</span></div>
               <div>止盈: <span className="text-gray-200">{s.take_profit_pct}% {s.take_profit_limit_order ? '(限价单)' : '(市价单)'}</span></div>
               <div>止损: <span className="text-gray-200">{s.stop_loss_enabled ? `${s.stop_loss_pct}%` : '已禁用'}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>
-                    RSI {s.last_rsi} → {s.last_signal === 'long' ? '做多' : s.last_signal === 'short' ? '做空' : '无信号'}
+              <div>选币池刷新: <span className="text-gray-200">{Math.round(s.coin_pool_refresh_seconds / 60)}分钟</span></div>
               {s.last_rsi != null && (
                 <div className="col-span-2 mt-1 pt-1 border-t border-gray-800">
                   <span className="text-gray-500">最近信号: </span>
