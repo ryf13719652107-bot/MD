@@ -138,12 +138,14 @@ class PositionManager:
         open_positions = list(result.scalars().all())
 
         if open_positions:
-            strategy_log_service.info(strategy_id, f"{symbol} 已有{len(open_positions)}个持仓，跳过开仓检查")
+            strategy_log_service.info(strategy_id, f"{symbol} 已有{len(open_positions)}个持仓，进入管理")
 
         # --- Current price ---
         try:
             current_price = float(klines[-1][4])
         except (TypeError, ValueError, IndexError):
+            logger.warning("Strategy %d: %s invalid kline data, skipping", strategy_id, symbol)
+            strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
             return
 
         # --- Base quantity ---
@@ -151,7 +153,7 @@ class PositionManager:
         if strategy.base_qty_type == "margin_pct":
             if total_margin <= 0:
                 logger.warning("Strategy %d: cannot open %s — total_margin=%.2f", strategy_id, symbol, total_margin)
-                strategy_log_service.warning(strategy_id, f"{symbol} 无法开仓 — 余额为0，请检查API密钥")
+                strategy_log_service.warning(strategy_id, f"{symbol} 无法开仓 — 余额为0(当前{total_margin:.1f})")
                 return
             base_qty = (total_margin * strategy.base_qty_value / 100) / current_price
         elif strategy.base_qty_type == "usdt":
@@ -165,6 +167,7 @@ class PositionManager:
 
         # --- Open new position ---
         if signal != Signal.NEUTRAL and not open_positions:
+            logger.info("Strategy %d: %s signal=%s, attempting to open...", strategy_id, symbol, signal.value)
             # Skip if exchange already has this position (dedup — only prevents duplicate opens)
             if exchange_open_set and (symbol, signal.value) in exchange_open_set:
                 strategy_log_service.info(strategy_id, f"{symbol} 交易所已有仓位，跳过开仓")
