@@ -45,10 +45,39 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
     api_secret = decrypt(account.api_secret_encrypted)
     binance = get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
+    # Cancel existing TP limit order before closing
+    if position.tp_limit_order_id:
+        try:
+            await binance.cancel_order(position.tp_limit_order_id, position.symbol)
+        except Exception:
+            pass
+
     result = await binance.close_position(position.symbol, position.side)
     if not result or not result.get("id"):
         raise HTTPException(status_code=500, detail="Exchange did not confirm the close order")
 
+    # Create Trade record
+    exit_price = position.mark_price or position.entry_price
+    exit_pnl = (exit_price - position.entry_price) * position.quantity if position.side == "long" else (position.entry_price - exit_price) * position.quantity
+    pnl_pct = ((exit_price - position.entry_price) / position.entry_price * 100) if position.side == "long" else ((position.entry_price - exit_price) / position.entry_price * 100)
+
+    from ..models.trade import Trade
+    trade = Trade(
+        strategy_id=position.strategy_id,
+        account_id=position.account_id,
+        symbol=position.symbol,
+        side=position.side,
+        quantity=position.quantity,
+        entry_price=position.entry_price,
+        exit_price=exit_price,
+        realized_pnl=exit_pnl,
+        pnl_pct=round(pnl_pct, 2),
+        entry_time=position.opened_at,
+        exit_time=now_beijing(),
+        layer=position.layer,
+        close_reason="manual",
+    )
+    db.add(trade)
     position.closed_at = now_beijing()
     await db.commit()
 

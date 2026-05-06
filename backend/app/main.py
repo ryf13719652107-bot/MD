@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI):
     async with async_session() as session:
         from sqlalchemy import select
         result = await session.execute(
-            select(Strategy).where(Strategy.use_coin_pool == True).order_by(Strategy.coin_pool_refresh_seconds.desc()).limit(1)
+            select(Strategy).where(Strategy.use_coin_pool == True, Strategy.status == "running").order_by(Strategy.coin_pool_refresh_seconds).limit(1)
         )
         strategy_with_pool = result.scalar()
         if strategy_with_pool:

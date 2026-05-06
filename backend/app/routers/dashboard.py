@@ -37,7 +37,7 @@ async def get_dashboard(
             result = await db.execute(select(Account).where(Account.id == filter_account_id))
             account = result.scalar()
         else:
-            result = await db.execute(select(Account).limit(1))
+            result = await db.execute(select(Account).order_by(Account.id).limit(1))
             account = result.scalar()
 
         if account:

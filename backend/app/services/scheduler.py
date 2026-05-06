@@ -150,6 +150,7 @@ class StrategyScheduler:
             if not auth_binance:
                 logger.warning("Strategy %d: no auth_binance (account %d)", strategy_id, sync_account_id)
                 strategy_log_service.warning(strategy_id, "无法获取API连接 — 请检查账户配置")
+                return
 
             # Check margin threshold
             total_margin = 0.0
@@ -167,7 +168,8 @@ class StrategyScheduler:
                         if self._scheduler.get_job(job_id):
                             self._scheduler.remove_job(job_id)
                         logger.warning("Strategy %d margin %.2f below threshold %.2f — stopping and closing all positions", strategy_id, total_margin, strategy.margin_threshold)
-                        # Close all open positions for this strategy
+                        # Close all open positions for this strategy AND mark them in DB
+                        from ..models.position import Position as PosModel
                         try:
                             eps = await auth_binance.fetch_positions()
                             for ep in eps:
@@ -179,9 +181,19 @@ class StrategyScheduler:
                                 ps = "LONG" if side == "long" else "SHORT"
                                 cs = "sell" if side == "long" else "buy"
                                 try:
-                                    await auth_binance.create_market_order(sym, cs, contracts, reduce_only=True, position_side=ps)
-                                except Exception:
-                                    pass
+                                    order = await auth_binance.create_market_order(sym, cs, contracts, reduce_only=True, position_side=ps)
+                                    # Mark local positions as closed
+                                    stmt_pos = select(PosModel).where(
+                                        PosModel.strategy_id == strategy_id, PosModel.closed_at.is_(None),
+                                        PosModel.symbol == sym, PosModel.side == side
+                                    )
+                                    pos_result = await session.execute(stmt_pos)
+                                    for lp2 in pos_result.scalars().all():
+                                        lp2.closed_at = now_beijing()
+                                    logger.info("Margin stop: closed %s %s (contracts=%s)", sym, side, contracts)
+                                except Exception as ex:
+                                    logger.error("Margin stop: failed to close %s %s: %s", sym, side, ex)
+                            await session.commit()
                         except Exception as e:
                             logger.error("Margin stop: failed to close positions for strategy %d: %s", strategy_id, e)
                         return

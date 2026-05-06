@@ -104,7 +104,8 @@ async def stop_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
     await strategy_scheduler.remove_strategy(strategy_id)
-    strategy.status = "stopped"
+    # remove_strategy sets status in its own session; refresh and commit here too for consistency
+    await db.refresh(strategy)
     await db.commit()
     return {"status": "stopped", "id": strategy_id}
 
@@ -161,14 +162,15 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         logging.error("Panic close: fetch_positions failed: %s", e)
         errors.append(f"fetch: {e}")
 
-    # Also close local DB positions for this strategy
-    stmt = select(Position).where(
-        Position.strategy_id == strategy_id, Position.closed_at.is_(None)
-    )
-    result = await db.execute(stmt)
-    local_positions = result.scalars().all()
-    for lp in local_positions:
-        lp.closed_at = now_beijing()
+    # Close local DB positions only for successfully closed exchange positions
+    if closed > 0:
+        stmt = select(Position).where(
+            Position.strategy_id == strategy_id, Position.closed_at.is_(None)
+        )
+        result = await db.execute(stmt)
+        local_positions = result.scalars().all()
+        for lp in local_positions:
+            lp.closed_at = now_beijing()
 
     await db.commit()
     await strategy_scheduler.remove_strategy(strategy_id)

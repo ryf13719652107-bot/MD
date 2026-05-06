@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _kline_cache: dict[tuple[str, str], tuple[float, list]] = {}
 _KLINE_CACHE_TTL = 30.0
 _signal_cooldowns: dict[tuple[int, str], float] = {}
-_signal_cooldown_lock = None  # set by scheduler after import
+_signal_cooldown_lock = asyncio.Lock()
 _SIGNAL_COOLDOWN_SECONDS = 60
 
 
@@ -163,13 +163,12 @@ class PositionManager:
             await session.flush()
             return
 
-        # --- Skip if exchange already has this position (dedup, in-memory check) ---
-        if exchange_open_set and (symbol, signal.value) in exchange_open_set:
-            strategy_log_service.info(strategy_id, f"{symbol} 交易所已有仓位，跳过")
-            return
-
         # --- Open new position ---
         if signal != Signal.NEUTRAL and not open_positions:
+            # Skip if exchange already has this position (dedup — only prevents duplicate opens)
+            if exchange_open_set and (symbol, signal.value) in exchange_open_set:
+                strategy_log_service.info(strategy_id, f"{symbol} 交易所已有仓位，跳过开仓")
+                return
             await self._open_position(session, strategy, symbol, auth_binance, public_binance, signal, base_qty, current_price, total_margin, leverage, rsi)
             return
 
@@ -229,7 +228,7 @@ class PositionManager:
                 close_side = "sell" if position_side == "long" else "buy"
                 for attempt in range(2):  # retry once
                     try:
-                        tp_order = await auth_binance.create_limit_order(symbol, close_side, base_qty, tp_price, reduce_only=False, position_side=ps)
+                        tp_order = await auth_binance.create_limit_order(symbol, close_side, base_qty, tp_price, reduce_only=True, position_side=ps)
                         tp_order_id = tp_order.get("id", "")
                         if tp_order_id:
                             pos.tp_limit_order_id = tp_order_id
@@ -421,7 +420,7 @@ class PositionManager:
                 close_side = "sell" if pos_side == "long" else "buy"
                 for attempt in range(2):
                     try:
-                        tp_order = await auth_binance.create_limit_order(symbol, close_side, new_total, tp_price, reduce_only=False, position_side=ps)
+                        tp_order = await auth_binance.create_limit_order(symbol, close_side, new_total, tp_price, reduce_only=True, position_side=ps)
                         tp_order_id = tp_order.get("id", "")
                         if tp_order_id:
                             pos.tp_limit_order_id = tp_order_id

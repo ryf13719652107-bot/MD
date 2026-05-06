@@ -19,7 +19,7 @@ class Strategy(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=True)  # NULL = use coin pool
 
     # Signal source
-    signal_source: Mapped[str] = mapped_column(String(20), default="rsi", server_default="rsi")  # 'rsi' or 'wavetrend'
+    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' or 'wavetrend'
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)
@@ -43,10 +43,10 @@ class Strategy(Base):
 
     # Take profit params
     take_profit_pct: Mapped[float] = mapped_column(Float, default=2.0)
-    take_profit_limit_order: Mapped[bool] = mapped_column(Boolean, default=False)
+    take_profit_limit_order: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Stop loss
-    stop_loss_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    stop_loss_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     stop_loss_pct: Mapped[float] = mapped_column(Float, default=5.0)
 
     # Slippage protection
@@ -57,7 +57,7 @@ class Strategy(Base):
 
     # Coin pool
     use_coin_pool: Mapped[bool] = mapped_column(Boolean, default=True)
-    coin_pool_source: Mapped[str] = mapped_column(String(20), default="both")  # 'gainers', 'losers', 'both'
+    coin_pool_source: Mapped[str] = mapped_column(String(20), default="gainers")  # 'gainers', 'losers', 'both'
     coin_pool_refresh_seconds: Mapped[int] = mapped_column(Integer, default=3600)  # how often to refresh coin pool
     coin_pool_fetch_mode: Mapped[str] = mapped_column(String(20), default="interval")  # 'immediate' or 'interval'
     coin_pool_top_n: Mapped[int] = mapped_column(Integer, default=20, server_default="20")

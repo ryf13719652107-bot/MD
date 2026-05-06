@@ -229,7 +229,7 @@ class BinanceService:
         close_side = "sell" if side == "long" else "buy"
         return await self.create_limit_order(
             symbol, close_side, total_contracts, price,
-            reduce_only=False, position_side=position_side,
+            reduce_only=True, position_side=position_side,
         )
 
     # ---- WebSocket (Public) ----

@@ -44,7 +44,7 @@ class MartingaleEngine:
         if side == "long":
             price_drop_pct = ((last_entry_price - current_price) / last_entry_price) * 100
         else:
-            price_drop_pct = ((last_entry_price - current_price) / last_entry_price) * 100
+            price_drop_pct = ((current_price - last_entry_price) / last_entry_price) * 100
 
         should_add = price_drop_pct >= self.price_drop_pct
 
