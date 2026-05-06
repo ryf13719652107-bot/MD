@@ -28,20 +28,20 @@ class RiskManager:
     ) -> RiskCheckResult:
         """Check if a new position can be opened based on risk limits."""
         # Count open positions
-        active_positions = [p for p in open_positions if p.get("closed_at") is None]
+        active_positions = [p for p in open_positions if p.closed_at is None]
         if len(active_positions) >= self.max_total_positions:
             return RiskCheckResult(False, f"Max total positions ({self.max_total_positions}) reached")
 
         # Count positions per symbol
         symbol_positions = [
-            p for p in active_positions if p.get("symbol", "").replace("/", "") == symbol.replace("/", "")
+            p for p in active_positions if (p.symbol or "").replace("/", "") == symbol.replace("/", "")
         ]
         if len(symbol_positions) >= self.max_position_per_symbol:
             return RiskCheckResult(False, f"Max positions per symbol ({self.max_position_per_symbol}) reached")
 
         # Check exposure ratio
         total_exposure = sum(
-            abs(float(p.get("quantity", 0))) * float(p.get("mark_price", 0) or p.get("entry_price", 0))
+            abs(float(p.quantity or 0)) * float(p.mark_price or p.entry_price or 0)
             for p in active_positions
         )
         if total_balance > 0 and (total_exposure + new_position_value) / total_balance > self.max_exposure_ratio:
