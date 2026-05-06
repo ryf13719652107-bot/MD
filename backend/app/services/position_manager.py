@@ -22,7 +22,7 @@ _kline_cache: dict[tuple[str, str], tuple[float, list]] = {}
 _KLINE_CACHE_TTL = 30.0
 _signal_cooldowns: dict[tuple[int, str], float] = {}
 _signal_cooldown_lock = asyncio.Lock()
-_SIGNAL_COOLDOWN_SECONDS = 60
+_SIGNAL_COOLDOWN_SECONDS = 5
 
 
 def set_cooldown_lock(lock):
