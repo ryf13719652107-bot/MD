@@ -34,8 +34,11 @@ export default function PositionsPage() {
     exchangeMap.set(`${ep.symbol}_${ep.side}`, ep);
   }
 
-  const merged = dbPositions.map((dp) => {
+  // Merge DB + exchange: start from DB, enrich with exchange data
+  const seen = new Set<string>();
+  const merged: any[] = dbPositions.map((dp) => {
     const key = `${dp.symbol}_${dp.side}`;
+    seen.add(key);
     const ep = exchangeMap.get(key);
     return {
       ...dp,
@@ -45,6 +48,25 @@ export default function PositionsPage() {
       pnl_pct: ep?.pnl_pct,
     };
   });
+
+  // Add exchange-only positions (not in DB)
+  for (const ep of exchangePositions) {
+    const key = `${ep.symbol}_${ep.side}`;
+    if (!seen.has(key)) {
+      merged.push({
+        symbol: ep.symbol,
+        side: ep.side,
+        quantity: 0,
+        entry_price: ep.entry_price,
+        mark_price: ep.mark_price,
+        unrealized_pnl: ep.unrealized_pnl,
+        pnl_pct: ep.pnl_pct,
+        usdt: ep.usdt,
+        layer: 0,
+        opened_at: '',
+      });
+    }
+  }
 
   return (
     <div className="space-y-4">
