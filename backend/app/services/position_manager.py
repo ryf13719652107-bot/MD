@@ -101,10 +101,9 @@ class PositionManager:
             klines = await public_binance.fetch_klines(symbol, strategy.timeframe, limit=limit)
             _set_cached_klines(symbol, strategy.timeframe, klines)
 
-        if len(klines) > 1:
-            klines = klines[:-1]
-
         # --- Generate signal based on source ---
+        # Use the just-closed candle for signal detection (no lag).
+        # Scheduler is aligned to candle close times, so klines[-1] is complete.
         rsi = 0.0  # always defined, used for logging
         signal_label = "RSI"
         if strategy.signal_source == "wavetrend":
