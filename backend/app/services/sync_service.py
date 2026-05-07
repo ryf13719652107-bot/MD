@@ -42,11 +42,14 @@ class PositionSyncService:
                     side = (ep.get("side") or "").lower()
                     exchange_map[(sym, side)] = ep
 
-                # Close local positions not on exchange — just mark closed, don't create fake trades
+                # Close local positions not on exchange — skip if has TP order (let tick handle it)
                 sync_now = now_beijing()
                 for lp in local_positions:
                     lp_key = (lp.symbol.replace("/", "").replace(":USDT", ""), lp.side.lower())
                     if lp_key not in exchange_map:
+                        if lp.tp_limit_order_id:
+                            logger.info("Sync: position %d (%s %s) missing on exchange but has TP order — skip, tick will detect", lp.id, lp.symbol, lp.side)
+                            continue
                         lp.closed_at = sync_now
                         logger.warning("Sync: position %d (%s %s) missing on exchange — marked closed (no trade record)", lp.id, lp.symbol, lp.side)
 
