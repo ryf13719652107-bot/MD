@@ -153,24 +153,7 @@ class StrategyScheduler:
             if not auth_binance:
                 return
             try:
-                # Load all open positions with TP orders
-                from ..models.position import Position
-                stmt = select(Position).where(
-                    Position.strategy_id == strategy_id,
-                    Position.closed_at.is_(None),
-                )
-                result = await session.execute(stmt)
-                open_positions = list(result.scalars().all())
-                has_tp = [p for p in open_positions if p.tp_limit_order_id]
-                if not has_tp:
-                    return
-                # Check TP fills without iterating all coin pool symbols
-                for p in has_tp:
-                    try:
-                        await self._position_mgr.check_tp_fills(session, strategy, auth_binance, 0)
-                        break  # one close per tick
-                    except Exception:
-                        pass
+                await self._position_mgr.check_tp_fills(session, strategy, auth_binance, 0)
                 await session.commit()
             except Exception as e:
                 logger.error("Strategy %d TP check error: %s", strategy_id, e)

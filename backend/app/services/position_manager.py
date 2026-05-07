@@ -332,7 +332,7 @@ class PositionManager:
                     logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, p.symbol, avg_fill)
                     return  # one close per tick is enough
             except (Exception, asyncio.TimeoutError):
-                pass  # silently skip, will retry next cycle
+                logger.warning("Strategy %d: TP order check failed for %s %s, retrying next cycle", strategy_id, p.symbol, p.side)
 
     async def _close_positions(self, session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, current_price, pre_exit_price: float = 0.0):
         strategy_id = strategy.id
