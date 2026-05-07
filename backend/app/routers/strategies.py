@@ -137,38 +137,28 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
     api_secret = decrypt(account.api_secret_encrypted)
     binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
-    # Load this strategy's open DB positions FIRST — determines what to close
+    # Load this strategy's open DB positions (for trade record matching)
     stmt = select(Position).where(
         Position.strategy_id == strategy_id, Position.closed_at.is_(None)
     )
     result = await db.execute(stmt)
     db_positions = list(result.scalars().all())
 
-    if not db_positions:
-        await strategy_scheduler.remove_strategy(strategy_id)
-        return {"closed": 0, "failed": 0, "results": [], "id": strategy_id}
-
-    # Build set of (symbol, side) keys belonging to THIS strategy
-    strategy_keys: set[tuple[str, str]] = set()
-    for p in db_positions:
-        strategy_keys.add((p.symbol.upper(), p.side))
-
-    # Get exchange positions and filter to strategy's keys only
+    # Get ALL exchange positions — emergency close must close everything
     try:
         raw_positions = await binance.fetch_positions()
     except Exception as e:
         logging.error("Panic close: fetch_positions failed: %s", e)
         raise HTTPException(status_code=502, detail=f"无法获取交易所持仓: {e}")
 
+    # Build map of (symbol, side) → exchange contracts (all positions)
     exchange_map: dict[tuple[str, str], float] = {}
     for ep in raw_positions:
         contracts = float(ep.get("contracts", 0) or 0)
         if contracts <= 0:
             continue
-        sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "").upper()
+        sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
         sd = (ep.get("side") or "").lower()
-        if (sym, sd) not in strategy_keys:
-            continue  # skip positions belonging to other strategies
         exchange_map[(sym, sd)] = exchange_map.get((sym, sd), 0) + contracts
 
     if not exchange_map:
