@@ -132,18 +132,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
     api_secret = decrypt(account.api_secret_encrypted)
     binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
-    # Load this strategy's open DB positions
-    stmt = select(Position).where(
-        Position.strategy_id == strategy_id, Position.closed_at.is_(None)
-    )
-    result = await db.execute(stmt)
-    db_positions = list(result.scalars().all())
-
-    if not db_positions:
-        await strategy_scheduler.remove_strategy(strategy_id)
-        return {"closed": 0, "results": [], "id": strategy_id}
-
-    # Get actual exchange positions — the source of truth
+    # Get actual exchange positions — the source of truth (do this FIRST, regardless of DB state)
     try:
         raw_positions = await binance.fetch_positions()
     except Exception as e:
@@ -159,6 +148,17 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
         sd = (ep.get("side") or "").lower()
         exchange_map[(sym, sd)] = exchange_map.get((sym, sd), 0) + contracts
+
+    if not exchange_map:
+        await strategy_scheduler.remove_strategy(strategy_id)
+        return {"closed": 0, "failed": 0, "results": [], "id": strategy_id}
+
+    # Load this strategy's open DB positions (for record keeping only)
+    stmt = select(Position).where(
+        Position.strategy_id == strategy_id, Position.closed_at.is_(None)
+    )
+    result = await db.execute(stmt)
+    db_positions = list(result.scalars().all())
 
     results = []
     now = now_beijing()
