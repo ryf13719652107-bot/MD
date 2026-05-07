@@ -46,7 +46,11 @@ export interface DashboardData {
   total_balance: number;
   available_balance: number;
   unrealized_pnl: number;
+  unrealized_pnl_long: number;
+  unrealized_pnl_short: number;
   daily_pnl: number;
+  daily_pnl_long: number;
+  daily_pnl_short: number;
   daily_pnl_pct: number;
   active_strategies: number;
   open_positions: number;

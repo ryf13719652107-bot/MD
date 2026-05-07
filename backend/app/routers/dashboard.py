@@ -69,6 +69,8 @@ async def get_dashboard(
     # Open positions & unrealized PnL from EXCHANGE
     open_positions = 0
     unrealized_pnl = 0.0
+    unrealized_pnl_long = 0.0
+    unrealized_pnl_short = 0.0
     total_notional = 0.0
     exchange_positions = []
     if binance:
@@ -78,11 +80,16 @@ async def get_dashboard(
                 contracts = float(p.get("contracts", 0) or 0)
                 if contracts > 0:
                     open_positions += 1
-                    unrealized_pnl += float(p.get("unrealizedPnl", 0) or 0)
                     entry_price = float(p.get("entryPrice", 0) or 0)
                     mark_price = float(p.get("markPrice", 0) or 0)
                     side = (p.get("side") or "").lower()
                     symbol = (p.get("symbol") or "").replace("/", "").replace(":USDT", "")
+                    upnl = float(p.get("unrealizedPnl", 0) or 0)
+                    unrealized_pnl += upnl
+                    if side == "short":
+                        unrealized_pnl_short += upnl
+                    else:
+                        unrealized_pnl_long += upnl
                     pnl_pct = 0.0
                     if entry_price > 0:
                         if side == "short":
@@ -116,6 +123,8 @@ async def get_dashboard(
     daily_trades = result.scalars().all()
     daily_trade_count = len(daily_trades)
     daily_pnl = sum(t.realized_pnl for t in daily_trades)
+    daily_pnl_long = sum(t.realized_pnl for t in daily_trades if t.side == "long")
+    daily_pnl_short = sum(t.realized_pnl for t in daily_trades if t.side == "short")
 
     # Win rate
     winning = sum(1 for t in daily_trades if t.realized_pnl > 0)
@@ -135,7 +144,11 @@ async def get_dashboard(
         total_balance=round(total_balance, 2),
         available_balance=round(available_balance, 2),
         unrealized_pnl=round(unrealized_pnl, 2),
+        unrealized_pnl_long=round(unrealized_pnl_long, 2),
+        unrealized_pnl_short=round(unrealized_pnl_short, 2),
         daily_pnl=round(daily_pnl, 2),
+        daily_pnl_long=round(daily_pnl_long, 2),
+        daily_pnl_short=round(daily_pnl_short, 2),
         daily_pnl_pct=daily_pnl_pct,
         active_strategies=active_strategies,
         open_positions=open_positions,
