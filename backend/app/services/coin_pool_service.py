@@ -16,7 +16,7 @@ class CoinPoolService:
         self._config = {
             "refresh_interval_seconds": 3600,
             "pool_source": "both",
-            "max_symbols": 50,
+            "max_symbols": 30,
         }
         self._last_refresh_ok: bool = False
         self._last_refresh_time: float = 0.0

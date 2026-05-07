@@ -86,6 +86,11 @@ async def start_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
     from ..services.coin_pool_service import coin_pool_service
     from ..services.binance_service import get_public_binance
 
+    # Ensure coin pool fetches enough symbols to cover this strategy's top_n
+    current_max = coin_pool_service.config.get("max_symbols", 30)
+    if strategy.coin_pool_top_n > current_max:
+        coin_pool_service.update_config(max_symbols=strategy.coin_pool_top_n)
+
     # Immediate coin pool refresh if configured
     if strategy.use_coin_pool and strategy.coin_pool_fetch_mode == "immediate":
         try:
