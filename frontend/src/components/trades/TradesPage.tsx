@@ -88,8 +88,8 @@ export default function TradesPage() {
                   {t.side === 'long' ? '做多' : '做空'}
                 </td>
                 <td className="p-3 font-mono">{(t.quantity * t.exit_price).toFixed(2)}</td>
-                <td className="p-3">{t.entry_price}</td>
-                <td className="p-3">{t.exit_price}</td>
+                <td className="p-3">{t.entry_price?.toFixed(8)}</td>
+                <td className="p-3">{t.exit_price?.toFixed(8)}</td>
                 <td className={`p-3 ${t.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                   {t.realized_pnl >= 0 ? '+' : ''}{t.realized_pnl.toFixed(4)}
                 </td>

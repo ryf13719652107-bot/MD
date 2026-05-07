@@ -304,8 +304,8 @@ export default function StrategyDetailPage() {
                         {t.side === 'long' ? '多' : '空'}
                       </span>
                     </td>
-                    <td className="py-1.5 px-2 text-right text-gray-200 font-mono">{t.entry_price?.toFixed(4)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-200 font-mono">{t.exit_price?.toFixed(4)}</td>
+                    <td className="py-1.5 px-2 text-right text-gray-200 font-mono">{t.entry_price?.toFixed(8)}</td>
+                    <td className="py-1.5 px-2 text-right text-gray-200 font-mono">{t.exit_price?.toFixed(8)}</td>
                     <td className={`py-1.5 px-2 text-right font-mono ${pnlColor(t.realized_pnl)}`}>
                       {t.realized_pnl >= 0 ? '+' : ''}{t.realized_pnl?.toFixed(2)}
                     </td>
