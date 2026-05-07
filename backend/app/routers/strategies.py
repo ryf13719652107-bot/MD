@@ -165,19 +165,33 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
 
     # Close each exchange position
     for (symbol, side), contracts in exchange_map.items():
+        close_side = "sell" if side == "long" else "buy"
+        ps = "LONG" if side == "long" else "SHORT"
         try:
-            close_side = "sell" if side == "long" else "buy"
-            ps = "LONG" if side == "long" else "SHORT"
             order = await binance.create_market_order(
                 symbol, close_side, contracts,
                 reduce_only=True, position_side=ps,
             )
-            exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
-            results.append({"symbol": symbol, "side": side, "status": "ok", "exit_price": exit_price})
-            logging.info("Panic close: closed %s %s contracts=%.4f", symbol, side, contracts)
-        except Exception as e:
-            results.append({"symbol": symbol, "side": side, "status": "failed", "error": str(e)})
-            logging.error("Panic close: failed %s %s: %s", symbol, side, e)
+        except Exception as e1:
+            err_str = str(e1)
+            # -1106 means reduceOnly rejected — retry without it (one-way mode)
+            if "-1106" in err_str:
+                try:
+                    order = await binance.create_market_order(
+                        symbol, close_side, contracts,
+                        reduce_only=False, position_side=ps,
+                    )
+                except Exception as e2:
+                    results.append({"symbol": symbol, "side": side, "status": "failed", "error": str(e2)})
+                    logging.error("Panic close: failed %s %s: %s", symbol, side, e2)
+                    continue
+            else:
+                results.append({"symbol": symbol, "side": side, "status": "failed", "error": err_str})
+                logging.error("Panic close: failed %s %s: %s", symbol, side, e1)
+                continue
+        exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
+        results.append({"symbol": symbol, "side": side, "status": "ok", "exit_price": exit_price})
+        logging.info("Panic close: closed %s %s contracts=%.4f", symbol, side, contracts)
 
     # Match to DB positions and mark closed
     for (symbol, side), contracts in exchange_map.items():
