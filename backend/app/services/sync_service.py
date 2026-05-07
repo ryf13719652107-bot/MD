@@ -4,7 +4,6 @@ import logging
 from sqlalchemy import select
 from ..database import async_session
 from ..models.position import Position
-from ..models.trade import Trade
 from ..config import now_beijing
 
 logger = logging.getLogger(__name__)
@@ -43,50 +42,13 @@ class PositionSyncService:
                     side = (ep.get("side") or "").lower()
                     exchange_map[(sym, side)] = ep
 
-                # Close local positions not on exchange — create Trade records
+                # Close local positions not on exchange — just mark closed, don't create fake trades
                 sync_now = now_beijing()
                 for lp in local_positions:
                     lp_key = (lp.symbol.replace("/", "").replace(":USDT", ""), lp.side.lower())
                     if lp_key not in exchange_map:
-                        # Try to get real fill price, fallback to TP price > mark_price
-                        close_reason = "sync"
-                        exit_price = lp.mark_price or lp.entry_price
-                        if lp.tp_limit_order_id and lp.take_profit_price:
-                            close_reason = "take_profit"
-                            exit_price = lp.take_profit_price  # best estimate
-                            if binance_service:
-                                try:
-                                    formatted = binance_service._format_symbol(lp.symbol)
-                                    oi = await binance_service.exchange.fetch_order(lp.tp_limit_order_id, formatted)
-                                    avg = float(oi.get("average", 0) or 0)
-                                    if avg > 0:
-                                        exit_price = avg
-                                except Exception:
-                                    pass
-                        else:
-                            exit_price = lp.mark_price or lp.entry_price
-                        exit_pnl = (exit_price - lp.entry_price) * lp.quantity if lp.side == "long" else (lp.entry_price - exit_price) * lp.quantity
-                        pnl_pct = 0
-                        if lp.entry_price > 0:
-                            pnl_pct = ((exit_price - lp.entry_price) / lp.entry_price * 100) if lp.side == "long" else ((lp.entry_price - exit_price) / lp.entry_price * 100)
-                        trade = Trade(
-                            strategy_id=lp.strategy_id,
-                            account_id=lp.account_id,
-                            symbol=lp.symbol,
-                            side=lp.side,
-                            quantity=lp.quantity,
-                            entry_price=lp.entry_price,
-                            exit_price=exit_price,
-                            realized_pnl=exit_pnl,
-                            pnl_pct=round(pnl_pct, 2),
-                            entry_time=lp.opened_at,
-                            exit_time=sync_now,
-                            layer=lp.layer,
-                            close_reason=close_reason,
-                        )
-                        session.add(trade)
                         lp.closed_at = sync_now
-                        logger.warning("Sync: closed local position %d (%s %s) exit_price=%.4f pnl=%.2f reason=%s", lp.id, lp.symbol, lp.side, exit_price, exit_pnl, close_reason)
+                        logger.warning("Sync: position %d (%s %s) missing on exchange — marked closed (no trade record)", lp.id, lp.symbol, lp.side)
 
                 # Create local records for exchange-only positions
                 local_keys = {(lp.symbol.replace("/", "").replace(":USDT", ""), lp.side.lower()) for lp in local_positions}

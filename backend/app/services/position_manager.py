@@ -266,15 +266,35 @@ class PositionManager:
             p.mark_price = current_price
             p.unrealized_pnl = (current_price - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - current_price) * p.quantity
 
-        # --- Check SL / TP ---
+        # --- Check TP limit order fill FIRST (independent of price condition) ---
+        if strategy.take_profit_limit_order:
+            tp_fill_price = 0.0
+            # Check if any TP limit order has been filled by querying exchange
+            for p in open_positions:
+                if p.tp_limit_order_id:
+                    try:
+                        order_info = await auth_binance.exchange.fetch_order(p.tp_limit_order_id, auth_binance._format_symbol(symbol))
+                        status = order_info.get("status", "")
+                        avg_fill = float(order_info.get("average", 0) or 0)
+                        if status in ("closed", "filled") and avg_fill > 0:
+                            tp_fill_price = avg_fill
+                            break
+                    except Exception:
+                        pass
+            if tp_fill_price > 0:
+                await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", tp_fill_price)
+                return
+
+        # --- Check SL / TP by price ---
         close_reason = None
+        exit_price_override = current_price
         if strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
             close_reason = "stop_loss"
         elif eng.check_take_profit(avg_entry, current_price, pos_side):
             close_reason = "take_profit"
 
         if close_reason:
-            await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, current_price)
+            await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, exit_price_override)
             return
 
         # --- Check martingale add ---
@@ -286,46 +306,20 @@ class PositionManager:
 
         await session.flush()
 
-    async def _close_positions(self, session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, current_price):
+    async def _close_positions(self, session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, current_price, pre_exit_price: float = 0.0):
         strategy_id = strategy.id
 
-        # For limit TP: the initial TP order on exchange already handles the close.
-        # Just check if position still exists on exchange. If gone, TP filled → success.
-        if close_reason == "take_profit" and strategy.take_profit_limit_order:
-            exchange_positions = await auth_binance.fetch_positions([symbol])
-            pos_side_cap = "LONG" if pos_side == "long" else "SHORT"
-            pos_side_lower = pos_side.lower()
-            still_open = False
-            for ep in exchange_positions:
-                ep_side = (ep.get("side") or "").lower()
-                if ep_side == pos_side_lower and float(ep.get("contracts", 0)) > 0:
-                    still_open = True
-                    break
+        exit_price = 0.0
 
-            if not still_open:
-                # TP limit order already filled — get real fill price, fallback to limit price
-                limit_price = eng.get_take_profit_price(avg_entry, pos_side)
-                fill_price = limit_price  # best guess: the order was placed at this price
-                for p in open_positions:
-                    if p.tp_limit_order_id:
-                        for attempt in range(2):
-                            try:
-                                order_info = await auth_binance.exchange.fetch_order(p.tp_limit_order_id, auth_binance._format_symbol(symbol))
-                                avg_fill = float(order_info.get("average", 0) or 0)
-                                if avg_fill > 0:
-                                    fill_price = avg_fill
-                                    break
-                            except Exception:
-                                if attempt == 0:
-                                    await asyncio.sleep(0.3)
-                        break
-                exit_price = fill_price
-                strategy_log_service.success(strategy_id, f"{symbol} 止盈平仓 — 限价单已成交 @{fill_price:.4f}")
-                logger.info("Strategy %d: TP limit filled for %s (exchange position closed)", strategy_id, symbol)
-            else:
-                # TP limit order still on exchange — it will fill naturally
-                strategy_log_service.info(strategy_id, f"{symbol} 止盈限价单已挂交易所，等待成交")
-                return
+        # TP limit order already filled upstream — use pre-determined exit price
+        if pre_exit_price > 0:
+            exit_price = pre_exit_price
+            strategy_log_service.success(strategy_id, f"{symbol} 止盈平仓 — 限价单已成交 @{exit_price:.4f}")
+            logger.info("Strategy %d: TP limit filled for %s @%.4f", strategy_id, symbol, exit_price)
+        elif close_reason == "take_profit" and strategy.take_profit_limit_order:
+            # TP triggered by price but order might still be pending — wait for it
+            strategy_log_service.info(strategy_id, f"{symbol} 止盈限价单已挂交易所，等待成交")
+            return
         else:
             # Market close for stop loss or market TP
             for p in open_positions:
