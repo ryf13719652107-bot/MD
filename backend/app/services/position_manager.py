@@ -266,25 +266,6 @@ class PositionManager:
             p.mark_price = current_price
             p.unrealized_pnl = (current_price - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - current_price) * p.quantity
 
-        # --- Check TP limit order fill FIRST (independent of price condition, non-blocking) ---
-        if strategy.take_profit_limit_order:
-            for p in open_positions:
-                if p.tp_limit_order_id:
-                    try:
-                        order_info = await asyncio.wait_for(
-                            auth_binance.exchange.fetch_order(
-                                p.tp_limit_order_id, auth_binance._format_symbol(symbol)
-                            ),
-                            timeout=2.0,
-                        )
-                        status = order_info.get("status", "")
-                        avg_fill = float(order_info.get("average", 0) or 0)
-                        if status in ("closed", "filled") and avg_fill > 0:
-                            await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", avg_fill)
-                            return
-                    except (Exception, asyncio.TimeoutError):
-                        pass  # timeout or API error — skip check, don't block trading
-
         # --- Check SL / TP by price ---
         close_reason = None
         exit_price_override = current_price
@@ -303,6 +284,25 @@ class PositionManager:
         if result.should_add:
             await self._martingale_add(session, strategy, symbol, auth_binance, open_positions, eng, result, avg_entry, total_qty, pos_side, current_price, klines, public_binance)
             return
+
+        # --- Check TP limit order fill (after trading, non-blocking) ---
+        if strategy.take_profit_limit_order:
+            for p in open_positions:
+                if p.tp_limit_order_id:
+                    try:
+                        order_info = await asyncio.wait_for(
+                            auth_binance.exchange.fetch_order(
+                                p.tp_limit_order_id, auth_binance._format_symbol(symbol)
+                            ),
+                            timeout=2.0,
+                        )
+                        status = order_info.get("status", "")
+                        avg_fill = float(order_info.get("average", 0) or 0)
+                        if status in ("closed", "filled") and avg_fill > 0:
+                            await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", avg_fill)
+                            return
+                    except (Exception, asyncio.TimeoutError):
+                        pass
 
         await session.flush()
 
