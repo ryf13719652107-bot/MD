@@ -121,12 +121,12 @@ class BinanceService:
     # ---- Orders (Private) ----
 
     def _order_params(self, position_side: str, reduce_only: bool = False) -> dict:
-        """Build params dict, omitting positionSide for one-way mode accounts."""
+        """Build params dict. positionSide and reduceOnly only sent in hedge mode."""
         params: dict = {}
         if self.hedge_mode:
             params["positionSide"] = position_side
-        if reduce_only:
-            params["reduceOnly"] = True
+            if reduce_only:
+                params["reduceOnly"] = True
         return params
 
     async def cancel_order(self, order_id: str, symbol: str) -> dict:
