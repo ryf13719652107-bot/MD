@@ -108,7 +108,7 @@ class PositionManager:
         rsi = 0.0  # always defined, used for logging
         signal_label = "RSI"
         if strategy.signal_source == "wavetrend":
-            wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length, strategy.wt_ob_level, strategy.wt_os_level)
+            wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length)
             if wt is None:
                 return
             signal = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
@@ -373,7 +373,7 @@ class PositionManager:
         # Signal re-check for martingale add (if enabled)
         if strategy.martingale_rsi_enabled and klines is not None and public_binance is not None:
             if strategy.signal_source == "wavetrend":
-                wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length, strategy.wt_ob_level, strategy.wt_os_level)
+                wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length)
                 if wt is not None:
                     confirm = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
                     if confirm == Signal.NEUTRAL:

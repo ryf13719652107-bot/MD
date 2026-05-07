@@ -95,8 +95,6 @@ def calculate_wavetrend(
     klines: list,
     channel_length: int = 10,
     average_length: int = 21,
-    ob_level: float = 53.0,
-    os_level: float = -53.0,
 ) -> Optional[dict]:
     """WaveTrend by LazyBear — Pine Script v5 implementation.
 
