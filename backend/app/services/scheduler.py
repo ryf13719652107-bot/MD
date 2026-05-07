@@ -225,19 +225,6 @@ class StrategyScheduler:
                     logger.error("Strategy %d: balance check failed: %s", strategy_id, e)
                     strategy_log_service.error(strategy_id, f"余额获取失败 — {e}")
 
-            # Snapshot exchange positions once — prevent duplicate opens
-            exchange_open_set: set[tuple[str, str]] = set()
-            if auth_binance:
-                try:
-                    eps = await auth_binance.fetch_positions()
-                    for ep in eps:
-                        if float(ep.get("contracts", 0) or 0) > 0:
-                            sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
-                            side = (ep.get("side") or "").lower()
-                            exchange_open_set.add((sym, side))
-                except Exception:
-                    pass
-
             # Get symbols from coin pool or fixed
             symbols = []
             if strategy.use_coin_pool:
@@ -263,16 +250,18 @@ class StrategyScheduler:
                     strategy_log_service.warning(strategy_id, "未设置交易对")
                 return
 
-            # Process each symbol
+            # Process each symbol — single transaction, any failure rolls back all
             for symbol in symbols:
                 try:
-                    async with session.begin_nested():
-                        await self._position_mgr.process_symbol(
-                            session, strategy, symbol, auth_binance, public_binance,
-                            total_margin, leverage, exchange_open_set,
-                        )
+                    await self._position_mgr.process_symbol(
+                        session, strategy, symbol, auth_binance, public_binance,
+                        total_margin, leverage,
+                    )
                 except Exception as e:
                     logger.error("Strategy %d: error processing %s: %s", strategy_id, symbol, e)
+                    # Rollback entire tick on any symbol failure
+                    await session.rollback()
+                    return
 
             await session.commit()
 

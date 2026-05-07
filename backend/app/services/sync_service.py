@@ -8,7 +8,7 @@ from ..config import now_beijing
 
 logger = logging.getLogger(__name__)
 
-_POSITION_SYNC_INTERVAL = 300  # 5 minutes
+_POSITION_SYNC_INTERVAL = 60  # 1 minute
 
 
 class PositionSyncService:
@@ -53,25 +53,11 @@ class PositionSyncService:
                         lp.closed_at = sync_now
                         logger.warning("Sync: position %d (%s %s) missing on exchange — marked closed (no trade record)", lp.id, lp.symbol, lp.side)
 
-                # Create local records for exchange-only positions
+                # Log exchange-only positions (don't create orphans — let strategy tick handle)
                 local_keys = {(lp.symbol.replace("/", "").replace(":USDT", ""), lp.side.lower()) for lp in local_positions}
                 for (sym, side), ep in exchange_map.items():
                     if (sym, side) not in local_keys:
-                        mark_price = float(ep.get("markPrice", 0) or 0)
-                        entry_price = float(ep.get("entryPrice", 0) or 0)
-                        contracts = float(ep.get("contracts", 0) or 0)
-                        pos = Position(
-                            strategy_id=None,
-                            account_id=account_id,
-                            symbol=sym,
-                            side=side,
-                            quantity=contracts,
-                            entry_price=entry_price,
-                            mark_price=mark_price,
-                            layer=0,
-                        )
-                        session.add(pos)
-                        logger.info("Sync: created local record for exchange position %s %s contracts=%s", sym, side, contracts)
+                        logger.warning("Sync: exchange position %s %s not in DB — no local record created", sym, side)
 
                 await session.commit()
         except Exception as e:

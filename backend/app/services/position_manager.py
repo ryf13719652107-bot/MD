@@ -169,10 +169,16 @@ class PositionManager:
         # --- Open new position ---
         if signal != Signal.NEUTRAL and not open_positions:
             logger.info("Strategy %d: %s signal=%s, attempting to open...", strategy_id, symbol, signal.value)
-            # Skip if exchange already has this position (dedup — only prevents duplicate opens)
-            if exchange_open_set and (symbol, signal.value) in exchange_open_set:
-                strategy_log_service.info(strategy_id, f"{symbol} 交易所已有仓位，跳过开仓")
-                return
+            # Fresh exchange check before opening — prevent duplicate opens across concurrent ticks
+            try:
+                eps = await auth_binance.fetch_positions([symbol])
+                for ep in eps:
+                    ep_side = (ep.get("side") or "").lower()
+                    if ep_side == signal.value and float(ep.get("contracts", 0) or 0) > 0:
+                        strategy_log_service.info(strategy_id, f"{symbol} 交易所已有仓位，跳过开仓")
+                        return
+            except Exception:
+                pass  # if fetch fails, proceed with open (better than blocking)
             await self._open_position(session, strategy, symbol, auth_binance, public_binance, signal, base_qty, current_price, total_margin, leverage, rsi)
             return
 
@@ -198,7 +204,11 @@ class PositionManager:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
             )
-            avg_price = float(order.get("average", current_price))
+            avg_price = float(order.get("average") or order.get("price") or 0)
+            if avg_price <= 0:
+                avg_price = current_price
+                logger.warning("Strategy %d: %s order filled but no average/price in response, using kline close", strategy_id, symbol)
+            filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
         except Exception as e:
             _clear_cooldown(strategy_id, symbol)
             logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
@@ -207,12 +217,12 @@ class PositionManager:
 
         # Order succeeded on exchange — ensure DB record is written even if TP order fails
         try:
-            eng = MartingaleEngine(base_quantity=base_qty, multiplier=strategy.martingale_mult, max_layers=strategy.max_layers, take_profit_pct=strategy.take_profit_pct)
+            eng = MartingaleEngine(base_quantity=filled_qty, multiplier=strategy.martingale_mult, max_layers=strategy.max_layers, take_profit_pct=strategy.take_profit_pct)
             tp_price = eng.get_take_profit_price(avg_price, position_side)
 
             pos = Position(
                 strategy_id=strategy_id, account_id=strategy.account_id,
-                symbol=symbol, side=position_side, quantity=base_qty,
+                symbol=symbol, side=position_side, quantity=filled_qty,
                 entry_price=avg_price, mark_price=current_price, layer=0,
                 take_profit_price=tp_price, exchange_order_id=order.get("id", ""),
             )
@@ -302,7 +312,7 @@ class PositionManager:
                             await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", current_price, pre_exit_price=avg_fill)
                             return
                     except (Exception, asyncio.TimeoutError):
-                        pass
+                        logger.warning("Strategy %d: TP order check failed for %s, will retry next tick", strategy_id, symbol)
 
         await session.flush()
 
@@ -382,28 +392,22 @@ class PositionManager:
                         return
                     strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓RSI确认 — RSI={round(rsi_val,1)}")
 
-        # Cancel old TP orders before adding
-        if strategy.take_profit_limit_order:
-            for p in open_positions:
-                if p.tp_limit_order_id:
-                    try:
-                        await auth_binance.cancel_order(p.tp_limit_order_id, symbol)
-                        strategy_log_service.info(strategy_id, f"{symbol} 取消旧止盈单 {p.tp_limit_order_id}")
-                    except Exception:
-                        pass
-                    p.tp_limit_order_id = None
-
+        # Step 1: execute add order FIRST
         try:
             order = await auth_binance.create_market_order(
                 symbol, side, result.next_quantity, position_side=ps,
             )
-            new_avg = float(order.get("average", current_price))
+            new_avg = float(order.get("average") or order.get("price") or 0)
+            if new_avg <= 0:
+                new_avg = current_price
+                logger.warning("Strategy %d: %s martingale order filled but no average/price in response, using kline close", strategy_id, symbol)
+            filled_qty = float(order.get("filled") or order.get("amount") or result.next_quantity)
         except Exception as e:
             logger.error("Strategy %d: martingale add failed: %s", strategy_id, e)
             strategy_log_service.error(strategy_id, f"{symbol} 马丁加仓失败 — {e}")
             return
 
-        # Order succeeded — ensure DB record
+        # Step 2: record in DB
         try:
             new_total = total_qty + result.next_quantity
             new_avg_entry = (avg_entry * total_qty + new_avg * result.next_quantity) / new_total
@@ -411,7 +415,7 @@ class PositionManager:
 
             pos = Position(
                 strategy_id=strategy_id, account_id=strategy.account_id,
-                symbol=symbol, side=pos_side, quantity=result.next_quantity,
+                symbol=symbol, side=pos_side, quantity=filled_qty,
                 entry_price=new_avg, mark_price=current_price, layer=result.next_layer,
                 take_profit_price=tp_price, exchange_order_id=order.get("id", ""),
             )
@@ -422,7 +426,18 @@ class PositionManager:
             strategy_log_service.error(strategy_id, f"{symbol} 马丁加仓已成交但DB记录失败 — 请手动检查交易所仓位!")
             return
 
-        # Place new TP order (best-effort)
+        # Step 3: cancel old TP orders AFTER add is secured
+        if strategy.take_profit_limit_order:
+            for p in open_positions:
+                if p.tp_limit_order_id:
+                    try:
+                        await auth_binance.cancel_order(p.tp_limit_order_id, symbol)
+                        strategy_log_service.info(strategy_id, f"{symbol} 取消旧止盈单 {p.tp_limit_order_id}")
+                    except Exception:
+                        logger.warning("Strategy %d: failed to cancel old TP %s for %s", strategy_id, p.tp_limit_order_id, symbol)
+                    p.tp_limit_order_id = None
+
+        # Step 4: place new combined TP order (best-effort)
         if strategy.take_profit_limit_order:
             tp_placed = False
             close_side = "sell" if pos_side == "long" else "buy"
