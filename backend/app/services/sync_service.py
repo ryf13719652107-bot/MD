@@ -4,6 +4,7 @@ import logging
 from sqlalchemy import select
 from ..database import async_session
 from ..models.position import Position
+from ..models.trade import Trade
 from ..config import now_beijing
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,6 @@ class PositionSyncService:
                 )
                 local_positions = list(result.scalars().all())
 
-                # Build map of exchange positions: (symbol, side) -> data
                 exchange_map: dict[tuple[str, str], dict] = {}
                 for ep in exchange_positions:
                     if float(ep.get("contracts", 0)) <= 0:
@@ -42,7 +42,6 @@ class PositionSyncService:
                     side = (ep.get("side") or "").lower()
                     exchange_map[(sym, side)] = ep
 
-                # Close local positions not on exchange — skip if has TP order (let tick handle it)
                 sync_now = now_beijing()
                 for lp in local_positions:
                     lp_key = (lp.symbol.replace("/", "").replace(":USDT", ""), lp.side.lower())
@@ -50,10 +49,21 @@ class PositionSyncService:
                         if lp.tp_limit_order_id:
                             logger.info("Sync: position %d (%s %s) missing on exchange but has TP order — skip, tick will detect", lp.id, lp.symbol, lp.side)
                             continue
+                        exit_price = lp.mark_price or lp.entry_price
+                        exit_pnl = (exit_price - lp.entry_price) * lp.quantity if lp.side == "long" else (lp.entry_price - exit_price) * lp.quantity
+                        exit_pnl_pct = ((exit_price - lp.entry_price) / lp.entry_price * 100) if lp.side == "long" and lp.entry_price > 0 else ((lp.entry_price - exit_price) / lp.entry_price * 100) if lp.entry_price > 0 else 0
+                        trade = Trade(
+                            strategy_id=lp.strategy_id, account_id=lp.account_id,
+                            symbol=lp.symbol, side=lp.side, quantity=lp.quantity,
+                            entry_price=lp.entry_price, exit_price=exit_price,
+                            realized_pnl=exit_pnl, pnl_pct=round(exit_pnl_pct, 2),
+                            entry_time=lp.opened_at, exit_time=sync_now,
+                            layer=lp.layer, close_reason="sync_close",
+                        )
+                        session.add(trade)
                         lp.closed_at = sync_now
-                        logger.warning("Sync: position %d (%s %s) missing on exchange — marked closed (no trade record)", lp.id, lp.symbol, lp.side)
+                        logger.warning("Sync: position %d (%s %s) missing on exchange — marked closed with trade record", lp.id, lp.symbol, lp.side)
 
-                # Log exchange-only positions (don't create orphans — let strategy tick handle)
                 local_keys = {(lp.symbol.replace("/", "").replace(":USDT", ""), lp.side.lower()) for lp in local_positions}
                 for (sym, side), ep in exchange_map.items():
                     if (sym, side) not in local_keys:
