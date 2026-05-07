@@ -179,12 +179,12 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
             )
         except Exception as e1:
             err_str = str(e1)
-            # -1106 means one-way mode — bypass _order_params entirely
             if "-1106" in err_str:
+                # reduceOnly rejected — retry with positionSide only, no reduceOnly
                 try:
-                    order = await binance.exchange.create_order(
-                        symbol=binance._format_symbol(symbol),
-                        type="market", side=close_side, amount=contracts,
+                    order = await binance.create_market_order(
+                        symbol, close_side, contracts,
+                        reduce_only=False, position_side=ps,
                     )
                 except Exception as e2:
                     results.append({"symbol": symbol, "side": side, "status": "failed", "error": str(e2)})
