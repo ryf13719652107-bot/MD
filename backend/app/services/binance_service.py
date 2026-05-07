@@ -327,10 +327,9 @@ async def get_binance_service(api_key: str, secret: str, testnet: bool = True, h
 
 
 async def get_public_binance(use_testnet: bool = False) -> BinanceService:
-    """Get a cached BinanceService for public market data."""
+    """Get a cached BinanceService for public market data (always mainnet for leaderboard accuracy)."""
     global _public_instance, _public_created_at
-    from ..config import settings
-    testnet = use_testnet if use_testnet else settings.binance_testnet
+    testnet = False  # leaderboard/klines always from mainnet — testnet volume is meaningless
     now = time.time()
 
     if _public_instance is not None and (now - _public_created_at) > _INSTANCE_TTL:
