@@ -168,8 +168,9 @@ class StrategyScheduler:
                         if self._scheduler.get_job(job_id):
                             self._scheduler.remove_job(job_id)
                         logger.warning("Strategy %d margin %.2f below threshold %.2f — stopping and closing all positions", strategy_id, total_margin, strategy.margin_threshold)
-                        # Close all open positions for this strategy AND mark them in DB
+                        # Close ALL exchange positions with -1106 retry fallback
                         from ..models.position import Position as PosModel
+                        from ..models.trade import Trade
                         try:
                             eps = await auth_binance.fetch_positions()
                             for ep in eps:
@@ -180,19 +181,42 @@ class StrategyScheduler:
                                 side = (ep.get("side") or "").lower()
                                 ps = "LONG" if side == "long" else "SHORT"
                                 cs = "sell" if side == "long" else "buy"
+                                order = None
                                 try:
                                     order = await auth_binance.create_market_order(sym, cs, contracts, reduce_only=True, position_side=ps)
-                                    # Mark local positions as closed
+                                except Exception as ex1:
+                                    if "-1106" in str(ex1):
+                                        try:
+                                            order = await auth_binance.create_market_order(sym, cs, contracts, reduce_only=False, position_side=ps)
+                                        except Exception as ex2:
+                                            logger.error("Margin stop: failed to close %s %s: %s", sym, side, ex2)
+                                            continue
+                                    else:
+                                        logger.error("Margin stop: failed to close %s %s: %s", sym, side, ex1)
+                                        continue
+                                if order:
+                                    exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
+                                    # Mark local positions as closed and record trades
                                     stmt_pos = select(PosModel).where(
                                         PosModel.strategy_id == strategy_id, PosModel.closed_at.is_(None),
                                         PosModel.symbol == sym, PosModel.side == side
                                     )
                                     pos_result = await session.execute(stmt_pos)
                                     for lp2 in pos_result.scalars().all():
+                                        ep_val = exit_price if exit_price > 0 else (lp2.mark_price or lp2.entry_price)
+                                        pnl = (ep_val - lp2.entry_price) * lp2.quantity if lp2.side == "long" else (lp2.entry_price - ep_val) * lp2.quantity
+                                        pct = ((ep_val - lp2.entry_price) / lp2.entry_price * 100) if lp2.side == "long" else ((lp2.entry_price - ep_val) / lp2.entry_price * 100)
+                                        trade = Trade(
+                                            strategy_id=strategy_id, account_id=strategy.account_id,
+                                            symbol=sym, side=lp2.side, quantity=lp2.quantity,
+                                            entry_price=lp2.entry_price, exit_price=ep_val,
+                                            realized_pnl=pnl, pnl_pct=round(pct, 2),
+                                            entry_time=lp2.opened_at, exit_time=now_beijing(),
+                                            layer=lp2.layer, close_reason="margin_stop",
+                                        )
+                                        session.add(trade)
                                         lp2.closed_at = now_beijing()
                                     logger.info("Margin stop: closed %s %s (contracts=%s)", sym, side, contracts)
-                                except Exception as ex:
-                                    logger.error("Margin stop: failed to close %s %s: %s", sym, side, ex)
                             await session.commit()
                         except Exception as e:
                             logger.error("Margin stop: failed to close positions for strategy %d: %s", strategy_id, e)
