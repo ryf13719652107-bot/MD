@@ -137,33 +137,43 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
     api_secret = decrypt(account.api_secret_encrypted)
     binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
-    # Get actual exchange positions — the source of truth (do this FIRST, regardless of DB state)
+    # Load this strategy's open DB positions FIRST — determines what to close
+    stmt = select(Position).where(
+        Position.strategy_id == strategy_id, Position.closed_at.is_(None)
+    )
+    result = await db.execute(stmt)
+    db_positions = list(result.scalars().all())
+
+    if not db_positions:
+        await strategy_scheduler.remove_strategy(strategy_id)
+        return {"closed": 0, "failed": 0, "results": [], "id": strategy_id}
+
+    # Build set of (symbol, side) keys belonging to THIS strategy
+    strategy_keys: set[tuple[str, str]] = set()
+    for p in db_positions:
+        strategy_keys.add((p.symbol.upper(), p.side))
+
+    # Get exchange positions and filter to strategy's keys only
     try:
         raw_positions = await binance.fetch_positions()
     except Exception as e:
         logging.error("Panic close: fetch_positions failed: %s", e)
         raise HTTPException(status_code=502, detail=f"无法获取交易所持仓: {e}")
 
-    # Build map of (symbol_no_slash, side) → exchange contracts
     exchange_map: dict[tuple[str, str], float] = {}
     for ep in raw_positions:
         contracts = float(ep.get("contracts", 0) or 0)
         if contracts <= 0:
             continue
-        sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
+        sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "").upper()
         sd = (ep.get("side") or "").lower()
+        if (sym, sd) not in strategy_keys:
+            continue  # skip positions belonging to other strategies
         exchange_map[(sym, sd)] = exchange_map.get((sym, sd), 0) + contracts
 
     if not exchange_map:
         await strategy_scheduler.remove_strategy(strategy_id)
         return {"closed": 0, "failed": 0, "results": [], "id": strategy_id}
-
-    # Load this strategy's open DB positions (for record keeping only)
-    stmt = select(Position).where(
-        Position.strategy_id == strategy_id, Position.closed_at.is_(None)
-    )
-    result = await db.execute(stmt)
-    db_positions = list(result.scalars().all())
 
     results = []
     now = now_beijing()
@@ -205,7 +215,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         symbol = r["symbol"]
         side = r["side"]
         exit_price = r.get("exit_price", 0) or 0
-        matching = [p for p in db_positions if p.symbol.upper() == symbol.upper() and p.side == side]
+        matching = [p for p in db_positions if p.symbol.upper() == symbol.upper() and p.side.lower() == side.lower()]
         for p in matching:
             ep = exit_price if exit_price > 0 else (p.mark_price or p.entry_price)
             pnl = (ep - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - ep) * p.quantity

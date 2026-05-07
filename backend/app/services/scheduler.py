@@ -152,26 +152,28 @@ class StrategyScheduler:
             auth_binance = await self._get_binance_for_strategy(strategy)
             if not auth_binance:
                 return
-            # Get current price from ticker
             try:
-                public_binance = await get_public_binance()
-                if strategy.use_coin_pool:
-                    symbols = await coin_pool_service.get_pool_symbols(strategy.coin_pool_source, strategy.coin_pool_top_n)
-                elif strategy.symbol:
-                    symbols = [strategy.symbol]
-                else:
+                # Load all open positions with TP orders
+                from ..models.position import Position
+                stmt = select(Position).where(
+                    Position.strategy_id == strategy_id,
+                    Position.closed_at.is_(None),
+                )
+                result = await session.execute(stmt)
+                open_positions = list(result.scalars().all())
+                has_tp = [p for p in open_positions if p.tp_limit_order_id]
+                if not has_tp:
                     return
-                for symbol in symbols:
+                # Check TP fills without iterating all coin pool symbols
+                for p in has_tp:
                     try:
-                        ticker = await asyncio.wait_for(public_binance.fetch_ticker(symbol), timeout=3.0)
-                        current_price = float(ticker.get("last", 0) or 0)
-                        if current_price > 0:
-                            await self._position_mgr.check_tp_fills(session, strategy, auth_binance, current_price)
-                    except (Exception, asyncio.TimeoutError):
+                        await self._position_mgr.check_tp_fills(session, strategy, auth_binance, 0)
+                        break  # one close per tick
+                    except Exception:
                         pass
                 await session.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Strategy %d TP check error: %s", strategy_id, e)
 
     async def _execute_strategy_impl(self, strategy_id: int):
         async with async_session() as session:
