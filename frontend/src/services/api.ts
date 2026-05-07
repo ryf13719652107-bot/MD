@@ -44,7 +44,7 @@ export const api = {
     request(`/strategies/${id}/start`, { method: 'POST' }),
   stopStrategy: (id: number): Promise<{ status: string }> =>
     request(`/strategies/${id}/stop`, { method: 'POST' }),
-  panicCloseStrategy: (id: number): Promise<{ closed: number; errors: string[] }> =>
+  panicCloseStrategy: (id: number): Promise<{ closed: number; failed: number; results: Array<{ symbol: string; side: string; status: string; exit_price?: number; error?: string }> }> =>
     request(`/strategies/${id}/panic-close`, { method: 'POST' }),
   getStrategyLogs: (id: number, limit?: number): Promise<{ time: string; level: string; message: string }[]> =>
     request(`/strategies/${id}/logs${limit ? `?limit=${limit}` : ''}`),

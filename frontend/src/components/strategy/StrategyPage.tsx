@@ -40,8 +40,19 @@ export default function StrategyPage() {
   };
 
   const handlePanicClose = async (id: number) => {
-    if (!confirm('确定要紧急平仓该策略的所有持仓吗？')) return;
-    await api.panicCloseStrategy(id);
+    if (!confirm('⚠️ 确认紧急平仓？\n\n将以市价单平掉该策略对应账户的所有交易所持仓，此操作不可撤销。')) return;
+    try {
+      const result = await api.panicCloseStrategy(id);
+      const msgs: string[] = [];
+      if (result.results?.length) {
+        for (const r of result.results) {
+          msgs.push(`${r.symbol} ${r.side} — ${r.status === 'ok' ? '已平仓 ✓' : '失败: ' + r.error}`);
+        }
+      }
+      alert(`平仓完成: ${result.closed} 成功, ${result.failed || 0} 失败\n\n${msgs.join('\n')}`);
+    } catch (e: any) {
+      alert('平仓失败: ' + (e.message || e));
+    }
     load();
   };
 
