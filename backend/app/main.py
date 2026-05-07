@@ -132,7 +132,9 @@ app.include_router(coin_pool.router)
 app.include_router(websocket.router)
 
 # Serve frontend static files
-frontend_dist = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+# __file__ = backend/app/main.py → go up 3 levels to project root
+frontend_dist = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
+frontend_dist = os.path.abspath(frontend_dist)
 if os.path.isdir(frontend_dist):
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="static")
 
