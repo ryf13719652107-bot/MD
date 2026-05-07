@@ -34,7 +34,6 @@ export default function PositionsPage() {
     exchangeMap.set(`${ep.symbol}_${ep.side}`, ep);
   }
 
-  // Merge DB + exchange: start from DB, enrich with exchange data
   const seen = new Set<string>();
   const merged: any[] = dbPositions.map((dp) => {
     const key = `${dp.symbol}_${dp.side}`;
@@ -49,7 +48,6 @@ export default function PositionsPage() {
     };
   });
 
-  // Add exchange-only positions (not in DB)
   for (const ep of exchangePositions) {
     const key = `${ep.symbol}_${ep.side}`;
     if (!seen.has(key)) {
@@ -64,6 +62,8 @@ export default function PositionsPage() {
         usdt: ep.usdt,
         layer: 0,
         opened_at: '',
+        take_profit_price: null,
+        tp_limit_order_id: null,
       });
     }
   }
@@ -93,7 +93,6 @@ export default function PositionsPage() {
               <th className="p-3">交易对</th>
               <th className="p-3">方向</th>
               <th className="p-3">层数</th>
-              <th className="p-3">数量</th>
               <th className="p-3">USDT</th>
               <th className="p-3">入场价</th>
               <th className="p-3">当前价</th>
@@ -105,18 +104,17 @@ export default function PositionsPage() {
             </tr>
           </thead>
           <tbody>
-            {merged.map((p) => (
-              <tr key={p.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+            {merged.map((p, i) => (
+              <tr key={p.id || i} className="border-b border-gray-800/50 hover:bg-gray-800/30">
                 <td className="p-3 font-medium font-mono">{p.symbol}</td>
                 <td className={`p-3 ${p.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
                   {p.side === 'long' ? '做多' : '做空'}
                 </td>
-                <td className="p-3 text-gray-400">L{p.layer}</td>
-                <td className="p-3 font-mono">{p.quantity?.toFixed(4)}</td>
+                <td className="p-3 text-gray-400">{p.layer != null ? `L${p.layer}` : '-'}</td>
                 <td className="p-3 font-mono">{p.usdt?.toFixed(2)}</td>
-                <td className="p-3 font-mono">{p.entry_price?.toFixed(6)}</td>
-                <td className="p-3 font-mono">{p.mark_price?.toFixed(6)}</td>
-                <td className="p-3 font-mono text-cyan-400">{p.take_profit_price?.toFixed(6) || '-'}</td>
+                <td className="p-3 font-mono">{p.entry_price?.toFixed(8)}</td>
+                <td className="p-3 font-mono">{p.mark_price?.toFixed(8)}</td>
+                <td className="p-3 font-mono text-cyan-400">{p.take_profit_price?.toFixed(8) || '-'}</td>
                 <td className="p-3">
                   {p.tp_limit_order_id ? (
                     <span className="px-1.5 py-0.5 rounded text-xs bg-blue-600/20 text-blue-400">已挂单</span>
@@ -134,7 +132,7 @@ export default function PositionsPage() {
               </tr>
             ))}
             {merged.length === 0 && (
-              <tr><td colSpan={12} className="p-8 text-center text-gray-600">暂无持仓</td></tr>
+              <tr><td colSpan={11} className="p-8 text-center text-gray-600">暂无持仓</td></tr>
             )}
           </tbody>
         </table>
