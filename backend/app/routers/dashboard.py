@@ -114,9 +114,9 @@ async def get_dashboard(
     if total_balance > 0 and total_notional > 0:
         leverage_multiplier = round(total_notional / total_balance, 2)
 
-    # Daily trades and PnL (last 24h, filtered by account)
-    since = now_beijing() - timedelta(hours=24)
-    trade_stmt = select(Trade).where(Trade.exit_time >= since)
+    # Daily trades and PnL (today 00:00 Beijing, filtered by account)
+    today_start = now_beijing().replace(hour=0, minute=0, second=0, microsecond=0)
+    trade_stmt = select(Trade).where(Trade.exit_time >= today_start)
     if filter_account_id:
         trade_stmt = trade_stmt.where(Trade.account_id == filter_account_id)
     result = await db.execute(trade_stmt)

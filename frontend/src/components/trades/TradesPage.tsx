@@ -70,7 +70,7 @@ export default function TradesPage() {
               <th className="p-3">平仓时间</th>
               <th className="p-3">交易对</th>
               <th className="p-3">方向</th>
-              <th className="p-3">USDT</th>
+              <th className="p-3">成本(USDT)</th>
               <th className="p-3">入场价</th>
               <th className="p-3">出场价</th>
               <th className="p-3">盈亏</th>
@@ -87,7 +87,7 @@ export default function TradesPage() {
                 <td className={`p-3 ${t.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
                   {t.side === 'long' ? '做多' : '做空'}
                 </td>
-                <td className="p-3 font-mono">{(t.quantity * t.exit_price).toFixed(2)}</td>
+                <td className="p-3 font-mono">{(t.quantity * t.entry_price).toFixed(2)}</td>
                 <td className="p-3">{t.entry_price?.toFixed(8)}</td>
                 <td className="p-3">{t.exit_price?.toFixed(8)}</td>
                 <td className={`p-3 ${t.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
@@ -102,11 +102,15 @@ export default function TradesPage() {
                     t.close_reason === 'stop_loss' ? 'bg-red-600/20 text-red-400' :
                     t.close_reason === 'panic_close' ? 'bg-yellow-600/20 text-yellow-400' :
                     t.close_reason === 'sync' ? 'bg-blue-600/20 text-blue-400' :
+                    t.close_reason === 'margin_stop' ? 'bg-orange-600/20 text-orange-400' :
                     'bg-gray-700 text-gray-400'
                   }`}>
                     {t.close_reason === 'take_profit' ? '止盈' :
                      t.close_reason === 'stop_loss' ? '止损' :
-                     t.close_reason === 'panic_close' ? '紧急平仓' : t.close_reason === 'sync' ? '同步平仓' : '手动平仓'}
+                     t.close_reason === 'panic_close' ? '紧急平仓' :
+                     t.close_reason === 'sync' ? '同步平仓' :
+                     t.close_reason === 'margin_stop' ? '保证金止损' :
+                     t.close_reason === 'manual' ? '手动平仓' : t.close_reason}
                   </span>
                 </td>
                 <td className="p-3">

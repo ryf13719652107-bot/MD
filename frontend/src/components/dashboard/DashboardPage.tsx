@@ -133,7 +133,7 @@ export default function DashboardPage() {
                       {t.realized_pnl.toFixed(4)}
                     </td>
                     <td className="text-gray-500 text-xs">
-                      {t.close_reason === 'take_profit' ? '止盈' : t.close_reason === 'stop_loss' ? '止损' : t.close_reason === 'panic_close' ? '紧急平仓' : t.close_reason === 'sync' ? '同步平仓' : '手动平仓'}
+                      {t.close_reason === 'take_profit' ? '止盈' : t.close_reason === 'stop_loss' ? '止损' : t.close_reason === 'panic_close' ? '紧急平仓' : t.close_reason === 'sync' ? '同步平仓' : t.close_reason === 'margin_stop' ? '保证金止损' : t.close_reason === 'manual' ? '手动平仓' : t.close_reason}
                     </td>
                   </tr>
                 ))}

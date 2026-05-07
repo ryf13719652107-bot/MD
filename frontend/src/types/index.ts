@@ -21,6 +21,7 @@ export interface Position {
   layer: number;
   take_profit_price: number | null;
   exchange_order_id: string | null;
+  tp_limit_order_id: string | null;
   opened_at: string;
   closed_at: string | null;
 }

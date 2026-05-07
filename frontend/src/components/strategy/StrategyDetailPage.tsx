@@ -167,7 +167,7 @@ export default function StrategyDetailPage() {
             <div>
               <span className={labelClass}>最近信号</span>
               <div className={`text-sm ${strategy.last_signal === 'long' ? 'text-green-400' : strategy.last_signal === 'short' ? 'text-red-400' : 'text-gray-400'}`}>
-                RSI {strategy.last_rsi} → {strategy.last_signal === 'long' ? '做多' : strategy.last_signal === 'short' ? '做空' : strategy.last_signal}
+                {strategy.signal_source === 'wavetrend' ? 'WT1' : 'RSI'} {strategy.last_rsi} → {strategy.last_signal === 'long' ? '做多' : strategy.last_signal === 'short' ? '做空' : strategy.last_signal}
                 <span className="text-gray-600 ml-1">{strategy.last_signal_at ? new Date(strategy.last_signal_at).toLocaleTimeString() : ''}</span>
               </div>
             </div>
@@ -314,7 +314,7 @@ export default function StrategyDetailPage() {
                     </td>
                     <td className="py-1.5 px-2 text-right text-gray-400">L{t.layer}</td>
                     <td className="py-1.5 px-2 text-right text-gray-400">
-                      {t.close_reason === 'take_profit' ? '止盈' : t.close_reason === 'stop_loss' ? '止损' : t.close_reason === 'panic_close' ? '紧急平仓' : t.close_reason === 'sync' ? '同步平仓' : t.close_reason}
+                      {t.close_reason === 'take_profit' ? '止盈' : t.close_reason === 'stop_loss' ? '止损' : t.close_reason === 'panic_close' ? '紧急平仓' : t.close_reason === 'sync' ? '同步平仓' : t.close_reason === 'margin_stop' ? '保证金止损' : t.close_reason === 'manual' ? '手动平仓' : t.close_reason}
                     </td>
                     <td className="py-1.5 px-2 text-right text-gray-500">{fmtTime(t.entry_time)}</td>
                     <td className="py-1.5 px-2 text-right text-gray-500">{fmtTime(t.exit_time)}</td>

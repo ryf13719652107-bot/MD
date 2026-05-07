@@ -58,7 +58,7 @@ class PositionSyncService:
                             entry_price=lp.entry_price, exit_price=exit_price,
                             realized_pnl=exit_pnl, pnl_pct=round(exit_pnl_pct, 2),
                             entry_time=lp.opened_at, exit_time=sync_now,
-                            layer=lp.layer, close_reason="sync_close",
+                            layer=lp.layer, close_reason="sync",
                         )
                         session.add(trade)
                         lp.closed_at = sync_now

@@ -1,18 +1,56 @@
+import { useEffect, useState, useRef } from 'react';
+import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
+import type { Position } from '../../types';
 
 export default function PositionsPage() {
-  const { data } = useDashboardStore();
-  const positions = data.exchange_positions || [];
-  const totalUsdt = positions.reduce((s: number, p: any) => s + (p.usdt || 0), 0);
-  const longUsdt = positions.filter((p: any) => p.side === 'long').reduce((s: number, p: any) => s + (p.usdt || 0), 0);
+  const { data, selectedAccountId } = useDashboardStore();
+  const exchangePositions = data.exchange_positions || [];
+  const [dbPositions, setDbPositions] = useState<Position[]>([]);
+  const loadRef = useRef<() => void>(() => {});
+
+  const load = async () => {
+    try {
+      const positions = await api.listPositions({ account_id: selectedAccountId ?? undefined });
+      setDbPositions(positions);
+    } catch {}
+  };
+  loadRef.current = load;
+
+  useEffect(() => { load(); }, [selectedAccountId]);
+
+  useEffect(() => {
+    const timer = setInterval(() => loadRef.current(), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const totalUsdt = exchangePositions.reduce((s: number, p: any) => s + (p.usdt || 0), 0);
+  const longUsdt = exchangePositions.filter((p: any) => p.side === 'long').reduce((s: number, p: any) => s + (p.usdt || 0), 0);
   const longPct = totalUsdt > 0 ? (longUsdt / totalUsdt * 100) : 0;
   const shortPct = totalUsdt > 0 ? (100 - longPct) : 0;
+
+  const exchangeMap = new Map<string, any>();
+  for (const ep of exchangePositions) {
+    exchangeMap.set(`${ep.symbol}_${ep.side}`, ep);
+  }
+
+  const merged = dbPositions.map((dp) => {
+    const key = `${dp.symbol}_${dp.side}`;
+    const ep = exchangeMap.get(key);
+    return {
+      ...dp,
+      usdt: ep?.usdt,
+      mark_price: ep?.mark_price ?? dp.mark_price,
+      unrealized_pnl: ep?.unrealized_pnl ?? dp.unrealized_pnl,
+      pnl_pct: ep?.pnl_pct,
+    };
+  });
 
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
         <h2 className="text-xl font-bold">当前持仓</h2>
-        <span className="text-xs text-gray-500">交易所实时数据 · 每 10 秒刷新</span>
+        <span className="text-xs text-gray-500">DB + 交易所数据 · 每 30 秒刷新</span>
         {totalUsdt > 0 && (
           <span className="text-xs">
             <span className="text-green-400">多 {longPct.toFixed(0)}%</span>
@@ -26,39 +64,55 @@ export default function PositionsPage() {
         )}
       </div>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+      <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-gray-500 text-left border-b border-gray-800">
               <th className="p-3">交易对</th>
               <th className="p-3">方向</th>
+              <th className="p-3">层数</th>
+              <th className="p-3">数量</th>
               <th className="p-3">USDT</th>
               <th className="p-3">入场价</th>
               <th className="p-3">当前价</th>
+              <th className="p-3">止盈价</th>
+              <th className="p-3">限价单</th>
               <th className="p-3">未实现盈亏</th>
               <th className="p-3">盈亏%</th>
+              <th className="p-3">开仓时间</th>
             </tr>
           </thead>
           <tbody>
-            {positions.map((p: any, i: number) => (
-              <tr key={i} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+            {merged.map((p) => (
+              <tr key={p.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
                 <td className="p-3 font-medium font-mono">{p.symbol}</td>
                 <td className={`p-3 ${p.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
                   {p.side === 'long' ? '做多' : '做空'}
                 </td>
+                <td className="p-3 text-gray-400">L{p.layer}</td>
+                <td className="p-3 font-mono">{p.quantity?.toFixed(4)}</td>
                 <td className="p-3 font-mono">{p.usdt?.toFixed(2)}</td>
                 <td className="p-3 font-mono">{p.entry_price?.toFixed(6)}</td>
                 <td className="p-3 font-mono">{p.mark_price?.toFixed(6)}</td>
+                <td className="p-3 font-mono text-cyan-400">{p.take_profit_price?.toFixed(6) || '-'}</td>
+                <td className="p-3">
+                  {p.tp_limit_order_id ? (
+                    <span className="px-1.5 py-0.5 rounded text-xs bg-blue-600/20 text-blue-400">已挂单</span>
+                  ) : (
+                    <span className="text-gray-600 text-xs">-</span>
+                  )}
+                </td>
                 <td className={`p-3 font-mono ${(p.unrealized_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)} USDT
+                  {(p.unrealized_pnl || 0) >= 0 ? '+' : ''}{(p.unrealized_pnl || 0).toFixed(2)} USDT
                 </td>
                 <td className={`p-3 font-mono ${(p.pnl_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {p.pnl_pct >= 0 ? '+' : ''}{p.pnl_pct?.toFixed(2)}%
+                  {(p.pnl_pct || 0) >= 0 ? '+' : ''}{(p.pnl_pct || 0).toFixed(2)}%
                 </td>
+                <td className="p-3 text-gray-500 text-xs">{p.opened_at ? new Date(p.opened_at).toLocaleString() : '-'}</td>
               </tr>
             ))}
-            {positions.length === 0 && (
-              <tr><td colSpan={7} className="p-8 text-center text-gray-600">暂无持仓</td></tr>
+            {merged.length === 0 && (
+              <tr><td colSpan={12} className="p-8 text-center text-gray-600">暂无持仓</td></tr>
             )}
           </tbody>
         </table>

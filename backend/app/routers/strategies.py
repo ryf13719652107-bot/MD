@@ -216,7 +216,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                 entry_price=p.entry_price, exit_price=ep,
                 realized_pnl=pnl, pnl_pct=round(pct, 2),
                 entry_time=p.opened_at, exit_time=now,
-                layer=p.layer, close_reason="panic",
+                layer=p.layer, close_reason="panic_close",
             )
             db.add(trade)
             p.closed_at = now
