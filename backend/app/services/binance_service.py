@@ -205,10 +205,18 @@ class BinanceService:
             return {}
 
         close_side = "sell" if side == "long" else "buy"
-        return await self.create_market_order(
-            symbol, close_side, total_contracts,
-            reduce_only=True, position_side=position_side,
-        )
+        try:
+            return await self.create_market_order(
+                symbol, close_side, total_contracts,
+                reduce_only=True, position_side=position_side,
+            )
+        except Exception as e:
+            if "-1106" in str(e):
+                return await self.create_market_order(
+                    symbol, close_side, total_contracts,
+                    reduce_only=False, position_side="",
+                )
+            raise
 
     async def close_position_with_limit(self, symbol: str, side: str, price: float) -> dict:
         """Close position using a limit order at the specified price. Handles hedge mode."""

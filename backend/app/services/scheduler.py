@@ -187,7 +187,7 @@ class StrategyScheduler:
                                 except Exception as ex1:
                                     if "-1106" in str(ex1):
                                         try:
-                                            order = await auth_binance.create_market_order(sym, cs, contracts, reduce_only=False, position_side=ps)
+                                            order = await auth_binance.create_market_order(sym, cs, contracts, reduce_only=False, position_side="")
                                         except Exception as ex2:
                                             logger.error("Margin stop: failed to close %s %s: %s", sym, side, ex2)
                                             continue

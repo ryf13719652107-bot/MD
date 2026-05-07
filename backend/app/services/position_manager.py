@@ -299,7 +299,7 @@ class PositionManager:
                         status = order_info.get("status", "")
                         avg_fill = float(order_info.get("average", 0) or 0)
                         if status in ("closed", "filled") and avg_fill > 0:
-                            await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", avg_fill)
+                            await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", current_price, pre_exit_price=avg_fill)
                             return
                     except (Exception, asyncio.TimeoutError):
                         pass
