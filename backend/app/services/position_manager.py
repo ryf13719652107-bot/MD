@@ -370,16 +370,24 @@ class PositionManager:
         side = "buy" if pos_side == "long" else "sell"
         ps = "LONG" if pos_side == "long" else "SHORT"
 
-        # RSI re-check for martingale add (if enabled)
+        # Signal re-check for martingale add (if enabled)
         if strategy.martingale_rsi_enabled and klines is not None and public_binance is not None:
-            rsi_val = calculate_rsi(klines, strategy.rsi_period)
-            if rsi_val is not None:
-                signal = generate_signal(rsi_val, strategy.direction, strategy.rsi_entry_threshold)
-                from .strategy_engine import Signal
-                if signal == Signal.NEUTRAL:
-                    strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓跳过 — RSI={round(rsi_val,1)} 信号已消失")
-                    return
-                strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓RSI确认 — RSI={round(rsi_val,1)}")
+            if strategy.signal_source == "wavetrend":
+                wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length, strategy.wt_ob_level, strategy.wt_os_level)
+                if wt is not None:
+                    confirm = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
+                    if confirm == Signal.NEUTRAL:
+                        strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓跳过 — WT1={wt['wt1']} 信号已消失")
+                        return
+                    strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓WT确认 — WT1={wt['wt1']} WT2={wt['wt2']}")
+            else:
+                rsi_val = calculate_rsi(klines, strategy.rsi_period)
+                if rsi_val is not None:
+                    confirm = generate_signal(rsi_val, strategy.direction, strategy.rsi_entry_threshold)
+                    if confirm == Signal.NEUTRAL:
+                        strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓跳过 — RSI={round(rsi_val,1)} 信号已消失")
+                        return
+                    strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓RSI确认 — RSI={round(rsi_val,1)}")
 
         # Cancel old TP orders before adding
         if strategy.take_profit_limit_order:
