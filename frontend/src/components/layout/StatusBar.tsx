@@ -150,15 +150,15 @@ export default function StatusBar() {
         <span className="text-gray-300">
           盈亏: 总盈亏
           <strong className={data.daily_pnl >= 0 ? 'text-green-400 ml-1' : 'text-red-400 ml-1'}>
-            {data.daily_pnl >= 0 ? '+' : ''}{data.daily_pnl.toFixed(2)}
+            {data.daily_pnl.toFixed(2)}
           </strong>
           <span className="mx-1">多单盈亏</span>
           <strong className={data.daily_pnl_long >= 0 ? 'text-green-400' : 'text-red-400'}>
-            {data.daily_pnl_long >= 0 ? '+' : ''}{data.daily_pnl_long.toFixed(2)}
+            {data.daily_pnl_long.toFixed(2)}
           </strong>
           <span className="mx-1">空单盈亏</span>
           <strong className={data.daily_pnl_short >= 0 ? 'text-green-400' : 'text-red-400'}>
-            {data.daily_pnl_short >= 0 ? '+' : ''}{data.daily_pnl_short.toFixed(2)}
+            {data.daily_pnl_short.toFixed(2)}
           </strong>
         </span>
       </div>
