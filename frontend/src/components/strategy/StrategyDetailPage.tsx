@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import type { Strategy } from '../../types/strategy';
@@ -35,11 +35,14 @@ export default function StrategyDetailPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const loadRef = useRef<() => void>(() => {});
+
   const load = useCallback(async () => {
     if (!id) return;
     try {
       const s = await api.getStrategy(Number(id));
       setStrategy(s);
+      setLoading(false);
 
       if (s.use_coin_pool) {
         try {
@@ -65,17 +68,17 @@ export default function StrategyDetailPage() {
       } catch { setLogs([]); }
     } catch {
       setStrategy(null);
+      setLoading(false);
     }
-    setLoading(false);
   }, [id]);
+  loadRef.current = load;
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [id]);
 
-  // Auto-refresh every 10 seconds
   useEffect(() => {
-    const timer = setInterval(load, 30000);
+    const timer = setInterval(() => loadRef.current(), 30000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, []);
 
   if (loading) {
     return <div className="text-center text-gray-400 py-20">加载中...</div>;
