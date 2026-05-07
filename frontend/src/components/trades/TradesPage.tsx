@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { Trade } from '../../types';
@@ -10,18 +10,25 @@ export default function TradesPage() {
   const [page, setPage] = useState(0);
   const limit = 50;
   const selectedAccountId = useDashboardStore((s) => s.selectedAccountId);
+  const loadRef = useRef<() => void>(() => {});
 
   const load = async () => {
     const data = await api.listTrades({ limit, offset: page * limit, account_id: selectedAccountId ?? undefined });
     setTrades(data.trades);
     setTotal(data.total);
   };
+  loadRef.current = load;
 
   useEffect(() => {
     setPage(0);
   }, [selectedAccountId]);
 
-  useEffect(() => { load(); }, [page]);
+  useEffect(() => { load(); }, [page, selectedAccountId]);
+
+  useEffect(() => {
+    const timer = setInterval(() => loadRef.current(), 30000);
+    return () => clearInterval(timer);
+  }, []);
 
   const handleDeleteOne = async (id: number) => {
     if (!confirm('确定要删除这条交易记录吗？')) return;
