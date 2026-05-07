@@ -198,13 +198,16 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         results.append({"symbol": symbol, "side": side, "status": "ok", "exit_price": exit_price})
         logging.info("Panic close: closed %s %s contracts=%.4f", symbol, side, contracts)
 
-    # Match to DB positions and mark closed
-    for (symbol, side), contracts in exchange_map.items():
-        matching = [p for p in db_positions if p.symbol == symbol and p.side == side]
+    # Match successfully closed positions to DB and record trades
+    for r in results:
+        if r["status"] != "ok":
+            continue
+        symbol = r["symbol"]
+        side = r["side"]
+        exit_price = r.get("exit_price", 0) or 0
+        matching = [p for p in db_positions if p.symbol.upper() == symbol.upper() and p.side == side]
         for p in matching:
-            result = next((r for r in results if r["symbol"] == symbol and r["side"] == side), None)
-            ep = (result and result.get("exit_price", 0)) or 0
-            ep = ep if ep > 0 else (p.mark_price or p.entry_price)
+            ep = exit_price if exit_price > 0 else (p.mark_price or p.entry_price)
             pnl = (ep - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - ep) * p.quantity
             pct = ((ep - p.entry_price) / p.entry_price * 100) if p.side == "long" else ((p.entry_price - ep) / p.entry_price * 100)
             trade = Trade(
@@ -216,11 +219,6 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                 layer=p.layer, close_reason="panic",
             )
             db.add(trade)
-            p.closed_at = now
-
-    # Also close any DB-only positions (not on exchange)
-    for p in db_positions:
-        if p.closed_at is None:
             p.closed_at = now
 
     await db.commit()
