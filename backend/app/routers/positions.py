@@ -56,10 +56,9 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
     if not result or not result.get("id"):
         raise HTTPException(status_code=500, detail="Exchange did not confirm the close order")
 
-    # Create Trade record
-    exit_price = position.mark_price or position.entry_price
-    exit_pnl = (exit_price - position.entry_price) * position.quantity if position.side == "long" else (position.entry_price - exit_price) * position.quantity
-    pnl_pct = ((exit_price - position.entry_price) / position.entry_price * 100) if position.side == "long" else ((position.entry_price - exit_price) / position.entry_price * 100)
+    exit_price = float(result.get("average", 0) or result.get("price", 0) or 0)
+    if exit_price <= 0:
+        exit_price = position.mark_price or position.entry_price
 
     from ..models.trade import Trade
     trade = Trade(
@@ -70,8 +69,8 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
         quantity=position.quantity,
         entry_price=position.entry_price,
         exit_price=exit_price,
-        realized_pnl=exit_pnl,
-        pnl_pct=round(pnl_pct, 2),
+        realized_pnl=(exit_price - position.entry_price) * position.quantity if position.side == "long" else (position.entry_price - exit_price) * position.quantity,
+        pnl_pct=round(((exit_price - position.entry_price) / position.entry_price * 100) if position.side == "long" else ((position.entry_price - exit_price) / position.entry_price * 100), 2),
         entry_time=position.opened_at,
         exit_time=now_beijing(),
         layer=position.layer,

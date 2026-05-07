@@ -406,26 +406,43 @@ class PositionManager:
                     strategy_log_service.error(strategy_id, f"{symbol} 兜底平仓异常 — {e}")
                     return
         else:
-            # Market close for stop loss or market TP
             for p in open_positions:
                 if p.tp_limit_order_id:
+                    try:
+                        order_info = await asyncio.wait_for(
+                            auth_binance.exchange.fetch_order(
+                                p.tp_limit_order_id, auth_binance._format_symbol(symbol)
+                            ),
+                            timeout=2.0,
+                        )
+                        order_status = order_info.get("status", "")
+                        avg_fill = float(order_info.get("average", 0) or 0)
+                        if order_status in ("closed", "filled") and avg_fill > 0:
+                            exit_price = avg_fill
+                            strategy_log_service.success(strategy_id, f"{symbol} 止盈限价单已成交 @{exit_price:.4f}（止损检查时发现）")
+                            logger.info("Strategy %d: TP limit already filled during SL check for %s @%.4f", strategy_id, symbol, exit_price)
+                            close_reason = "take_profit"
+                            break
+                    except (Exception, asyncio.TimeoutError):
+                        pass
                     try:
                         await auth_binance.cancel_order(p.tp_limit_order_id, symbol)
                     except Exception:
                         pass
                     p.tp_limit_order_id = None
 
-            try:
-                result = await auth_binance.close_position(symbol, pos_side)
-                if result and result.get("id"):
-                    exit_price = float(result.get("average", 0) or result.get("price", 0) or current_price)
-                else:
-                    strategy_log_service.warning(strategy_id, f"{symbol} 平仓失败 — 未找到交易所仓位")
+            if exit_price <= 0:
+                try:
+                    result = await auth_binance.close_position(symbol, pos_side)
+                    if result and result.get("id"):
+                        exit_price = float(result.get("average", 0) or result.get("price", 0) or current_price)
+                    else:
+                        strategy_log_service.warning(strategy_id, f"{symbol} 平仓失败 — 未找到交易所仓位")
+                        return
+                except Exception as e:
+                    logger.error("Strategy %d: close position failed: %s", strategy_id, e)
+                    strategy_log_service.error(strategy_id, f"{symbol} 平仓异常 — {e}")
                     return
-            except Exception as e:
-                logger.error("Strategy %d: close position failed: %s", strategy_id, e)
-                strategy_log_service.error(strategy_id, f"{symbol} 平仓异常 — {e}")
-                return
 
         # Common: create Trade records and mark positions closed
         logger.info("Strategy %d: closed %s due to %s", strategy_id, symbol, close_reason)
