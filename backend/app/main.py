@@ -91,6 +91,10 @@ async def lifespan(app: FastAPI):
     logger.info("Backend stopped")
 
 
+import os
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
 app = FastAPI(
     title="Smart Hedge Martin",
     description="智能对冲交易机器人系统",
@@ -126,6 +130,19 @@ app.include_router(trades.router)
 app.include_router(dashboard.router)
 app.include_router(coin_pool.router)
 app.include_router(websocket.router)
+
+# Serve frontend static files
+frontend_dist = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+if os.path.isdir(frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="static")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        """SPA fallback — serve index.html for non-API routes."""
+        file_path = os.path.join(frontend_dist, full_path) if full_path else ""
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
 
 
 @app.get("/api/health")
