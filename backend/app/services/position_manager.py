@@ -427,8 +427,8 @@ class PositionManager:
 
         # Step 2: record in DB
         try:
-            new_total = total_qty + result.next_quantity
-            new_avg_entry = (avg_entry * total_qty + new_avg * result.next_quantity) / new_total
+            new_total = total_qty + filled_qty
+            new_avg_entry = (avg_entry * total_qty + new_avg * filled_qty) / new_total
             tp_price = eng.get_take_profit_price(new_avg_entry, pos_side)
 
             pos = Position(
