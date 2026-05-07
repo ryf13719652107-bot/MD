@@ -95,8 +95,8 @@ class PositionManager:
         # --- Fetch klines with cache ---
         klines = _get_cached_klines(symbol, strategy.timeframe)
         if klines is None:
-            # WaveTrend needs more klines than RSI (33+ vs 15+)
-            limit = 50 if strategy.signal_source == "wavetrend" else 21
+            # RSI Wilder smoothing needs ~100 bars to converge; WT needs 33+
+            limit = 50 if strategy.signal_source == "wavetrend" else 100
             klines = await public_binance.fetch_klines(symbol, strategy.timeframe, limit=limit)
             _set_cached_klines(symbol, strategy.timeframe, klines)
 
