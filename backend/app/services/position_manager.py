@@ -294,26 +294,52 @@ class PositionManager:
             await self._martingale_add(session, strategy, symbol, auth_binance, open_positions, eng, result, avg_entry, total_qty, pos_side, current_price, klines, public_binance)
             return
 
-        # --- Check TP limit order fill (after trading, non-blocking) ---
-        if strategy.take_profit_limit_order:
-            for p in open_positions:
-                if p.tp_limit_order_id:
-                    try:
-                        order_info = await asyncio.wait_for(
-                            auth_binance.exchange.fetch_order(
-                                p.tp_limit_order_id, auth_binance._format_symbol(symbol)
-                            ),
-                            timeout=2.0,
-                        )
-                        status = order_info.get("status", "")
-                        avg_fill = float(order_info.get("average", 0) or 0)
-                        if status in ("closed", "filled") and avg_fill > 0:
-                            await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", current_price, pre_exit_price=avg_fill)
-                            return
-                    except (Exception, asyncio.TimeoutError):
-                        logger.warning("Strategy %d: TP order check failed for %s, will retry next tick", strategy_id, symbol)
-
         await session.flush()
+
+    async def check_tp_fills(self, session, strategy, auth_binance, current_price: float):
+        """Check all open positions for filled TP limit orders. Called mid-candle (no trading)."""
+        from ..models.position import Position
+        strategy_id = strategy.id
+        stmt = select(Position).where(
+            Position.strategy_id == strategy_id, Position.closed_at.is_(None)
+        )
+        result = await session.execute(stmt)
+        open_positions = list(result.scalars().all())
+
+        for p in open_positions:
+            if not p.tp_limit_order_id or not p.take_profit_price:
+                continue
+            # Only check when price is near TP level to save API calls
+            near_tp = (
+                (p.side == "long" and current_price >= p.take_profit_price * 0.995)
+                or (p.side == "short" and current_price <= p.take_profit_price * 1.005)
+            )
+            if not near_tp:
+                continue
+            try:
+                order_info = await asyncio.wait_for(
+                    auth_binance.exchange.fetch_order(
+                        p.tp_limit_order_id, auth_binance._format_symbol(p.symbol)
+                    ),
+                    timeout=2.0,
+                )
+                status = order_info.get("status", "")
+                avg_fill = float(order_info.get("average", 0) or 0)
+                if status in ("closed", "filled") and avg_fill > 0:
+                    # Build position list and engine for this symbol
+                    symbol_positions = [op for op in open_positions if op.symbol == p.symbol and op.side == p.side]
+                    if not symbol_positions:
+                        continue
+                    positions_data = [{"quantity": op.quantity, "entry_price": op.entry_price} for op in symbol_positions]
+                    eng = MartingaleEngine(base_quantity=symbol_positions[0].quantity, multiplier=strategy.martingale_mult,
+                                           max_layers=strategy.max_layers, take_profit_pct=strategy.take_profit_pct)
+                    avg_entry, _ = eng.get_avg_entry_price(positions_data)
+                    await self._close_positions(session, strategy, p.symbol, auth_binance, symbol_positions,
+                                                eng, avg_entry, p.side, "take_profit", current_price, pre_exit_price=avg_fill)
+                    logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, p.symbol, avg_fill)
+                    return  # one close per tick is enough
+            except (Exception, asyncio.TimeoutError):
+                pass  # silently skip, will retry next cycle
 
     async def _close_positions(self, session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, current_price, pre_exit_price: float = 0.0):
         strategy_id = strategy.id

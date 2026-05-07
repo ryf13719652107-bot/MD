@@ -77,18 +77,31 @@ class StrategyScheduler:
             logger.warning("Strategy %d not found", strategy_id)
             return False
 
+        interval_seconds = TIMEFRAME_SECONDS.get(strategy.timeframe, 60)
+        next_run = _next_candle_close(strategy.timeframe)
+
+        # Main trading job — at candle close
         job_id = f"strategy_{strategy_id}"
         existing_job = self._scheduler.get_job(job_id)
         if existing_job:
             self._scheduler.remove_job(job_id)
-
-        interval_seconds = TIMEFRAME_SECONDS.get(strategy.timeframe, 60)
-        next_run = _next_candle_close(strategy.timeframe)
         self._scheduler.add_job(
             self._execute_strategy, "interval", seconds=interval_seconds,
             id=job_id, args=[strategy_id], next_run_time=next_run,
         )
         self._strategy_tasks[strategy_id] = job_id
+
+        # TP fill check job — offset 30s after trading, runs mid-candle
+        tp_job_id = f"strategy_{strategy_id}_tp"
+        existing_tp = self._scheduler.get_job(tp_job_id)
+        if existing_tp:
+            self._scheduler.remove_job(tp_job_id)
+        from datetime import timedelta
+        self._scheduler.add_job(
+            self._execute_tp_check, "interval", seconds=interval_seconds,
+            id=tp_job_id, args=[strategy_id],
+            next_run_time=next_run + timedelta(seconds=30),
+        )
         strategy.status = "running"
         strategy.started_at = now_beijing()
         await session.commit()
@@ -99,10 +112,12 @@ class StrategyScheduler:
 
     async def remove_strategy(self, strategy_id: int):
         job_id = f"strategy_{strategy_id}"
+        tp_job_id = f"strategy_{strategy_id}_tp"
         self._strategy_tasks.pop(strategy_id, None)
-        existing_job = self._scheduler.get_job(job_id)
-        if existing_job:
-            self._scheduler.remove_job(job_id)
+        for jid in (job_id, tp_job_id):
+            existing_job = self._scheduler.get_job(jid)
+            if existing_job:
+                self._scheduler.remove_job(jid)
         async with async_session() as session:
             strategy = await session.get(Strategy, strategy_id)
             if strategy:
@@ -127,6 +142,36 @@ class StrategyScheduler:
     async def _execute_strategy(self, strategy_id: int):
         async with _STRATEGY_SEMAPHORE:
             await self._execute_strategy_impl(strategy_id)
+
+    async def _execute_tp_check(self, strategy_id: int):
+        """Mid-candle TP fill check — no trading, just detect filled limit orders."""
+        async with async_session() as session:
+            strategy = await session.get(Strategy, strategy_id)
+            if not strategy or strategy.status != "running":
+                return
+            auth_binance = await self._get_binance_for_strategy(strategy)
+            if not auth_binance:
+                return
+            # Get current price from ticker
+            try:
+                public_binance = await get_public_binance()
+                if strategy.use_coin_pool:
+                    symbols = await coin_pool_service.get_pool_symbols(strategy.coin_pool_source, strategy.coin_pool_top_n)
+                elif strategy.symbol:
+                    symbols = [strategy.symbol]
+                else:
+                    return
+                for symbol in symbols:
+                    try:
+                        ticker = await asyncio.wait_for(public_binance.fetch_ticker(symbol), timeout=3.0)
+                        current_price = float(ticker.get("last", 0) or 0)
+                        if current_price > 0:
+                            await self._position_mgr.check_tp_fills(session, strategy, auth_binance, current_price)
+                    except (Exception, asyncio.TimeoutError):
+                        pass
+                await session.commit()
+            except Exception:
+                pass
 
     async def _execute_strategy_impl(self, strategy_id: int):
         async with async_session() as session:
@@ -164,9 +209,9 @@ class StrategyScheduler:
                         strategy.status = "stopped"
                         await session.commit()
                         self._strategy_tasks.pop(strategy_id, None)
-                        job_id = f"strategy_{strategy_id}"
-                        if self._scheduler.get_job(job_id):
-                            self._scheduler.remove_job(job_id)
+                        for jid in (f"strategy_{strategy_id}", f"strategy_{strategy_id}_tp"):
+                            if self._scheduler.get_job(jid):
+                                self._scheduler.remove_job(jid)
                         logger.warning("Strategy %d margin %.2f below threshold %.2f — stopping and closing all positions", strategy_id, total_margin, strategy.margin_threshold)
                         # Close ALL exchange positions with -1106 retry fallback
                         from ..models.position import Position as PosModel
