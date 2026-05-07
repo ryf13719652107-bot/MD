@@ -238,7 +238,7 @@ class PositionManager:
             close_side = "sell" if position_side == "long" else "buy"
             for attempt in range(2):
                 try:
-                    tp_order = await auth_binance.create_limit_order(symbol, close_side, base_qty, tp_price, reduce_only=False, position_side=ps)
+                    tp_order = await auth_binance.create_limit_order(symbol, close_side, filled_qty, tp_price, reduce_only=False, position_side=ps)
                     tp_order_id = tp_order.get("id", "")
                     if tp_order_id:
                         pos.tp_limit_order_id = tp_order_id
@@ -297,7 +297,6 @@ class PositionManager:
         await session.flush()
 
     async def check_tp_fills(self, session, strategy, auth_binance, current_price: float):
-        """Check all open positions for filled TP limit orders. Called mid-candle (no trading)."""
         from ..models.position import Position
         strategy_id = strategy.id
         stmt = select(Position).where(
@@ -306,8 +305,12 @@ class PositionManager:
         result = await session.execute(stmt)
         open_positions = list(result.scalars().all())
 
+        processed_symbols: set[tuple[str, str]] = set()
         for p in open_positions:
             if not p.tp_limit_order_id or not p.take_profit_price:
+                continue
+            symbol_side_key = (p.symbol, p.side)
+            if symbol_side_key in processed_symbols:
                 continue
             try:
                 order_info = await asyncio.wait_for(
@@ -319,7 +322,6 @@ class PositionManager:
                 status = order_info.get("status", "")
                 avg_fill = float(order_info.get("average", 0) or 0)
                 if status in ("closed", "filled") and avg_fill > 0:
-                    # Build position list and engine for this symbol
                     symbol_positions = [op for op in open_positions if op.symbol == p.symbol and op.side == p.side]
                     if not symbol_positions:
                         continue
@@ -330,7 +332,7 @@ class PositionManager:
                     await self._close_positions(session, strategy, p.symbol, auth_binance, symbol_positions,
                                                 eng, avg_entry, p.side, "take_profit", current_price, pre_exit_price=avg_fill)
                     logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, p.symbol, avg_fill)
-                    return  # one close per tick is enough
+                    processed_symbols.add(symbol_side_key)
             except (Exception, asyncio.TimeoutError):
                 logger.warning("Strategy %d: TP order check failed for %s %s, retrying next cycle", strategy_id, p.symbol, p.side)
 
@@ -339,15 +341,70 @@ class PositionManager:
 
         exit_price = 0.0
 
-        # TP limit order already filled upstream — use pre-determined exit price
         if pre_exit_price > 0:
             exit_price = pre_exit_price
             strategy_log_service.success(strategy_id, f"{symbol} 止盈平仓 — 限价单已成交 @{exit_price:.4f}")
             logger.info("Strategy %d: TP limit filled for %s @%.4f", strategy_id, symbol, exit_price)
         elif close_reason == "take_profit" and strategy.take_profit_limit_order:
-            # TP triggered by price but order might still be pending — wait for it
-            strategy_log_service.info(strategy_id, f"{symbol} 止盈限价单已挂交易所，等待成交")
-            return
+            has_tp_order = any(p.tp_limit_order_id for p in open_positions)
+            if not has_tp_order:
+                strategy_log_service.warning(strategy_id, f"{symbol} 止盈条件触发但无限价单ID — 兜底市价平仓")
+                logger.warning("Strategy %d: %s TP triggered but no tp_limit_order_id, falling back to market close", strategy_id, symbol)
+            else:
+                tp_order_id = None
+                for p in open_positions:
+                    if p.tp_limit_order_id:
+                        tp_order_id = p.tp_limit_order_id
+                        break
+                if tp_order_id:
+                    try:
+                        order_info = await asyncio.wait_for(
+                            auth_binance.exchange.fetch_order(
+                                tp_order_id, auth_binance._format_symbol(symbol)
+                            ),
+                            timeout=3.0,
+                        )
+                        order_status = order_info.get("status", "")
+                        avg_fill = float(order_info.get("average", 0) or 0)
+                        if order_status in ("closed", "filled") and avg_fill > 0:
+                            exit_price = avg_fill
+                            strategy_log_service.success(strategy_id, f"{symbol} 止盈限价单已成交 @{exit_price:.4f}")
+                            logger.info("Strategy %d: TP limit already filled for %s @%.4f", strategy_id, symbol, exit_price)
+                        elif order_status in ("canceled", "cancelled", "expired"):
+                            strategy_log_service.warning(strategy_id, f"{symbol} 止盈限价单已取消/过期 — 兜底市价平仓")
+                            logger.warning("Strategy %d: %s TP order %s, falling back to market close", strategy_id, symbol, order_status)
+                            for p in open_positions:
+                                p.tp_limit_order_id = None
+                        else:
+                            strategy_log_service.info(strategy_id, f"{symbol} 止盈限价单状态={order_status}，等待成交")
+                            return
+                    except (Exception, asyncio.TimeoutError) as e:
+                        logger.warning("Strategy %d: TP order check failed for %s: %s — waiting for check_tp_fills", strategy_id, symbol, e)
+                        return
+                else:
+                    strategy_log_service.warning(strategy_id, f"{symbol} 止盈条件触发但无限价单 — 兜底市价平仓")
+
+            if exit_price <= 0:
+                for p in open_positions:
+                    if p.tp_limit_order_id:
+                        try:
+                            await auth_binance.cancel_order(p.tp_limit_order_id, symbol)
+                        except Exception:
+                            pass
+                        p.tp_limit_order_id = None
+                try:
+                    result = await auth_binance.close_position(symbol, pos_side)
+                    if result and result.get("id"):
+                        exit_price = float(result.get("average", 0) or result.get("price", 0) or current_price)
+                        close_reason = "take_profit"
+                        strategy_log_service.success(strategy_id, f"{symbol} 兜底市价止盈 @{exit_price:.4f}")
+                    else:
+                        strategy_log_service.warning(strategy_id, f"{symbol} 兜底平仓失败 — 未找到交易所仓位")
+                        return
+                except Exception as e:
+                    logger.error("Strategy %d: fallback market close failed: %s", strategy_id, e)
+                    strategy_log_service.error(strategy_id, f"{symbol} 兜底平仓异常 — {e}")
+                    return
         else:
             # Market close for stop loss or market TP
             for p in open_positions:
