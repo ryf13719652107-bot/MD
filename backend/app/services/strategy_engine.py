@@ -176,15 +176,15 @@ def calculate_wavetrend(
     }
 
 
-def generate_wt_signal(wt: dict, direction: str) -> Signal:
+def generate_wt_signal(wt: dict, direction: str, os_level: float = -60.0, ob_level: float = 60.0) -> Signal:
     """WaveTrend signal matching Pine Script:
-    long  = crossover(wt1, wt2) AND wt1 < os_level2 (-53)
-    short = crossunder(wt1, wt2) AND wt1 > ob_level2 (53)
+    long  = crossover(wt1, wt2) AND wt1 < os_level
+    short = crossunder(wt1, wt2) AND wt1 > ob_level
     """
     if direction == "long":
-        if wt["cross_above"] and wt["wt1"] < -53:
+        if wt["cross_above"] and wt["wt1"] < os_level:
             return Signal.LONG
     elif direction == "short":
-        if wt["cross_below"] and wt["wt1"] > 53:
+        if wt["cross_below"] and wt["wt1"] > ob_level:
             return Signal.SHORT
     return Signal.NEUTRAL

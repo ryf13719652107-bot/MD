@@ -14,6 +14,8 @@ class StrategyCreate(BaseModel):
     margin_threshold: float = Field(default=0.0, ge=0)
     wt_channel_length: int = Field(default=10, ge=2, le=50)
     wt_average_length: int = Field(default=21, ge=2, le=100)
+    wt_ob_level: float = Field(default=60.0, ge=0, le=100)
+    wt_os_level: float = Field(default=-60.0, ge=-100, le=0)
     # Entry
     base_qty_type: Literal["margin_pct", "usdt"] = "margin_pct"
     base_qty_value: float = Field(default=6.0, gt=0)
@@ -50,6 +52,8 @@ class StrategyUpdate(BaseModel):
     margin_threshold: Optional[float] = Field(default=None, ge=0)
     wt_channel_length: Optional[int] = Field(default=None, ge=2, le=50)
     wt_average_length: Optional[int] = Field(default=None, ge=2, le=100)
+    wt_ob_level: Optional[float] = Field(default=None, ge=0, le=100)
+    wt_os_level: Optional[float] = Field(default=None, ge=-100, le=0)
     base_qty_type: Optional[Literal["margin_pct", "usdt"]] = None
     base_qty_value: Optional[float] = Field(default=None, gt=0)
     rsi_entry_threshold: Optional[float] = Field(default=None, ge=0, le=100)
@@ -81,6 +85,8 @@ class StrategyResponse(BaseModel):
     timeframe: str
     wt_channel_length: int
     wt_average_length: int
+    wt_ob_level: float
+    wt_os_level: float
     margin_threshold: float
     base_qty_type: str
     base_qty_value: float

@@ -9,6 +9,8 @@ export interface Strategy {
   timeframe: string;
   wt_channel_length: number;
   wt_average_length: number;
+  wt_ob_level: number;
+  wt_os_level: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -47,6 +49,8 @@ export interface StrategyFormData {
   timeframe: string;
   wt_channel_length: number;
   wt_average_length: number;
+  wt_ob_level: number;
+  wt_os_level: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;

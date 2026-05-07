@@ -29,6 +29,8 @@ class Strategy(Base):
     # WaveTrend params
     wt_channel_length: Mapped[int] = mapped_column(Integer, default=10, server_default="10")
     wt_average_length: Mapped[int] = mapped_column(Integer, default=21, server_default="21")
+    wt_ob_level: Mapped[float] = mapped_column(Float, default=60.0, server_default="60.0")
+    wt_os_level: Mapped[float] = mapped_column(Float, default=-60.0, server_default="-60.0")
 
     # Entry position params
     base_qty_type: Mapped[str] = mapped_column(String(20), default="margin_pct")  # 'margin_pct' or 'usdt'

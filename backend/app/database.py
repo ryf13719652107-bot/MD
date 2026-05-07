@@ -33,3 +33,13 @@ async def init_db():
     # Create tables from current model (no-op if already exist)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Add new columns that may not exist in existing databases
+        migrations = [
+            "ALTER TABLE strategies ADD COLUMN wt_ob_level FLOAT DEFAULT 60.0",
+            "ALTER TABLE strategies ADD COLUMN wt_os_level FLOAT DEFAULT -60.0",
+        ]
+        for sql in migrations:
+            try:
+                await conn.run_sync(lambda c, s=sql: c.exec_driver_sql(s))
+            except Exception:
+                pass  # column already exists

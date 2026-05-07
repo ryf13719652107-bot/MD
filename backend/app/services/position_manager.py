@@ -106,15 +106,17 @@ class PositionManager:
 
         # --- Generate signal based on source ---
         rsi = 0.0  # always defined, used for logging
+        signal_label = "RSI"
         if strategy.signal_source == "wavetrend":
-            wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length)
+            wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length, strategy.wt_ob_level, strategy.wt_os_level)
             if wt is None:
                 return
-            signal = generate_wt_signal(wt, strategy.direction)
+            signal = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
             strategy.last_rsi = wt["wt1"]  # reuse field for WT1 display
             strategy.last_signal = signal.value
             strategy.last_signal_at = now_beijing()
             rsi = wt["wt1"]
+            signal_label = "WT1"
             if signal != Signal.NEUTRAL:
                 strategy_log_service.info(strategy_id, f"{symbol} WT1={wt['wt1']} WT2={wt['wt2']} 信号={signal.value}")
         else:
@@ -245,8 +247,8 @@ class PositionManager:
             if not tp_placed:
                 strategy_log_service.warning(strategy_id, f"{symbol} 止盈挂单失败(已重试) — 下次tick将用市价止盈兜底")
 
-        logger.info("Strategy %d: opened %s %s qty=%.4f price=%.4f RSI=%.1f", strategy_id, side, symbol, base_qty, avg_price, rsi)
-        strategy_log_service.success(strategy_id, f"{symbol} 开{position_side}成功 qty={base_qty:.4f} price={avg_price:.4f} RSI={round(rsi,1)}")
+        logger.info("Strategy %d: opened %s %s qty=%.4f price=%.4f %s=%.1f", strategy_id, side, symbol, base_qty, avg_price, signal_label, rsi)
+        strategy_log_service.success(strategy_id, f"{symbol} 开{position_side}成功 qty={base_qty:.4f} price={avg_price:.4f} {signal_label}={round(rsi,1)}")
 
     async def _manage_positions(
         self, session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines=None

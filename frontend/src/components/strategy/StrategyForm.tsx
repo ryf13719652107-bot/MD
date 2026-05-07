@@ -15,6 +15,8 @@ const schema = z.object({
   timeframe: z.enum(['1m', '5m', '15m', '1h']),
   wt_channel_length: z.number().min(2).max(50),
   wt_average_length: z.number().min(2).max(100),
+  wt_ob_level: z.number().min(10).max(100),
+  wt_os_level: z.number().min(-100).max(-10),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -54,6 +56,8 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       timeframe: initialData.timeframe as '1m' | '5m' | '15m' | '1h',
       wt_channel_length: initialData.wt_channel_length ?? 10,
       wt_average_length: initialData.wt_average_length ?? 21,
+      wt_ob_level: initialData.wt_ob_level ?? 60,
+      wt_os_level: initialData.wt_os_level ?? -60,
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -85,6 +89,8 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     timeframe: '1m',
     wt_channel_length: 10,
     wt_average_length: 21,
+    wt_ob_level: 60,
+    wt_os_level: -60,
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -207,6 +213,16 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <label className={labelClass}>WT 均线长度</label>
               <input type="number" {...register('wt_average_length', { valueAsNumber: true })} className={inputClass} />
               <span className="text-xs text-gray-600">WT2平滑周期，默认21</span>
+            </div>
+            <div>
+              <label className={labelClass}>WT 超买线</label>
+              <input type="number" step="1" {...register('wt_ob_level', { valueAsNumber: true })} className={inputClass} />
+              <span className="text-xs text-gray-600">死叉+WT1高于此值开空，默认60</span>
+            </div>
+            <div>
+              <label className={labelClass}>WT 超卖线</label>
+              <input type="number" step="1" {...register('wt_os_level', { valueAsNumber: true })} className={inputClass} />
+              <span className="text-xs text-gray-600">金叉+WT1低于此值开多，默认-60</span>
             </div>
           </div>
         )}
