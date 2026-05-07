@@ -89,7 +89,6 @@ class PositionManager:
         public_binance: BinanceService,
         total_margin: float,
         leverage: float,
-        exchange_open_set: set = None,
     ):
         strategy_id = strategy.id
 

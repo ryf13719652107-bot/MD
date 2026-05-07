@@ -212,9 +212,10 @@ class BinanceService:
             )
         except Exception as e:
             if "-1106" in str(e):
-                return await self.create_market_order(
-                    symbol, close_side, total_contracts,
-                    reduce_only=False, position_side="",
+                # -1106 means one-way mode — bypass _order_params entirely
+                return await self.exchange.create_order(
+                    symbol=self._format_symbol(symbol),
+                    type="market", side=close_side, amount=total_contracts,
                 )
             raise
 
