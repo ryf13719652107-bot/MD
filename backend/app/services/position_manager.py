@@ -309,13 +309,6 @@ class PositionManager:
         for p in open_positions:
             if not p.tp_limit_order_id or not p.take_profit_price:
                 continue
-            # Only check when price is near TP level to save API calls
-            near_tp = (
-                (p.side == "long" and current_price >= p.take_profit_price * 0.995)
-                or (p.side == "short" and current_price <= p.take_profit_price * 1.005)
-            )
-            if not near_tp:
-                continue
             try:
                 order_info = await asyncio.wait_for(
                     auth_binance.exchange.fetch_order(
