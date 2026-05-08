@@ -12,15 +12,24 @@ type DisplayRow = {
   side: 'long' | 'short';
   notional_usdt: number;
   entry_price: number;
-  mark_price: number | null;
   unrealized_pnl: number;
   layer: string;
-  take_profit_label: string;
   tp_has_order: boolean;
-  tp_target_only: boolean; // 有止盈目标价但未挂限价单（如挂单失败、或仅市价止盈）
+  tp_target_only: boolean;
   opened_at_label: string;
   exchange_only: boolean;
 };
+
+function exchangeNotionalUsdt(ep: ExchangePos): number {
+  let u = typeof ep.usdt === 'number' ? ep.usdt : 0;
+  if (u > 1e-8) return u;
+  const c = ep.contracts;
+  const m = ep.mark_price;
+  if (typeof c === 'number' && typeof m === 'number' && c > 0 && m > 0) {
+    return Math.abs(c * m);
+  }
+  return 0;
+}
 
 function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): DisplayRow[] {
   const norm = (s: string) => s.replace(/\//g, '').replace(':USDT', '').toUpperCase();
@@ -48,12 +57,10 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
         key: `${sym}-${side}`,
         symbol: ep.symbol,
         side,
-        notional_usdt: typeof ep.usdt === 'number' ? ep.usdt : 0,
+        notional_usdt: exchangeNotionalUsdt(ep),
         entry_price: ep.entry_price,
-        mark_price: ep.mark_price,
         unrealized_pnl: ep.unrealized_pnl,
         layer,
-        take_profit_label: hasTpPrice ? tp!.toFixed(8) : '-',
         tp_has_order: tpId,
         tp_target_only: hasTpPrice && !tpId,
         opened_at_label: opened ? new Date(opened as string).toLocaleString() : '-',
@@ -70,10 +77,8 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
         side: p.side,
         notional_usdt: px * p.quantity,
         entry_price: p.entry_price,
-        mark_price: p.mark_price ?? null,
         unrealized_pnl: p.unrealized_pnl ?? 0,
         layer: `L${p.layer}`,
-        take_profit_label: p.take_profit_price != null ? p.take_profit_price.toFixed(8) : '-',
         tp_has_order: !!p.tp_limit_order_id,
         tp_target_only: p.take_profit_price != null && !p.tp_limit_order_id,
         opened_at_label: p.opened_at ? new Date(p.opened_at).toLocaleString() : '-',
@@ -132,7 +137,7 @@ export default function PositionsPage() {
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
         <h2 className="text-xl font-bold">当前持仓</h2>
         <span className="text-xs text-gray-500">
-          与顶部「持仓」一致：来自交易所；层数 / 止盈 / 限价单来自本地策略库（若有）· 每 30 秒刷新
+          名义 USDT 来自交易所持仓；限价止盈状态来自本地策略库 · 每 30 秒刷新
         </span>
       </div>
 
@@ -148,11 +153,9 @@ export default function PositionsPage() {
             <tr className="text-gray-500 text-left border-b border-gray-800">
               <th className="p-3">交易对</th>
               <th className="p-3">方向</th>
-              <th className="p-3">名义(USDT)</th>
+              <th className="p-3">持仓(USDT)</th>
               <th className="p-3">层数</th>
               <th className="p-3">入场价</th>
-              <th className="p-3">当前价</th>
-              <th className="p-3">止盈价</th>
               <th className="p-3">限价止盈</th>
               <th className="p-3">未实现盈亏</th>
               <th className="p-3">开仓时间</th>
@@ -176,8 +179,6 @@ export default function PositionsPage() {
                 <td className="p-3 font-mono text-gray-200">{row.notional_usdt.toFixed(2)}</td>
                 <td className="p-3 text-gray-400">{row.layer}</td>
                 <td className="p-3 font-mono">{row.entry_price?.toFixed(8)}</td>
-                <td className="p-3 font-mono">{row.mark_price != null ? row.mark_price.toFixed(8) : '-'}</td>
-                <td className="p-3 font-mono text-cyan-400">{row.take_profit_label}</td>
                 <td className="p-3">
                   {row.tp_has_order ? (
                     <span className="inline-flex items-center gap-1 text-green-400" title="已挂限价止盈单">
@@ -185,7 +186,7 @@ export default function PositionsPage() {
                       <span className="text-xs">已挂单</span>
                     </span>
                   ) : row.tp_target_only ? (
-                    <span className="inline-flex items-center gap-1 text-amber-400/90" title="有止盈目标价，当前无未完成限价单（可能为市价止盈或未挂成）">
+                    <span className="inline-flex items-center gap-1 text-amber-400/90" title="策略有止盈目标，当前无未完成限价单">
                       <Minus size={16} />
                       <span className="text-xs">未挂单</span>
                     </span>
@@ -202,7 +203,7 @@ export default function PositionsPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={10} className="p-8 text-center text-gray-600">
+                <td colSpan={8} className="p-8 text-center text-gray-600">
                   暂无持仓
                 </td>
               </tr>

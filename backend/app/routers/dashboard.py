@@ -97,11 +97,15 @@ async def get_dashboard(
                         else:
                             pnl_pct = (mark_price - entry_price) / entry_price * 100
                     notional = float(p.get("notional", 0) or 0)
+                    if abs(notional) < 1e-12 and contracts > 0 and mark_price > 0:
+                        cs = float(p.get("contractSize", 1) or 1)
+                        notional = abs(contracts * mark_price * cs)
                     total_notional += notional
                     exchange_positions.append({
                         "symbol": symbol,
                         "side": side,
-                        "usdt": round(notional, 0),
+                        "usdt": round(notional, 2),
+                        "contracts": contracts,
                         "entry_price": round(entry_price, 4),
                         "mark_price": round(mark_price, 4),
                         "unrealized_pnl": round(float(p.get("unrealizedPnl", 0) or 0), 2),

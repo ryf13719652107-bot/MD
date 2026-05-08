@@ -65,6 +65,7 @@ export interface DashboardData {
     symbol: string;
     side: string;
     usdt: number;
+    contracts?: number;
     entry_price: number;
     mark_price: number;
     unrealized_pnl: number;
