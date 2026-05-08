@@ -1,10 +1,8 @@
 import type { Account, Position, Trade, DashboardData, CoinPoolEntry, KlineData } from '../types';
 import type { Strategy, StrategyFormData } from '../types/strategy';
 
-// Dev: through Vite proxy; Prod: direct to backend port 8000
-const BASE = import.meta.env.DEV
-  ? '/api'
-  : `http://${window.location.hostname}:8000/api`;
+// Same-origin `/api`: Vite dev server proxies to backend; production is served by FastAPI with API on the same host (also works behind reverse proxy on 80/443).
+const BASE = '/api';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${url}`, {
