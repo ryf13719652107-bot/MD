@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.strategy import Strategy
 from ..models.position import Position
 from ..models.trade import Trade
-from ..config import now_beijing
+from ..config import now_beijing, BEIJING_TZ
 from .binance_service import BinanceService
 from .strategy_engine import calculate_rsi, generate_signal, Signal, calculate_wavetrend, generate_wt_signal
 from .martingale_engine import MartingaleEngine
@@ -20,6 +20,35 @@ logger = logging.getLogger(__name__)
 
 def _norm_sym(s: str) -> str:
     return (s or "").replace("/", "").replace(":USDT", "").upper()
+
+
+def _naive_beijing_from_ms_or_s(ts) -> Optional[datetime]:
+    if ts is None:
+        return None
+    try:
+        t = float(ts)
+        if t > 1e12:
+            t = t / 1000.0
+        from datetime import datetime
+
+        return datetime.fromtimestamp(t, BEIJING_TZ).replace(tzinfo=None)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _position_opened_at_from_exchange(ep: dict) -> Optional[datetime]:
+    ts = ep.get("timestamp")
+    dt = _naive_beijing_from_ms_or_s(ts)
+    if dt:
+        return dt
+    info = ep.get("info") or {}
+    if isinstance(info, dict):
+        for k in ("updateTime", "entryTime", "createdTime"):
+            v = info.get(k)
+            dt = _naive_beijing_from_ms_or_s(v)
+            if dt:
+                return dt
+    return None
 
 
 # _reconcile_orphan_from_exchange return values
@@ -91,6 +120,66 @@ class PositionManager:
 
     def __init__(self, risk_mgr: Optional[RiskManager] = None):
         self.risk_mgr = risk_mgr or RiskManager()
+
+    async def _bind_tp_limit_from_open_orders(
+        self,
+        auth_binance: BinanceService,
+        symbol: str,
+        position_side: str,
+        pos: Position,
+        contracts: float,
+    ) -> None:
+        """If exchange has a reduce-only limit closing this leg, bind its id for UI / TP tracking."""
+        if pos.tp_limit_order_id:
+            return
+        formatted = auth_binance._format_symbol(symbol)
+        close_side = "sell" if position_side == "long" else "buy"
+        ps_need = "LONG" if position_side == "long" else "SHORT"
+        try:
+            orders = await auth_binance.exchange.fetch_open_orders(formatted)
+        except Exception as e:
+            logger.debug("Strategy %s: fetch_open_orders for bind TP failed: %s", symbol, e)
+            return
+        chosen = None
+        for o in orders:
+            if (o.get("side") or "").lower() != close_side:
+                continue
+            typ = (o.get("type") or "").lower()
+            if "limit" not in typ:
+                continue
+            info = o.get("info") or {}
+            ro = o.get("reduceOnly")
+            if ro is None:
+                ro = o.get("reduce_only")
+            if ro is None and isinstance(info, dict):
+                ro = info.get("reduceOnly")
+            reduce_only = bool(ro) if isinstance(ro, bool) else str(ro).lower() in ("true", "1")
+            if not reduce_only:
+                continue
+            if auth_binance.hedge_mode:
+                ips = str(
+                    o.get("positionSide")
+                    or o.get("posSide")
+                    or (info.get("positionSide") if isinstance(info, dict) else "")
+                    or ""
+                ).upper()
+                if ips and ips != ps_need:
+                    continue
+            amt = float(o.get("amount", 0) or 0) or float(o.get("remaining", 0) or 0)
+            if contracts > 0 and amt > 0:
+                rel = abs(amt - contracts) / max(contracts, 1e-12)
+                if rel > 0.02 and abs(amt - contracts) > 1e-5:
+                    continue
+            oid = o.get("id")
+            if oid:
+                chosen = o
+                break
+        if not chosen:
+            return
+        pos.tp_limit_order_id = str(chosen.get("id"))
+        opx = float(chosen.get("price", 0) or 0)
+        if opx > 0:
+            pos.take_profit_price = opx
 
     async def _reconcile_orphan_from_exchange(
         self,
@@ -164,6 +253,7 @@ class PositionManager:
             )
             tp_price = eng.get_take_profit_price(entry_price, side)
 
+            opened_at = _position_opened_at_from_exchange(ep) or now_beijing()
             pos = Position(
                 strategy_id=strategy_id,
                 account_id=strategy.account_id,
@@ -176,8 +266,10 @@ class PositionManager:
                 layer=0,
                 take_profit_price=tp_price,
                 exchange_order_id="",
+                opened_at=opened_at,
             )
             session.add(pos)
+            await self._bind_tp_limit_from_open_orders(auth_binance, symbol, side, pos, contracts)
             try:
                 await session.flush()
             except Exception as e:
@@ -198,10 +290,12 @@ class PositionManager:
                 contracts,
                 entry_price,
             )
-            strategy_log_service.warning(
-                strategy_id,
-                f"{symbol} 交易所有{side}仓但本地无记录 — 已按交易所数据恢复一条持仓(L0)，止盈价按当前策略重算",
+            msg = (
+                f"{symbol} 交易所有{side}仓但本地无记录 — 已按交易所数据恢复一条持仓(L0)，止盈价按当前策略重算"
             )
+            if pos.tp_limit_order_id:
+                msg += f"，已关联交易所限价止盈单 id={pos.tp_limit_order_id}"
+            strategy_log_service.warning(strategy_id, msg)
 
         if created:
             return RECONCILE_CREATED
