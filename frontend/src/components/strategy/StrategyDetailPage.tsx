@@ -169,7 +169,7 @@ export default function StrategyDetailPage() {
           <div>
             <span className={labelClass}>TradFi / 股票永续</span>
             <div className={valClass}>
-              {(strategy.exclude_tradefi ?? true) ? '已排除（TRADIFI_PERPETUAL）' : '未排除'}
+              {(strategy.exclude_tradefi === true) ? '已排除（TRADIFI_PERPETUAL）' : '未排除'}
             </div>
           </div>
           {strategy.last_rsi != null && (

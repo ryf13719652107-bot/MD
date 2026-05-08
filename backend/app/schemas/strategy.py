@@ -41,7 +41,7 @@ class StrategyCreate(BaseModel):
     coin_pool_refresh_seconds: int = Field(default=3600, ge=30, le=86400)
     coin_pool_fetch_mode: Literal["immediate", "interval"] = "interval"
     coin_pool_top_n: int = Field(default=20, ge=1, le=50)
-    exclude_tradefi: bool = True
+    exclude_tradefi: bool = False
 
 
 class StrategyUpdate(BaseModel):

@@ -39,7 +39,7 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN wt_os_level FLOAT DEFAULT -60.0",
             "ALTER TABLE positions ADD COLUMN opened_at TIMESTAMP",
             "ALTER TABLE positions ADD COLUMN closed_at TIMESTAMP",
-            "ALTER TABLE strategies ADD COLUMN exclude_tradefi BOOLEAN DEFAULT 1",
+            "ALTER TABLE strategies ADD COLUMN exclude_tradefi BOOLEAN DEFAULT 0",
         ]
         for sql in migrations:
             try:

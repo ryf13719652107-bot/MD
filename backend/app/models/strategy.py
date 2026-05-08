@@ -63,8 +63,8 @@ class Strategy(Base):
     coin_pool_refresh_seconds: Mapped[int] = mapped_column(Integer, default=3600)  # how often to refresh coin pool
     coin_pool_fetch_mode: Mapped[str] = mapped_column(String(20), default="interval")  # 'immediate' or 'interval'
     coin_pool_top_n: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
-    # True: 排除 TRADIFI_PERPETUAL（股票/TradFi 永续），仅交易普通币本位永续
-    exclude_tradefi: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # False by default. True: 排除 TRADIFI_PERPETUAL（股票/TradFi 永续），仅本策略扫描列表过滤
+    exclude_tradefi: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     # Runtime state
     status: Mapped[str] = mapped_column(String(20), default="stopped")  # 'running', 'stopped', 'error'

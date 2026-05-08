@@ -323,7 +323,7 @@ class PositionManager:
         result = await session.execute(stmt)
         open_positions = list(result.scalars().all())
 
-        if getattr(strategy, "exclude_tradefi", True):
+        if getattr(strategy, "exclude_tradefi", False):
             from ..services.binance_service import get_cached_tradefi_symbols
 
             tradefi = await get_cached_tradefi_symbols(public_binance)

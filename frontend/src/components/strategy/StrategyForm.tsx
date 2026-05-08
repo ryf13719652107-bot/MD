@@ -78,7 +78,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       coin_pool_refresh_seconds: initialData.coin_pool_refresh_seconds ?? 3600,
       coin_pool_fetch_mode: initialData.coin_pool_fetch_mode ?? 'interval',
       coin_pool_top_n: initialData.coin_pool_top_n ?? 20,
-      exclude_tradefi: initialData.exclude_tradefi ?? true,
+      exclude_tradefi: initialData.exclude_tradefi ?? false,
     };
   }
   return {
@@ -112,7 +112,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     coin_pool_refresh_seconds: 3600,
     coin_pool_fetch_mode: 'interval',
     coin_pool_top_n: 20,
-    exclude_tradefi: true,
+    exclude_tradefi: false,
   };
 }
 
@@ -302,7 +302,8 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           <div>
             <div className="text-sm text-gray-200">排除 TradFi / 股票永续</div>
             <p className="text-xs text-gray-500 mt-0.5">
-              使用币安 exchangeInfo 中的合约类型过滤（如 SNDK、TSLA 等）。默认开启。若本策略已有该币未平仓仓位，仍会照常管理。
+              开启后：<strong className="text-gray-400">本策略</strong>不会交易币安标记为 TRADIFI 永续的个股/TradFi 合约；选币池列表会先在调度器里过滤再跑信号。
+              全局「选币池」数据表仍可能含这些币（涨跌幅榜公用），其它未开此开关的策略仍会看到。
             </p>
           </div>
         </div>
