@@ -17,6 +17,11 @@ from .log_service import strategy_log_service
 
 logger = logging.getLogger(__name__)
 
+
+def _norm_sym(s: str) -> str:
+    return (s or "").replace("/", "").replace(":USDT", "").upper()
+
+
 # Shared caches and cooldown (module-level, shared with scheduler)
 _kline_cache: dict[tuple[str, str], tuple[float, list]] = {}
 _KLINE_CACHE_TTL = 30.0
@@ -79,6 +84,104 @@ class PositionManager:
 
     def __init__(self, risk_mgr: Optional[RiskManager] = None):
         self.risk_mgr = risk_mgr or RiskManager()
+
+    async def _reconcile_orphan_from_exchange(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        symbol: str,
+        auth_binance: BinanceService,
+        current_price: float,
+    ) -> bool:
+        """If exchange has an open position for this symbol but DB has none for this strategy, insert one row.
+
+        Typical cause: previous tick used one transaction per strategy tick; a later symbol raised and the
+        session rolled back after orders had already filled on the exchange, so local rows were never committed.
+        The next tick then saw \"exchange has position\" and skipped opening without ever writing the DB.
+        """
+        strategy_id = strategy.id
+        sym_target = _norm_sym(symbol)
+        try:
+            eps = await auth_binance.fetch_positions([symbol])
+        except Exception as e:
+            logger.warning("Strategy %d: fetch_positions for reconcile %s failed: %s", strategy_id, symbol, e)
+            return False
+
+        conflict_stmt = (
+            select(Position)
+            .where(
+                Position.account_id == strategy.account_id,
+                Position.closed_at.is_(None),
+                Position.strategy_id != strategy_id,
+            )
+        )
+        cr = await session.execute(conflict_stmt)
+        other_keys = {(_norm_sym(p.symbol), p.side.lower()) for p in cr.scalars().all()}
+
+        created = False
+        for ep in eps:
+            contracts = float(ep.get("contracts", 0) or 0)
+            if contracts <= 0:
+                continue
+            ep_sym = _norm_sym(ep.get("symbol") or "")
+            if ep_sym != sym_target:
+                continue
+            side = (ep.get("side") or "").lower()
+            if side not in ("long", "short"):
+                continue
+            if (ep_sym, side) in other_keys:
+                logger.warning(
+                    "Strategy %d: skip reconcile %s %s — another strategy already holds this in DB",
+                    strategy_id,
+                    symbol,
+                    side,
+                )
+                continue
+
+            entry_price = float(ep.get("entryPrice") or ep.get("entry_price") or 0)
+            if entry_price <= 0:
+                entry_price = float(ep.get("markPrice") or ep.get("mark_price") or current_price)
+            mark_price = float(ep.get("markPrice") or ep.get("mark_price") or current_price)
+            upnl = float(ep.get("unrealizedPnl") or ep.get("unrealized_pnl") or 0)
+
+            eng = MartingaleEngine(
+                base_quantity=contracts,
+                multiplier=strategy.martingale_mult,
+                max_layers=strategy.max_layers,
+                take_profit_pct=strategy.take_profit_pct,
+            )
+            tp_price = eng.get_take_profit_price(entry_price, side)
+
+            pos = Position(
+                strategy_id=strategy_id,
+                account_id=strategy.account_id,
+                symbol=symbol,
+                side=side,
+                quantity=contracts,
+                entry_price=entry_price,
+                mark_price=mark_price,
+                unrealized_pnl=upnl,
+                layer=0,
+                take_profit_price=tp_price,
+                exchange_order_id="",
+            )
+            session.add(pos)
+            await session.flush()
+            created = True
+            logger.warning(
+                "Strategy %d: reconciled DB Position from exchange — %s %s qty=%.6f entry=%.6f (local row was missing)",
+                strategy_id,
+                symbol,
+                side,
+                contracts,
+                entry_price,
+            )
+            strategy_log_service.warning(
+                strategy_id,
+                f"{symbol} 交易所有{side}仓但本地无记录 — 已按交易所数据恢复一条持仓(L0)，止盈价按当前策略重算",
+            )
+
+        return created
 
     async def process_symbol(
         self,
@@ -148,6 +251,17 @@ class PositionManager:
             strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
             return
 
+        # --- Reconcile: exchange has position but local DB missing (e.g. rolled-back multi-symbol transaction)
+        if auth_binance and not open_positions:
+            try:
+                if await self._reconcile_orphan_from_exchange(
+                    session, strategy, symbol, auth_binance, current_price
+                ):
+                    result = await session.execute(stmt)
+                    open_positions = list(result.scalars().all())
+            except Exception as e:
+                logger.warning("Strategy %d: orphan reconcile for %s: %s", strategy_id, symbol, e)
+
         # --- Base quantity ---
         base_qty = strategy.base_qty_value
         if strategy.base_qty_type == "margin_pct":
@@ -168,17 +282,58 @@ class PositionManager:
         # --- Open new position ---
         if signal != Signal.NEUTRAL and not open_positions:
             logger.info("Strategy %d: %s signal=%s, attempting to open...", strategy_id, symbol, signal.value)
-            # Fresh exchange check before opening — prevent duplicate opens across concurrent ticks
             try:
                 eps = await auth_binance.fetch_positions([symbol])
                 for ep in eps:
                     ep_side = (ep.get("side") or "").lower()
-                    if ep_side == signal.value and float(ep.get("contracts", 0) or 0) > 0:
-                        strategy_log_service.info(strategy_id, f"{symbol} 交易所已有仓位，跳过开仓")
+                    if ep_side != signal.value:
+                        continue
+                    if float(ep.get("contracts", 0) or 0) <= 0:
+                        continue
+                    await self._reconcile_orphan_from_exchange(
+                        session, strategy, symbol, auth_binance, current_price
+                    )
+                    result = await session.execute(stmt)
+                    open_positions = list(result.scalars().all())
+                    if open_positions:
+                        strategy_log_service.info(
+                            strategy_id,
+                            f"{symbol} 交易所已有{signal.value}仓，已同步本地记录并进入管理",
+                        )
+                        await self._manage_positions(
+                            session,
+                            strategy,
+                            symbol,
+                            auth_binance,
+                            public_binance,
+                            open_positions,
+                            base_qty,
+                            current_price,
+                            total_margin,
+                            leverage,
+                            klines,
+                        )
                         return
+                    strategy_log_service.error(
+                        strategy_id,
+                        f"{symbol} 交易所有{signal.value}仓但无法写入数据库 — 已阻止重复市价开仓，请检查日志/磁盘权限",
+                    )
+                    return
             except Exception:
-                pass  # if fetch fails, proceed with open (better than blocking)
-            await self._open_position(session, strategy, symbol, auth_binance, public_binance, signal, base_qty, current_price, total_margin, leverage, rsi)
+                pass
+            await self._open_position(
+                session,
+                strategy,
+                symbol,
+                auth_binance,
+                public_binance,
+                signal,
+                base_qty,
+                current_price,
+                total_margin,
+                leverage,
+                rsi,
+            )
             return
 
         # --- Manage existing positions ---

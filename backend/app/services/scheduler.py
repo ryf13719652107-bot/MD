@@ -280,7 +280,7 @@ class StrategyScheduler:
                     strategy_log_service.warning(strategy_id, "未设置交易对")
                 return
 
-            # Process each symbol — single transaction, any failure rolls back all
+            # Process each symbol — commit after each symbol so one failure does not roll back the entire tick
             for symbol in symbols:
                 try:
                     await self._position_mgr.process_symbol(
@@ -289,11 +289,13 @@ class StrategyScheduler:
                     )
                 except Exception as e:
                     logger.error("Strategy %d: error processing %s: %s", strategy_id, symbol, e)
-                    # Rollback entire tick on any symbol failure
                     await session.rollback()
-                    return
-
-            await session.commit()
+                    continue
+                try:
+                    await session.commit()
+                except Exception as e:
+                    logger.error("Strategy %d: commit after %s failed: %s", strategy_id, symbol, e)
+                    await session.rollback()
 
             # Sync after signal processing — TP detection runs first
             if auth_binance:
