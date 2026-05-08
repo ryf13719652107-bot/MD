@@ -37,6 +37,8 @@ async def init_db():
         migrations = [
             "ALTER TABLE strategies ADD COLUMN wt_ob_level FLOAT DEFAULT 60.0",
             "ALTER TABLE strategies ADD COLUMN wt_os_level FLOAT DEFAULT -60.0",
+            "ALTER TABLE positions ADD COLUMN opened_at TIMESTAMP",
+            "ALTER TABLE positions ADD COLUMN closed_at TIMESTAMP",
         ]
         for sql in migrations:
             try:

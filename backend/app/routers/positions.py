@@ -71,7 +71,7 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
         exit_price=exit_price,
         realized_pnl=(exit_price - position.entry_price) * position.quantity if position.side == "long" else (position.entry_price - exit_price) * position.quantity,
         pnl_pct=round(((exit_price - position.entry_price) / position.entry_price * 100) if position.side == "long" else ((position.entry_price - exit_price) / position.entry_price * 100), 2),
-        entry_time=position.opened_at,
+        entry_time=position.opened_at or now_beijing(),
         exit_time=now_beijing(),
         layer=position.layer,
         close_reason="manual",

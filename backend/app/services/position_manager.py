@@ -287,15 +287,9 @@ class PositionManager:
             await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, exit_price_override)
             return
 
-        # --- Check martingale add ---
-        last_entry = max(open_positions, key=lambda p: p.layer).entry_price
-        result = eng.should_add_position(current_layer, last_entry, current_price, pos_side)
-        if result.should_add:
-            await self._martingale_add(session, strategy, symbol, auth_binance, open_positions, eng, result, avg_entry, total_qty, pos_side, current_price, klines, public_binance)
-            return
-
-        # --- Check TP limit order fill (after trading, before flush) ---
+        # --- Check TP limit order fill (before martingale, since position may already be closed) ---
         if strategy.take_profit_limit_order:
+            tp_filled = False
             for p in open_positions:
                 if p.tp_limit_order_id:
                     try:
@@ -307,9 +301,19 @@ class PositionManager:
                         avg_fill = float(order_info.get("average", 0) or 0)
                         if status in ("closed", "filled") and avg_fill > 0:
                             await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", current_price, pre_exit_price=avg_fill)
-                            return
+                            tp_filled = True
+                            break
                     except (Exception, asyncio.TimeoutError):
                         pass
+            if tp_filled:
+                return
+
+        # --- Check martingale add ---
+        last_entry = max(open_positions, key=lambda p: p.layer).entry_price
+        result = eng.should_add_position(current_layer, last_entry, current_price, pos_side)
+        if result.should_add:
+            await self._martingale_add(session, strategy, symbol, auth_binance, open_positions, eng, result, avg_entry, total_qty, pos_side, current_price, klines, public_binance)
+            return
 
         await session.flush()
 
@@ -472,7 +476,7 @@ class PositionManager:
                 strategy_id=strategy_id, account_id=strategy.account_id, symbol=symbol,
                 side=p.side, quantity=p.quantity, entry_price=p.entry_price, exit_price=exit_price,
                 realized_pnl=exit_pnl, pnl_pct=exit_pnl_pct,
-                entry_time=p.opened_at, exit_time=now, layer=p.layer, close_reason=close_reason,
+                entry_time=p.opened_at or now, exit_time=now, layer=p.layer, close_reason=close_reason,
             )
             session.add(trade)
         await session.flush()

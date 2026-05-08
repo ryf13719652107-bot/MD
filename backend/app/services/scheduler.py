@@ -241,7 +241,7 @@ class StrategyScheduler:
                                             symbol=sym, side=lp2.side, quantity=lp2.quantity,
                                             entry_price=lp2.entry_price, exit_price=ep_val,
                                             realized_pnl=pnl, pnl_pct=round(pct, 2),
-                                            entry_time=lp2.opened_at, exit_time=now_beijing(),
+                                            entry_time=lp2.opened_at or now_beijing(), exit_time=now_beijing(),
                                             layer=lp2.layer, close_reason="margin_stop",
                                         )
                                         session.add(trade)
