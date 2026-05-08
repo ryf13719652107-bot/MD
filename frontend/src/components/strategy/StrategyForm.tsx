@@ -254,6 +254,20 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           </div>
         </div>
 
+        <div className="rounded-lg border border-amber-500/40 bg-amber-950/25 px-3 py-2.5 flex items-start gap-3">
+          <label className="relative inline-flex items-center cursor-pointer mt-0.5 shrink-0">
+            <input type="checkbox" {...register('exclude_tradefi')} className="sr-only peer" />
+            <div className="w-9 h-5 bg-gray-600 peer-checked:bg-amber-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
+          </label>
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-amber-100/95">排除 TradFi / 股票永续（如 SNDK、TSLA）</div>
+            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+              <strong className="text-gray-300">开启</strong>后，本策略不会交易币安 <code className="text-amber-200/80">TRADIFI_PERPETUAL</code> 合约；与选币池/固定交易对均生效。
+              全局选币池表里仍可能出现这些币种，仅本策略会跳过。
+            </p>
+          </div>
+        </div>
+
         {!useCoinPool && (
           <div className="grid grid-cols-3 gap-3">
             <div>
@@ -293,20 +307,6 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             </div>
           </div>
         )}
-
-        <div className="flex items-start gap-3 py-1">
-          <label className="relative inline-flex items-center cursor-pointer mt-1 shrink-0">
-            <input type="checkbox" {...register('exclude_tradefi')} className="sr-only peer" />
-            <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
-          </label>
-          <div>
-            <div className="text-sm text-gray-200">排除 TradFi / 股票永续</div>
-            <p className="text-xs text-gray-500 mt-0.5">
-              开启后：<strong className="text-gray-400">本策略</strong>不会交易币安标记为 TRADIFI 永续的个股/TradFi 合约；选币池列表会先在调度器里过滤再跑信号。
-              全局「选币池」数据表仍可能含这些币（涨跌幅榜公用），其它未开此开关的策略仍会看到。
-            </p>
-          </div>
-        </div>
 
         <div className="border-t border-gray-800 my-3" />
 

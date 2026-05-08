@@ -114,7 +114,12 @@ export default function StrategyDetailPage() {
 
       {/* 区块1: 策略信息 */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-        <h3 className="font-semibold mb-3 text-sm">策略参数</h3>
+        <h3 className="font-semibold mb-3 text-sm flex flex-wrap items-center gap-2">
+          策略参数
+          <span className="text-xs font-normal px-2 py-0.5 rounded border border-amber-500/40 text-amber-200/90 bg-amber-950/30">
+            TradFi 过滤：{strategy.exclude_tradefi ? '已开启' : '已关闭'}（编辑请返回列表点「编辑」）
+          </span>
+        </h3>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div>
             <span className={labelClass}>交易对</span>

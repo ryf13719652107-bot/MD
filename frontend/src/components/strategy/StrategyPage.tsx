@@ -160,6 +160,7 @@ export default function StrategyPage() {
               <div>止损: <span className="text-gray-200">{s.stop_loss_enabled ? `${s.stop_loss_pct}%` : '已禁用'}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>
               <div>选币池刷新: <span className="text-gray-200">{Math.round(s.coin_pool_refresh_seconds / 60)}分钟</span></div>
+              <div>TradFi过滤: <span className={s.exclude_tradefi ? 'text-amber-400' : 'text-gray-500'}>{s.exclude_tradefi ? '已排除股票永续' : '未排除'}</span></div>
               {s.last_rsi != null && (
                 <div className="col-span-2 mt-1 pt-1 border-t border-gray-800">
                   <span className="text-gray-500">最近信号: </span>
