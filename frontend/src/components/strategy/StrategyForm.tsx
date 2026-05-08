@@ -35,6 +35,7 @@ const schema = z.object({
   coin_pool_refresh_seconds: z.number().min(30).max(86400),
   coin_pool_fetch_mode: z.enum(['immediate', 'interval']),
   coin_pool_top_n: z.number().min(1).max(50),
+  exclude_tradefi: z.coerce.boolean(),
 });
 
 interface Props {
@@ -77,6 +78,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       coin_pool_refresh_seconds: initialData.coin_pool_refresh_seconds ?? 3600,
       coin_pool_fetch_mode: initialData.coin_pool_fetch_mode ?? 'interval',
       coin_pool_top_n: initialData.coin_pool_top_n ?? 20,
+      exclude_tradefi: initialData.exclude_tradefi ?? true,
     };
   }
   return {
@@ -110,6 +112,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     coin_pool_refresh_seconds: 3600,
     coin_pool_fetch_mode: 'interval',
     coin_pool_top_n: 20,
+    exclude_tradefi: true,
   };
 }
 
@@ -290,6 +293,19 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             </div>
           </div>
         )}
+
+        <div className="flex items-start gap-3 py-1">
+          <label className="relative inline-flex items-center cursor-pointer mt-1 shrink-0">
+            <input type="checkbox" {...register('exclude_tradefi')} className="sr-only peer" />
+            <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
+          </label>
+          <div>
+            <div className="text-sm text-gray-200">排除 TradFi / 股票永续</div>
+            <p className="text-xs text-gray-500 mt-0.5">
+              使用币安 exchangeInfo 中的合约类型过滤（如 SNDK、TSLA 等）。默认开启。若本策略已有该币未平仓仓位，仍会照常管理。
+            </p>
+          </div>
+        </div>
 
         <div className="border-t border-gray-800 my-3" />
 

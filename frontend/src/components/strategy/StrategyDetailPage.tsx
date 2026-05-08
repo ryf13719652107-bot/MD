@@ -166,6 +166,12 @@ export default function StrategyDetailPage() {
                 : '固定交易对'}
             </div>
           </div>
+          <div>
+            <span className={labelClass}>TradFi / 股票永续</span>
+            <div className={valClass}>
+              {(strategy.exclude_tradefi ?? true) ? '已排除（TRADIFI_PERPETUAL）' : '未排除'}
+            </div>
+          </div>
           {strategy.last_rsi != null && (
             <div>
               <span className={labelClass}>最近信号</span>

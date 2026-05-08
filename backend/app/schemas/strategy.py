@@ -41,6 +41,7 @@ class StrategyCreate(BaseModel):
     coin_pool_refresh_seconds: int = Field(default=3600, ge=30, le=86400)
     coin_pool_fetch_mode: Literal["immediate", "interval"] = "interval"
     coin_pool_top_n: int = Field(default=20, ge=1, le=50)
+    exclude_tradefi: bool = True
 
 
 class StrategyUpdate(BaseModel):
@@ -72,6 +73,7 @@ class StrategyUpdate(BaseModel):
     coin_pool_refresh_seconds: Optional[int] = Field(default=None, ge=30, le=86400)
     coin_pool_fetch_mode: Optional[Literal["immediate", "interval"]] = None
     coin_pool_top_n: Optional[int] = Field(default=None, ge=1, le=50)
+    exclude_tradefi: Optional[bool] = None
 
 
 class StrategyResponse(BaseModel):
@@ -106,6 +108,7 @@ class StrategyResponse(BaseModel):
     coin_pool_refresh_seconds: int
     coin_pool_fetch_mode: str
     coin_pool_top_n: int
+    exclude_tradefi: bool
     status: str
     started_at: Optional[datetime] = None
     last_rsi: Optional[float] = None

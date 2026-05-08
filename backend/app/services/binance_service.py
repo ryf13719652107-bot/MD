@@ -6,6 +6,30 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_TRADEFI_SYMBOLS_CACHE: tuple[float, frozenset[str]] | None = None
+_TRADEFI_CACHE_TTL = 3600.0
+
+
+def tradefi_cache_clear():
+    global _TRADEFI_SYMBOLS_CACHE
+    _TRADEFI_SYMBOLS_CACHE = None
+
+
+def _normalize_symbol_for_tradefi(s: str) -> str:
+    return (s or "").replace("/", "").replace(":USDT", "").upper()
+
+
+async def get_cached_tradefi_symbols(binance: "BinanceService") -> frozenset[str]:
+    """Normalized symbols (e.g. SNDKUSDT) for TRADIFI_PERPETUAL + TRADING. Cached 1h."""
+    global _TRADEFI_SYMBOLS_CACHE
+    now = time.time()
+    if _TRADEFI_SYMBOLS_CACHE is not None and now - _TRADEFI_SYMBOLS_CACHE[0] < _TRADEFI_CACHE_TTL:
+        return _TRADEFI_SYMBOLS_CACHE[1]
+    raw = await binance.fetch_tradefi_perpetual_symbols_raw()
+    norm = frozenset(_normalize_symbol_for_tradefi(s) for s in raw)
+    _TRADEFI_SYMBOLS_CACHE = (now, norm)
+    return norm
+
 
 class BinanceService:
     """Wrapper around ccxt binanceusdm (USD-M Futures) with TTL cache."""
@@ -54,6 +78,21 @@ class BinanceService:
         self._ws_exchange = self._create_exchange(True)
         self._created_at = time.time()
         logger.info("BinanceService TTL expired, recreated exchange instances")
+
+    async def fetch_tradefi_perpetual_symbols_raw(self) -> set[str]:
+        """USDM symbols (BTCUSDT-style) that are TRADIFI_PERPETUAL and TRADING (public exchangeInfo)."""
+        try:
+            r = await self.exchange.fapiPublicGetExchangeInfo()
+        except Exception as e:
+            logger.warning("fapiPublicGetExchangeInfo (TradFi list) failed: %s", e)
+            return set()
+        out: set[str] = set()
+        for x in r.get("symbols") or []:
+            if x.get("status") == "TRADING" and x.get("contractType") == "TRADIFI_PERPETUAL":
+                sym = x.get("symbol")
+                if sym:
+                    out.add(sym)
+        return out
 
     async def _safe_close(self, ex):
         try:
@@ -359,3 +398,4 @@ def clear_cache():
     global _private_instances, _public_instance
     _private_instances.clear()
     _public_instance = None
+    tradefi_cache_clear()

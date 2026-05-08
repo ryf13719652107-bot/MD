@@ -11,12 +11,12 @@ from ..models.strategy import Strategy
 from ..models.account import Account
 from ..models.bot_config import BotConfig
 from ..config import now_beijing, BEIJING_TZ
-from .binance_service import BinanceService, get_binance_service, get_public_binance
+from .binance_service import BinanceService, get_binance_service, get_public_binance, get_cached_tradefi_symbols
 from .encryption import decrypt
 from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
 from .sync_service import PositionSyncService
-from .position_manager import PositionManager, set_cooldown_lock
+from .position_manager import PositionManager, set_cooldown_lock, _norm_sym
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +260,9 @@ class StrategyScheduler:
             if strategy.use_coin_pool:
                 try:
                     symbols = await coin_pool_service.get_pool_symbols(strategy.coin_pool_source, strategy.coin_pool_top_n)
+                    if strategy.exclude_tradefi and symbols:
+                        td = await get_cached_tradefi_symbols(public_binance)
+                        symbols = [s for s in symbols if _norm_sym(s) not in td]
                     if not symbols:
                         pool_count = await coin_pool_service.get_pool_count()
                         pool_status = coin_pool_service.status

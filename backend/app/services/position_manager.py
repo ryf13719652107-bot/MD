@@ -315,6 +315,21 @@ class PositionManager:
     ):
         strategy_id = strategy.id
 
+        stmt = (
+            select(Position)
+            .where(Position.strategy_id == strategy_id, Position.symbol == symbol, Position.closed_at.is_(None))
+            .order_by(Position.layer.desc())
+        )
+        result = await session.execute(stmt)
+        open_positions = list(result.scalars().all())
+
+        if getattr(strategy, "exclude_tradefi", True):
+            from ..services.binance_service import get_cached_tradefi_symbols
+
+            tradefi = await get_cached_tradefi_symbols(public_binance)
+            if tradefi and _norm_sym(symbol) in tradefi and not open_positions:
+                return
+
         # --- Fetch klines with cache ---
         klines = _get_cached_klines(symbol, strategy.timeframe)
         if klines is None:
@@ -350,15 +365,6 @@ class PositionManager:
             strategy.last_signal_at = now_beijing()
             if signal != Signal.NEUTRAL:
                 strategy_log_service.info(strategy_id, f"{symbol} RSI={round(rsi,1)} 信号={signal.value}")
-
-        # --- Get open positions for this strategy+symbol ---
-        stmt = (
-            select(Position)
-            .where(Position.strategy_id == strategy_id, Position.symbol == symbol, Position.closed_at.is_(None))
-            .order_by(Position.layer.desc())
-        )
-        result = await session.execute(stmt)
-        open_positions = list(result.scalars().all())
 
         if open_positions:
             strategy_log_service.info(strategy_id, f"{symbol} 已有{len(open_positions)}个持仓，进入管理")

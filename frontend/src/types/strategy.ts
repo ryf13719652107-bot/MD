@@ -30,6 +30,7 @@ export interface Strategy {
   coin_pool_refresh_seconds: number;
   coin_pool_fetch_mode: 'immediate' | 'interval';
   coin_pool_top_n: number;
+  exclude_tradefi: boolean;
   status: 'running' | 'stopped' | 'error';
   started_at: string | null;
   last_rsi: number | null;
@@ -70,4 +71,5 @@ export interface StrategyFormData {
   coin_pool_refresh_seconds: number;
   coin_pool_fetch_mode: 'immediate' | 'interval';
   coin_pool_top_n: number;
+  exclude_tradefi: boolean;
 }
