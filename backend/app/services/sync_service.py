@@ -46,10 +46,19 @@ class PositionSyncService:
                 for lp in local_positions:
                     lp_key = (lp.symbol.replace("/", "").replace(":USDT", ""), lp.side.lower())
                     if lp_key not in exchange_map:
-                        if lp.tp_limit_order_id:
-                            logger.info("Sync: position %d (%s %s) missing on exchange but has TP order — skip, tick will detect", lp.id, lp.symbol, lp.side)
-                            continue
                         exit_price = lp.mark_price or lp.entry_price
+                        close_reason = "sync"
+                        if lp.tp_limit_order_id and binance_service:
+                            try:
+                                formatted = binance_service._format_symbol(lp.symbol)
+                                oi = await binance_service.exchange.fetch_order(lp.tp_limit_order_id, formatted)
+                                avg = float(oi.get("average", 0) or 0)
+                                if oi.get("status", "") in ("closed", "filled") and avg > 0:
+                                    exit_price = avg
+                                    close_reason = "take_profit"
+                                    logger.info("Sync: position %d TP order filled @%.4f", lp.id, avg)
+                            except Exception:
+                                pass
                         exit_pnl = (exit_price - lp.entry_price) * lp.quantity if lp.side == "long" else (lp.entry_price - exit_price) * lp.quantity
                         exit_pnl_pct = ((exit_price - lp.entry_price) / lp.entry_price * 100) if lp.side == "long" and lp.entry_price > 0 else ((lp.entry_price - exit_price) / lp.entry_price * 100) if lp.entry_price > 0 else 0
                         trade = Trade(
@@ -58,7 +67,7 @@ class PositionSyncService:
                             entry_price=lp.entry_price, exit_price=exit_price,
                             realized_pnl=exit_pnl, pnl_pct=round(exit_pnl_pct, 2),
                             entry_time=lp.opened_at, exit_time=sync_now,
-                            layer=lp.layer, close_reason="sync",
+                            layer=lp.layer, close_reason=close_reason,
                         )
                         session.add(trade)
                         lp.closed_at = sync_now
