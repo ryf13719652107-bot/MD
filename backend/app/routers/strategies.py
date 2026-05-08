@@ -10,6 +10,10 @@ from ..services.scheduler import strategy_scheduler
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
 
+def _panic_symbol_key(sym: str) -> str:
+    return (sym or "").replace("/", "").replace(":USDT", "").upper()
+
+
 @router.post("", response_model=StrategyResponse)
 async def create_strategy(data: StrategyCreate, db: AsyncSession = Depends(get_db)):
     from ..models.account import Account
@@ -137,13 +141,6 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
     api_secret = decrypt(account.api_secret_encrypted)
     binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
-    # Load this strategy's open DB positions (for trade record matching)
-    stmt = select(Position).where(
-        Position.strategy_id == strategy_id, Position.closed_at.is_(None)
-    )
-    result = await db.execute(stmt)
-    db_positions = list(result.scalars().all())
-
     # Get ALL exchange positions — emergency close must close everything
     try:
         raw_positions = await binance.fetch_positions()
@@ -162,8 +159,47 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         exchange_map[(sym, sd)] = exchange_map.get((sym, sd), 0) + contracts
 
     if not exchange_map:
+        # Exchange already flat — still close any ghost open rows in DB for this account
+        stmt_ling = select(Position).where(
+            Position.account_id == account.id,
+            Position.closed_at.is_(None),
+        )
+        lingering = list((await db.execute(stmt_ling)).scalars().all())
+        now0 = now_beijing()
+        for p in lingering:
+            exit_price = float(p.mark_price or p.entry_price or 0)
+            if exit_price <= 0:
+                exit_price = p.entry_price
+            ep = exit_price
+            pnl = (ep - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - ep) * p.quantity
+            pct = ((ep - p.entry_price) / p.entry_price * 100) if p.side == "long" and p.entry_price > 0 else ((p.entry_price - ep) / p.entry_price * 100) if p.entry_price > 0 else 0
+            trade = Trade(
+                strategy_id=p.strategy_id,
+                account_id=account.id,
+                symbol=p.symbol,
+                side=p.side,
+                quantity=p.quantity,
+                entry_price=p.entry_price,
+                exit_price=ep,
+                realized_pnl=pnl,
+                pnl_pct=round(pct, 2),
+                entry_time=p.opened_at or now0,
+                exit_time=now0,
+                layer=p.layer,
+                close_reason="panic_close",
+            )
+            db.add(trade)
+            p.closed_at = now0
+        if lingering:
+            await db.commit()
         await strategy_scheduler.remove_strategy(strategy_id)
-        return {"closed": 0, "failed": 0, "results": [], "id": strategy_id}
+        return {
+            "closed": 0,
+            "failed": 0,
+            "results": [],
+            "id": strategy_id,
+            "db_cleaned": len(lingering),
+        }
 
     results = []
     now = now_beijing()
@@ -198,21 +234,30 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         results.append({"symbol": symbol, "side": side, "status": "ok", "exit_price": exit_price})
         logging.info("Panic close: closed %s %s contracts=%.4f", symbol, side, contracts)
 
-    # Match successfully closed positions to DB and record trades
+    # Match ALL account DB rows for each closed (symbol, side) — not only this strategy_id
     for r in results:
         if r["status"] != "ok":
             continue
         symbol = r["symbol"]
         side = r["side"]
         exit_price = r.get("exit_price", 0) or 0
-        matching = [p for p in db_positions if p.symbol.upper() == symbol.upper() and p.side.lower() == side.lower()]
+        stmt_open = select(Position).where(
+            Position.account_id == account.id,
+            Position.closed_at.is_(None),
+        )
+        open_rows = list((await db.execute(stmt_open)).scalars().all())
+        sym_u = _panic_symbol_key(symbol)
+        matching = [
+            p for p in open_rows
+            if _panic_symbol_key(p.symbol) == sym_u and p.side.lower() == side.lower()
+        ]
         for p in matching:
             ep = exit_price if exit_price > 0 else (p.mark_price or p.entry_price)
             pnl = (ep - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - ep) * p.quantity
             pct = ((ep - p.entry_price) / p.entry_price * 100) if p.side == "long" else ((p.entry_price - ep) / p.entry_price * 100)
             trade = Trade(
-                strategy_id=strategy_id, account_id=account.id,
-                symbol=symbol, side=p.side, quantity=p.quantity,
+                strategy_id=p.strategy_id, account_id=account.id,
+                symbol=p.symbol, side=p.side, quantity=p.quantity,
                 entry_price=p.entry_price, exit_price=ep,
                 realized_pnl=pnl, pnl_pct=round(pct, 2),
                 entry_time=p.opened_at or now, exit_time=now,
