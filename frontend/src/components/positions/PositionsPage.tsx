@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useMemo } from 'react';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { DashboardData, Position } from '../../types';
+import { Check, Minus } from 'lucide-react';
 
 type ExchangePos = DashboardData['exchange_positions'][number];
 
@@ -9,12 +10,14 @@ type DisplayRow = {
   key: string;
   symbol: string;
   side: 'long' | 'short';
+  notional_usdt: number;
   entry_price: number;
   mark_price: number | null;
   unrealized_pnl: number;
   layer: string;
   take_profit_label: string;
   tp_has_order: boolean;
+  tp_target_only: boolean; // 有止盈目标价但未挂限价单（如挂单失败、或仅市价止盈）
   opened_at_label: string;
   exchange_only: boolean;
 };
@@ -40,35 +43,43 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
         .map((m) => m.opened_at)
         .filter(Boolean)
         .sort()[0];
+      const hasTpPrice = tp != null;
       return {
         key: `${sym}-${side}`,
         symbol: ep.symbol,
         side,
+        notional_usdt: typeof ep.usdt === 'number' ? ep.usdt : 0,
         entry_price: ep.entry_price,
         mark_price: ep.mark_price,
         unrealized_pnl: ep.unrealized_pnl,
         layer,
-        take_profit_label: tp != null ? tp.toFixed(8) : '-',
+        take_profit_label: hasTpPrice ? tp!.toFixed(8) : '-',
         tp_has_order: tpId,
+        tp_target_only: hasTpPrice && !tpId,
         opened_at_label: opened ? new Date(opened as string).toLocaleString() : '-',
         exchange_only: match.length === 0,
       };
     });
   }
   if (dbPositions.length > 0) {
-    return dbPositions.map((p) => ({
-      key: String(p.id),
-      symbol: p.symbol,
-      side: p.side,
-      entry_price: p.entry_price,
-      mark_price: p.mark_price ?? null,
-      unrealized_pnl: p.unrealized_pnl ?? 0,
-      layer: `L${p.layer}`,
-      take_profit_label: p.take_profit_price != null ? p.take_profit_price.toFixed(8) : '-',
-      tp_has_order: !!p.tp_limit_order_id,
-      opened_at_label: p.opened_at ? new Date(p.opened_at).toLocaleString() : '-',
-      exchange_only: false,
-    }));
+    return dbPositions.map((p) => {
+      const px = p.mark_price ?? p.entry_price;
+      return {
+        key: String(p.id),
+        symbol: p.symbol,
+        side: p.side,
+        notional_usdt: px * p.quantity,
+        entry_price: p.entry_price,
+        mark_price: p.mark_price ?? null,
+        unrealized_pnl: p.unrealized_pnl ?? 0,
+        layer: `L${p.layer}`,
+        take_profit_label: p.take_profit_price != null ? p.take_profit_price.toFixed(8) : '-',
+        tp_has_order: !!p.tp_limit_order_id,
+        tp_target_only: p.take_profit_price != null && !p.tp_limit_order_id,
+        opened_at_label: p.opened_at ? new Date(p.opened_at).toLocaleString() : '-',
+        exchange_only: false,
+      };
+    });
   }
   return [];
 }
@@ -137,11 +148,12 @@ export default function PositionsPage() {
             <tr className="text-gray-500 text-left border-b border-gray-800">
               <th className="p-3">交易对</th>
               <th className="p-3">方向</th>
+              <th className="p-3">名义(USDT)</th>
               <th className="p-3">层数</th>
               <th className="p-3">入场价</th>
               <th className="p-3">当前价</th>
               <th className="p-3">止盈价</th>
-              <th className="p-3">限价单</th>
+              <th className="p-3">限价止盈</th>
               <th className="p-3">未实现盈亏</th>
               <th className="p-3">开仓时间</th>
             </tr>
@@ -161,13 +173,22 @@ export default function PositionsPage() {
                 <td className={`p-3 ${row.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
                   {row.side === 'long' ? '做多' : '做空'}
                 </td>
+                <td className="p-3 font-mono text-gray-200">{row.notional_usdt.toFixed(2)}</td>
                 <td className="p-3 text-gray-400">{row.layer}</td>
                 <td className="p-3 font-mono">{row.entry_price?.toFixed(8)}</td>
                 <td className="p-3 font-mono">{row.mark_price != null ? row.mark_price.toFixed(8) : '-'}</td>
                 <td className="p-3 font-mono text-cyan-400">{row.take_profit_label}</td>
                 <td className="p-3">
                   {row.tp_has_order ? (
-                    <span className="px-1.5 py-0.5 rounded text-xs bg-blue-600/20 text-blue-400">已挂单</span>
+                    <span className="inline-flex items-center gap-1 text-green-400" title="已挂限价止盈单">
+                      <Check size={16} strokeWidth={2.5} />
+                      <span className="text-xs">已挂单</span>
+                    </span>
+                  ) : row.tp_target_only ? (
+                    <span className="inline-flex items-center gap-1 text-amber-400/90" title="有止盈目标价，当前无未完成限价单（可能为市价止盈或未挂成）">
+                      <Minus size={16} />
+                      <span className="text-xs">未挂单</span>
+                    </span>
                   ) : (
                     <span className="text-gray-600 text-xs">-</span>
                   )}
@@ -181,7 +202,7 @@ export default function PositionsPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={9} className="p-8 text-center text-gray-600">
+                <td colSpan={10} className="p-8 text-center text-gray-600">
                   暂无持仓
                 </td>
               </tr>
