@@ -135,6 +135,9 @@ class PositionManager:
             side = (ep.get("side") or "").lower()
             if side not in ("long", "short"):
                 continue
+            if side != (strategy.direction or "").lower():
+                # 只认领与本策略方向一致的交易所持仓腿（多单策略不领养空单，反之亦然）
+                continue
             if (ep_sym, side) in other_keys:
                 # Another strategy on this account already has an open Position for this exact symbol+side.
                 # Hedge mode: opposite side (long vs short) is a different key — 一多一空 can both have rows.
