@@ -148,10 +148,17 @@ export default function StatusBar() {
           持仓: <strong>{data.open_positions}</strong>
         </span>
         <span className="text-gray-300">
-          盈亏: 总盈亏
+          当日
           <strong className={data.daily_pnl >= 0 ? 'text-green-400 ml-1' : 'text-red-400 ml-1'}>
             {data.daily_pnl.toFixed(2)}
           </strong>
+          <span className="text-gray-500 text-xs ml-1">累计已实现</span>
+          <strong className={data.total_realized_pnl >= 0 ? 'text-emerald-400 ml-1' : 'text-orange-400 ml-1'}>
+            {data.total_realized_pnl.toFixed(2)}
+          </strong>
+          <span className="text-gray-500 text-xs ml-1">胜率</span>
+          <strong className="text-indigo-400 ml-1">{data.total_win_rate_pct.toFixed(1)}%</strong>
+          <span className="text-gray-500 text-xs">({data.total_trades}笔)</span>
           <span className="mx-1">多单盈亏</span>
           <strong className={data.daily_pnl_long >= 0 ? 'text-green-400' : 'text-red-400'}>
             {data.daily_pnl_long.toFixed(2)}

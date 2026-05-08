@@ -57,6 +57,12 @@ export interface DashboardData {
   open_positions: number;
   daily_trades: number;
   win_rate_pct: number;
+  /** 历史累计已实现盈亏（trades 表） */
+  total_realized_pnl: number;
+  /** 历史平仓笔数 */
+  total_trades: number;
+  /** 历史胜率（盈利笔数/总笔数） */
+  total_win_rate_pct: number;
   leverage_multiplier: number;
   master_switch: boolean;
   account_name: string;

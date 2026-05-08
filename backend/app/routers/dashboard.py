@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import timedelta
 from ..database import get_db
@@ -130,9 +130,26 @@ async def get_dashboard(
     daily_pnl_long = sum(t.realized_pnl for t in daily_trades if t.side == "long")
     daily_pnl_short = sum(t.realized_pnl for t in daily_trades if t.side == "short")
 
-    # Win rate
+    # Win rate (today)
     winning = sum(1 for t in daily_trades if t.realized_pnl > 0)
     win_rate = (winning / daily_trade_count * 100) if daily_trade_count > 0 else 0
+
+    # All-time stats from trades (same account filter as daily)
+    agg_stmt = select(
+        func.count(Trade.id),
+        func.coalesce(func.sum(Trade.realized_pnl), 0.0),
+        func.coalesce(
+            func.sum(case((Trade.realized_pnl > 0, 1), else_=0)),
+            0,
+        ),
+    )
+    if filter_account_id:
+        agg_stmt = agg_stmt.where(Trade.account_id == filter_account_id)
+    agg_row = (await db.execute(agg_stmt)).one()
+    total_trades_n = int(agg_row[0] or 0)
+    total_realized = float(agg_row[1] or 0)
+    total_wins_n = int(agg_row[2] or 0)
+    total_win_rate = (total_wins_n / total_trades_n * 100) if total_trades_n > 0 else 0.0
 
     # Daily PnL %
     daily_pnl_pct = round(daily_pnl / total_balance * 100, 2) if total_balance > 0 else 0.0
@@ -158,6 +175,9 @@ async def get_dashboard(
         open_positions=open_positions,
         daily_trades=daily_trade_count,
         win_rate_pct=round(win_rate, 2),
+        total_realized_pnl=round(total_realized, 2),
+        total_trades=total_trades_n,
+        total_win_rate_pct=round(total_win_rate, 2),
         leverage_multiplier=leverage_multiplier,
         master_switch=master_switch,
         account_name=account_name,

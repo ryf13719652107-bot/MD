@@ -32,10 +32,23 @@ export default function DashboardPage() {
     { label: '可用余额', value: `${data.available_balance.toFixed(2)} USDT`, icon: PiggyBank, color: 'text-green-400' },
     { label: '杠杆倍数', value: `${data.leverage_multiplier.toFixed(2)}x`, icon: Gauge, color: leverageColor },
     { label: '当日盈亏', value: `${data.daily_pnl >= 0 ? '+' : ''}${data.daily_pnl.toFixed(2)} USDT`, icon: TrendingUp, color: data.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400' },
-    { label: '胜率', value: `${data.win_rate_pct.toFixed(1)}%`, icon: Target, color: 'text-blue-400' },
+    {
+      label: '累计盈亏',
+      value: `${data.total_realized_pnl >= 0 ? '+' : ''}${data.total_realized_pnl.toFixed(2)} USDT`,
+      icon: TrendingUp,
+      color: data.total_realized_pnl >= 0 ? 'text-emerald-400' : 'text-orange-400',
+    },
+    { label: '当日胜率', value: `${data.win_rate_pct.toFixed(1)}%`, icon: Target, color: 'text-blue-400' },
+    {
+      label: '累计胜率',
+      value: `${data.total_win_rate_pct.toFixed(1)}%`,
+      icon: Target,
+      color: 'text-indigo-400',
+    },
     { label: '活跃策略', value: data.active_strategies, icon: Activity, color: 'text-yellow-400' },
     { label: '当前持仓', value: data.open_positions, icon: Layers, color: 'text-purple-400' },
     { label: '当日交易', value: data.daily_trades, icon: BarChart3, color: 'text-cyan-400' },
+    { label: '累计交易', value: data.total_trades, icon: BarChart3, color: 'text-teal-400' },
     { label: '未实现盈亏', value: `${data.unrealized_pnl >= 0 ? '+' : ''}${data.unrealized_pnl.toFixed(2)} USDT`, icon: TrendingDown, color: data.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400' },
   ];
 
@@ -43,7 +56,7 @@ export default function DashboardPage() {
     <div className="space-y-4">
       <h2 className="text-xl font-bold">仪表盘</h2>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
         {stats.map(({ label, value, icon: Icon, color }) => (
           <div key={label} className="bg-gray-900 border border-gray-800 rounded-lg p-3">
             <div className="flex items-center gap-2 text-gray-500 text-xs mb-1">

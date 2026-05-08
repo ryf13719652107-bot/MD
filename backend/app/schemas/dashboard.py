@@ -15,7 +15,10 @@ class DashboardSnapshot(BaseModel):
     active_strategies: int = 0
     open_positions: int = 0
     daily_trades: int = 0
-    win_rate_pct: float = 0.0
+    win_rate_pct: float = 0.0  # 当日平仓胜率
+    total_realized_pnl: float = 0.0  # 历史累计已实现盈亏（本地 trades 汇总）
+    total_trades: int = 0  # 历史平仓笔数
+    total_win_rate_pct: float = 0.0  # 历史胜率
     leverage_multiplier: float = 0.0
     master_switch: bool = False
     account_name: str = ""
