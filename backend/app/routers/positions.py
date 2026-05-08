@@ -28,7 +28,18 @@ async def list_positions(
     if account_id is not None:
         stmt = stmt.where(Position.account_id == account_id)
     result = await db.execute(stmt)
-    return [PositionResponse.model_validate(p) for p in result.scalars().all()]
+    positions = list(result.scalars().all())
+
+    now = now_beijing()
+    dirty = False
+    for p in positions:
+        if p.opened_at is None:
+            p.opened_at = now
+            dirty = True
+    if dirty:
+        await db.commit()
+
+    return [PositionResponse.model_validate(p) for p in positions]
 
 
 @router.post("/{position_id}/close")
