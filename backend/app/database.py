@@ -45,3 +45,13 @@ async def init_db():
                 await conn.run_sync(lambda c, s=sql: c.exec_driver_sql(s))
             except Exception:
                 pass  # column already exists
+
+        # Backfill NULL opened_at for existing positions
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE positions SET opened_at = datetime('now', 'localtime') WHERE opened_at IS NULL"
+                )
+            )
+        except Exception:
+            pass
