@@ -135,7 +135,12 @@ app.include_router(websocket.router)
 # __file__ = backend/app/main.py → go up 3 levels to project root
 frontend_dist = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
 frontend_dist = os.path.abspath(frontend_dist)
+_no_cache_html = {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache",
+}
 if os.path.isdir(frontend_dist):
+    logger.info("Frontend dist path: %s", frontend_dist)
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="static")
 
     @app.get("/{full_path:path}")
@@ -144,7 +149,10 @@ if os.path.isdir(frontend_dist):
         file_path = os.path.join(frontend_dist, full_path) if full_path else ""
         if full_path and os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
+        index_html = os.path.join(frontend_dist, "index.html")
+        return FileResponse(index_html, headers=_no_cache_html)
+else:
+    logger.warning("Frontend dist missing at %s — run: cd frontend && npm run build", frontend_dist)
 
 
 @app.get("/api/health")

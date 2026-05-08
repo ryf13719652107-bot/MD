@@ -137,7 +137,10 @@ export default function PositionsPage() {
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
         <h2 className="text-xl font-bold">当前持仓</h2>
         <span className="text-xs text-gray-500">
-          名义 USDT 来自交易所持仓；限价止盈状态来自本地策略库 · 每 30 秒刷新
+          名义 USDT 来自交易所；限价止盈来自本地策略库 · 每 30 秒刷新
+          <span className="ml-2 text-gray-600 font-mono" title="每次 npm run build 更新；若与执行时间不符说明浏览器或 CDN 仍在用旧包">
+            build:{__FRONTEND_BUILD_STAMP__}
+          </span>
         </span>
       </div>
 
