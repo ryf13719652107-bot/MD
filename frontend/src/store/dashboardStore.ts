@@ -27,6 +27,8 @@ const defaultData: DashboardData = {
   total_realized_pnl: 0,
   total_trades: 0,
   total_win_rate_pct: 0,
+  total_pnl_long: 0,
+  total_pnl_short: 0,
   leverage_multiplier: 0,
   master_switch: false,
   account_name: '',

@@ -151,6 +151,22 @@ async def get_dashboard(
     total_wins_n = int(agg_row[2] or 0)
     total_win_rate = (total_wins_n / total_trades_n * 100) if total_trades_n > 0 else 0.0
 
+    legs_stmt = select(
+        func.coalesce(
+            func.sum(case((Trade.side == "long", Trade.realized_pnl), else_=0.0)),
+            0.0,
+        ),
+        func.coalesce(
+            func.sum(case((Trade.side == "short", Trade.realized_pnl), else_=0.0)),
+            0.0,
+        ),
+    )
+    if filter_account_id:
+        legs_stmt = legs_stmt.where(Trade.account_id == filter_account_id)
+    legs_row = (await db.execute(legs_stmt)).one()
+    total_pnl_long_v = float(legs_row[0] or 0)
+    total_pnl_short_v = float(legs_row[1] or 0)
+
     # Daily PnL %
     daily_pnl_pct = round(daily_pnl / total_balance * 100, 2) if total_balance > 0 else 0.0
 
@@ -178,6 +194,8 @@ async def get_dashboard(
         total_realized_pnl=round(total_realized, 2),
         total_trades=total_trades_n,
         total_win_rate_pct=round(total_win_rate, 2),
+        total_pnl_long=round(total_pnl_long_v, 2),
+        total_pnl_short=round(total_pnl_short_v, 2),
         leverage_multiplier=leverage_multiplier,
         master_switch=master_switch,
         account_name=account_name,
