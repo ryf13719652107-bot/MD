@@ -469,6 +469,7 @@ class PositionManager:
                 total_margin,
                 leverage,
                 rsi,
+                signal_label,
             )
             return
 
@@ -477,7 +478,19 @@ class PositionManager:
             await self._manage_positions(session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines)
 
     async def _open_position(
-        self, session, strategy, symbol, auth_binance, public_binance, signal, base_qty, current_price, total_margin, leverage, rsi
+        self,
+        session,
+        strategy,
+        symbol,
+        auth_binance,
+        public_binance,
+        signal,
+        base_qty,
+        current_price,
+        total_margin,
+        leverage,
+        rsi,
+        signal_label: str,
     ):
         strategy_id = strategy.id
 
