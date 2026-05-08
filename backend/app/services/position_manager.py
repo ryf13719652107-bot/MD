@@ -136,6 +136,8 @@ class PositionManager:
             if side not in ("long", "short"):
                 continue
             if (ep_sym, side) in other_keys:
+                # Another strategy on this account already has an open Position for this exact symbol+side.
+                # Hedge mode: opposite side (long vs short) is a different key — 一多一空 can both have rows.
                 blocked_by_other = True
                 logger.warning(
                     "Strategy %d: skip reconcile %s %s — another strategy already holds this in DB",
@@ -340,9 +342,9 @@ class PositionManager:
                     if outcome == RECONCILE_SKIPPED_OTHER_STRATEGY:
                         strategy_log_service.info(
                             strategy_id,
-                            f"{symbol} 交易所有{signal.value}仓，但同账户下另一策略已占用该币种的此方向本地持仓 — "
-                            f"本策略不再重复开仓（对冲模式下同币种同方向在交易所只有一条净仓）。"
-                            f"若两策略都要交易该币：请使用多/空不同方向，或分账户。",
+                            f"{symbol} 交易所有{signal.value}仓，但同账户下另一策略已在本地占用「同币种+同方向」持仓，"
+                            f"本策略不再重复记账/开仓（交易所该方向只有一条净仓）。"
+                            f"一多一空为反方向时不会冲突；若仍看到本条，请检查两策略是否同向、或是否共抢同一池子币。",
                         )
                         return
                     if outcome == RECONCILE_DB_ERROR:
