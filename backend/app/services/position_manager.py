@@ -22,6 +22,13 @@ def _norm_sym(s: str) -> str:
     return (s or "").replace("/", "").replace(":USDT", "").upper()
 
 
+# _reconcile_orphan_from_exchange return values
+RECONCILE_CREATED = "created"
+RECONCILE_NO_ORPHAN = "no_orphan"  # nothing on exchange for this symbol, or no insert needed
+RECONCILE_SKIPPED_OTHER_STRATEGY = "skipped_other_strategy"  # same acc: another strategy already owns symbol+side in DB
+RECONCILE_DB_ERROR = "db_error"
+
+
 # Shared caches and cooldown (module-level, shared with scheduler)
 _kline_cache: dict[tuple[str, str], tuple[float, list]] = {}
 _KLINE_CACHE_TTL = 30.0
@@ -92,12 +99,10 @@ class PositionManager:
         symbol: str,
         auth_binance: BinanceService,
         current_price: float,
-    ) -> bool:
-        """If exchange has an open position for this symbol but DB has none for this strategy, insert one row.
+    ) -> str:
+        """Sync exchange net position into this strategy's DB row when missing.
 
-        Typical cause: previous tick used one transaction per strategy tick; a later symbol raised and the
-        session rolled back after orders had already filled on the exchange, so local rows were never committed.
-        The next tick then saw \"exchange has position\" and skipped opening without ever writing the DB.
+        Returns one of RECONCILE_* constants.
         """
         strategy_id = strategy.id
         sym_target = _norm_sym(symbol)
@@ -105,7 +110,7 @@ class PositionManager:
             eps = await auth_binance.fetch_positions([symbol])
         except Exception as e:
             logger.warning("Strategy %d: fetch_positions for reconcile %s failed: %s", strategy_id, symbol, e)
-            return False
+            return RECONCILE_NO_ORPHAN
 
         conflict_stmt = (
             select(Position)
@@ -119,6 +124,7 @@ class PositionManager:
         other_keys = {(_norm_sym(p.symbol), p.side.lower()) for p in cr.scalars().all()}
 
         created = False
+        blocked_by_other = False
         for ep in eps:
             contracts = float(ep.get("contracts", 0) or 0)
             if contracts <= 0:
@@ -130,6 +136,7 @@ class PositionManager:
             if side not in ("long", "short"):
                 continue
             if (ep_sym, side) in other_keys:
+                blocked_by_other = True
                 logger.warning(
                     "Strategy %d: skip reconcile %s %s — another strategy already holds this in DB",
                     strategy_id,
@@ -166,7 +173,17 @@ class PositionManager:
                 exchange_order_id="",
             )
             session.add(pos)
-            await session.flush()
+            try:
+                await session.flush()
+            except Exception as e:
+                logger.exception(
+                    "Strategy %d: reconcile flush failed for %s %s: %s",
+                    strategy_id,
+                    symbol,
+                    side,
+                    e,
+                )
+                return RECONCILE_DB_ERROR
             created = True
             logger.warning(
                 "Strategy %d: reconciled DB Position from exchange — %s %s qty=%.6f entry=%.6f (local row was missing)",
@@ -181,7 +198,11 @@ class PositionManager:
                 f"{symbol} 交易所有{side}仓但本地无记录 — 已按交易所数据恢复一条持仓(L0)，止盈价按当前策略重算",
             )
 
-        return created
+        if created:
+            return RECONCILE_CREATED
+        if blocked_by_other:
+            return RECONCILE_SKIPPED_OTHER_STRATEGY
+        return RECONCILE_NO_ORPHAN
 
     async def process_symbol(
         self,
@@ -254,9 +275,10 @@ class PositionManager:
         # --- Reconcile: exchange has position but local DB missing (e.g. rolled-back multi-symbol transaction)
         if auth_binance and not open_positions:
             try:
-                if await self._reconcile_orphan_from_exchange(
+                outcome = await self._reconcile_orphan_from_exchange(
                     session, strategy, symbol, auth_binance, current_price
-                ):
+                )
+                if outcome == RECONCILE_CREATED:
                     result = await session.execute(stmt)
                     open_positions = list(result.scalars().all())
             except Exception as e:
@@ -284,39 +306,54 @@ class PositionManager:
             logger.info("Strategy %d: %s signal=%s, attempting to open...", strategy_id, symbol, signal.value)
             try:
                 eps = await auth_binance.fetch_positions([symbol])
-                for ep in eps:
-                    ep_side = (ep.get("side") or "").lower()
-                    if ep_side != signal.value:
-                        continue
-                    if float(ep.get("contracts", 0) or 0) <= 0:
-                        continue
-                    await self._reconcile_orphan_from_exchange(
+                has_same_side = any(
+                    (ep.get("side") or "").lower() == signal.value
+                    and float(ep.get("contracts", 0) or 0) > 0
+                    for ep in eps
+                )
+                if has_same_side:
+                    outcome = await self._reconcile_orphan_from_exchange(
                         session, strategy, symbol, auth_binance, current_price
                     )
-                    result = await session.execute(stmt)
-                    open_positions = list(result.scalars().all())
-                    if open_positions:
+                    if outcome == RECONCILE_CREATED:
+                        result = await session.execute(stmt)
+                        open_positions = list(result.scalars().all())
+                        if open_positions:
+                            strategy_log_service.info(
+                                strategy_id,
+                                f"{symbol} 交易所已有{signal.value}仓，已同步本地记录并进入管理",
+                            )
+                            await self._manage_positions(
+                                session,
+                                strategy,
+                                symbol,
+                                auth_binance,
+                                public_binance,
+                                open_positions,
+                                base_qty,
+                                current_price,
+                                total_margin,
+                                leverage,
+                                klines,
+                            )
+                            return
+                    if outcome == RECONCILE_SKIPPED_OTHER_STRATEGY:
                         strategy_log_service.info(
                             strategy_id,
-                            f"{symbol} 交易所已有{signal.value}仓，已同步本地记录并进入管理",
-                        )
-                        await self._manage_positions(
-                            session,
-                            strategy,
-                            symbol,
-                            auth_binance,
-                            public_binance,
-                            open_positions,
-                            base_qty,
-                            current_price,
-                            total_margin,
-                            leverage,
-                            klines,
+                            f"{symbol} 交易所有{signal.value}仓，但同账户下另一策略已占用该币种的此方向本地持仓 — "
+                            f"本策略不再重复开仓（对冲模式下同币种同方向在交易所只有一条净仓）。"
+                            f"若两策略都要交易该币：请使用多/空不同方向，或分账户。",
                         )
                         return
-                    strategy_log_service.error(
+                    if outcome == RECONCILE_DB_ERROR:
+                        strategy_log_service.error(
+                            strategy_id,
+                            f"{symbol} 写入持仓数据库失败 — 已阻止重复市价开仓，请查看 logs/bot.log 中的异常详情",
+                        )
+                        return
+                    strategy_log_service.warning(
                         strategy_id,
-                        f"{symbol} 交易所有{signal.value}仓但无法写入数据库 — 已阻止重复市价开仓，请检查日志/磁盘权限",
+                        f"{symbol} 交易所有{signal.value}仓但未能为本策略创建本地记录 — 已阻止重复市价开仓（若非双策略抢同一方向，请查看 bot.log reconcile 日志）",
                     )
                     return
             except Exception:
