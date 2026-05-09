@@ -145,15 +145,24 @@ class BinanceService:
     async def fetch_positions(self, symbols: list[str] | None = None) -> list[dict]:
         if not symbols:
             return await self.exchange.fetch_positions(None)
+        formatted = [self._format_symbol(s) for s in symbols]
         try:
-            formatted = [self._format_symbol(s) for s in symbols]
             return await self.exchange.fetch_positions(formatted)
         except Exception as e:
-            # ccxt 在 markets 表里找不到统一符号时会抛错；对账仍可用「全量持仓」再按币种过滤
             msg = str(e).lower()
             if "does not have market symbol" in msg or "marketsymbol" in msg or "invalid symbol" in msg:
+                # 新上币/本地 markets 缓存旧：重载后再试；仍失败则全量拉仓位再按代码过滤
+                try:
+                    await self.exchange.load_markets(True)
+                    return await self.exchange.fetch_positions(formatted)
+                except Exception as e2:
+                    logger.debug(
+                        "fetch_positions(%s) after load_markets still failed: %s",
+                        symbols,
+                        e2,
+                    )
                 logger.warning(
-                    "fetch_positions(%s) unified symbol missing in ccxt markets, fallback fetch all: %s",
+                    "fetch_positions(%s) unified symbol missing in ccxt, fallback fetch all: %s",
                     symbols,
                     e,
                 )
