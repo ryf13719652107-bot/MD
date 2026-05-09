@@ -53,16 +53,9 @@ async def market_websocket(websocket: WebSocket, symbols: str = Query(default=""
 async def dashboard_websocket(websocket: WebSocket):
     await ws_manager.connect(websocket, "dashboard")
     try:
+        # 快照由 websocket_manager 单例定时任务广播（30s），此处仅保持连接并在对端关闭时退出
         while True:
-            await asyncio.sleep(3)
-            await ws_manager.broadcast(
-                "dashboard",
-                {
-                    "type": "snapshot",
-                    "timestamp": int(asyncio.get_event_loop().time() * 1000),
-                    "message": "request_update",  # Frontend should re-fetch /api/dashboard
-                },
-            )
+            await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
