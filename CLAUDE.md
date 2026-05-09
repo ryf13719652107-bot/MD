@@ -53,7 +53,7 @@ bash deploy.sh
 ### 核心服务
 - **`binance_service.py`**：ccxt 封装，TTL 缓存（30min）。`hedge_mode` 决定是否发送 `positionSide`/`reduceOnly`。`_format_symbol()` 将 `BTCUSDT` 转为 `BTC/USDT:USDT`。`get_public_binance()` 始终主网。TradFi 列表缓存（1h TTL）：`get_cached_tradefi_symbols()` → `fetch_tradefi_perpetual_symbols_raw()` 调 `fapiPublicGetExchangeInfo` 筛 `contractType == "TRADIFI_PERPETUAL"`。
 - **`position_manager.py`**：核心交易逻辑。`process_symbol()` 总入口，含 TradFi 过滤、对账恢复、信号生成、开仓、持仓管理、马丁加仓、TP 检测。模块级工具：`_norm_sym()`、`_position_opened_at_from_exchange()`（从 `timestamp`/`updateTime`/`entryTime` 解析开仓时间）。
-- **`scheduler.py`**：策略生命周期、保证金阈值、5 并发信号量。每 tick 拉 pool symbols → TradFi 过滤 → 逐币种 `process_symbol()` → commit。`_execute_tp_check()` 负责 mid-candle 止盈检测。
+- **`scheduler.py`**：策略生命周期、保证金阈值、5 并发信号量。`lifespan` 启动时 `resume_running_strategies()` 为 DB 中 `status=running` 的策略重新挂载定时任务（`stopped` 不动）；每 tick 拉 pool symbols → TradFi 过滤 → 逐币种 `process_symbol()` → commit。`_execute_tp_check()` 负责 mid-candle 止盈检测。
 - **`sync_service.py`**：每 60 秒对账 DB ↔ 交易所。按 `(symbol, side)` 分组（`by_leg`），多层马丁共用一次 TP 订单查询。`_exit_price_from_tp_orders()` 查止盈单成交价，`_order_filled()` 宽松判定（`closed`/`filled` 或有 `filled>0` 且非活跃状态）。
 - **`strategy_engine.py`**：`calculate_wavetrend()` — 纯 Pine Script v5 LazyBear 实现。`generate_wt_signal()` 检查金叉/死叉 + 超买超卖区。`calculate_rsi()` 使用 Wilder 平滑。
 - **`websocket_manager.py`**：单例管理所有 WS 连接。dashboard 频道用单独的 async task 每 60s 广播一次 `request_update` 快照（非每连接轮询），前端收到后调 REST `/api/dashboard`。

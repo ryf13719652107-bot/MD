@@ -46,15 +46,52 @@ class StrategyScheduler:
     def scheduler(self) -> AsyncIOScheduler:
         return self._scheduler
 
-    async def _reset_stale_running_strategies(self):
+    async def resume_running_strategies(self):
+        """进程重启后：为 DB 中仍为 running 的策略重新注册 APScheduler 任务（不改 status/started_at）。"""
         async with async_session() as session:
-            result = await session.execute(select(Strategy).where(Strategy.status == "running"))
-            stale = result.scalars().all()
-            for s in stale:
-                s.status = "stopped"
-                logger.info("Reset stale strategy %d (%s) to stopped", s.id, s.name)
-            if stale:
-                await session.commit()
+            result = await session.execute(
+                select(Strategy).where(Strategy.status == "running").order_by(Strategy.id)
+            )
+            rows = list(result.scalars().all())
+        for s in rows:
+            self._register_strategy_jobs(s.id, s.timeframe)
+            strategy_log_service.info(
+                s.id, "后端已重启：已恢复调度任务（仍为运行中）",
+            )
+            logger.info(
+                "Resumed scheduler jobs for strategy %d (%s)",
+                s.id, s.name,
+            )
+
+    def _register_strategy_jobs(self, strategy_id: int, timeframe: str) -> None:
+        """注册主周期任务 + 中段止盈任务；不写数据库。"""
+        interval_seconds = TIMEFRAME_SECONDS.get(timeframe, 60)
+        next_run = _next_candle_close(timeframe)
+
+        job_id = f"strategy_{strategy_id}"
+        if self._scheduler.get_job(job_id):
+            self._scheduler.remove_job(job_id)
+        self._scheduler.add_job(
+            self._execute_strategy,
+            "interval",
+            seconds=interval_seconds,
+            id=job_id,
+            args=[strategy_id],
+            next_run_time=next_run,
+        )
+        self._strategy_tasks[strategy_id] = job_id
+
+        tp_job_id = f"strategy_{strategy_id}_tp"
+        if self._scheduler.get_job(tp_job_id):
+            self._scheduler.remove_job(tp_job_id)
+        self._scheduler.add_job(
+            self._execute_tp_check,
+            "interval",
+            seconds=interval_seconds,
+            id=tp_job_id,
+            args=[strategy_id],
+            next_run_time=next_run + timedelta(seconds=30),
+        )
 
     def start(self):
         if not self._scheduler.running:
@@ -77,31 +114,8 @@ class StrategyScheduler:
             logger.warning("Strategy %d not found", strategy_id)
             return False
 
-        interval_seconds = TIMEFRAME_SECONDS.get(strategy.timeframe, 60)
-        next_run = _next_candle_close(strategy.timeframe)
+        self._register_strategy_jobs(strategy_id, strategy.timeframe)
 
-        # Main trading job — at candle close
-        job_id = f"strategy_{strategy_id}"
-        existing_job = self._scheduler.get_job(job_id)
-        if existing_job:
-            self._scheduler.remove_job(job_id)
-        self._scheduler.add_job(
-            self._execute_strategy, "interval", seconds=interval_seconds,
-            id=job_id, args=[strategy_id], next_run_time=next_run,
-        )
-        self._strategy_tasks[strategy_id] = job_id
-
-        # TP fill check job — offset 30s after trading, runs mid-candle
-        tp_job_id = f"strategy_{strategy_id}_tp"
-        existing_tp = self._scheduler.get_job(tp_job_id)
-        if existing_tp:
-            self._scheduler.remove_job(tp_job_id)
-        from datetime import timedelta
-        self._scheduler.add_job(
-            self._execute_tp_check, "interval", seconds=interval_seconds,
-            id=tp_job_id, args=[strategy_id],
-            next_run_time=next_run + timedelta(seconds=30),
-        )
         strategy.status = "running"
         strategy.started_at = now_beijing()
         await session.commit()

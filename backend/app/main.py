@@ -59,10 +59,10 @@ async def lifespan(app: FastAPI):
     logger.info("Smart Hedge Martin starting...")
     logger.info("Step 1/6: init_db...")
     await init_db()
-    logger.info("Step 2/6: reset_stale...")
-    await strategy_scheduler._reset_stale_running_strategies()
-    logger.info("Step 3/6: scheduler.start...")
+    logger.info("Step 2/6: scheduler.start...")
     strategy_scheduler.start()
+    logger.info("Step 3/6: resume_running_strategies...")
+    await strategy_scheduler.resume_running_strategies()
     logger.info("Step 4/6: get_public_binance...")
     public_binance = await get_public_binance()
 
