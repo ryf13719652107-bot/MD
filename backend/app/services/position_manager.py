@@ -14,7 +14,7 @@ from .strategy_engine import calculate_rsi, generate_signal, Signal, calculate_w
 from .martingale_engine import MartingaleEngine
 from .risk_manager import RiskManager
 from .log_service import strategy_log_service
-from .kline_stream import kline_stream_manager
+from .kline_stream import kline_stream_manager, _timeframe_ms
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,28 @@ _SIGNAL_COOLDOWN_SECONDS = 5
 def set_cooldown_lock(lock):
     global _signal_cooldown_lock
     _signal_cooldown_lock = lock
+
+
+def _klines_for_confirmed_signal_only(klines: list, timeframe: str) -> list:
+    """仅使用已收盘 K 线算信号，对齐 TradingView 等「收盘确认」逻辑。
+
+    ``timeframe`` 须与策略配置一致（与拉 K / kline_stream 使用同一周期字符串）。
+    若 ``klines[-1]`` 的开盘时间 + 周期仍晚于当前时间，视为正在形成中的 K，排除后再算 WT/RSI。
+    若最后一根已完整（时间已过该根收盘边界），则保留。
+    """
+    if len(klines) < 2:
+        return klines
+    tf_ms = _timeframe_ms(timeframe)
+    import time
+
+    now_ms = int(time.time() * 1000)
+    try:
+        last_open = int(klines[-1][0])
+    except (TypeError, ValueError, IndexError):
+        return klines[:-1]
+    if now_ms >= last_open + tf_ms:
+        return klines
+    return klines[:-1]
 
 
 async def _check_cooldown(strategy_id: int, symbol: str) -> bool:
@@ -334,13 +356,14 @@ class PositionManager:
                 )
                 return
 
-        # --- Generate signal based on source ---
-        # Use the just-closed candle for signal detection (no lag).
-        # Scheduler is aligned to candle close times, so klines[-1] is complete.
+        # --- Generate signal (TradingView 风格：仅用已收盘 K，不含当前正在走的 K) ---
+        klines_signal = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
         rsi = 0.0  # always defined, used for logging
         signal_label = "RSI"
         if strategy.signal_source == "wavetrend":
-            wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length)
+            wt = calculate_wavetrend(
+                klines_signal, strategy.wt_channel_length, strategy.wt_average_length
+            )
             if wt is None:
                 return
             signal = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
@@ -352,7 +375,7 @@ class PositionManager:
             if signal != Signal.NEUTRAL:
                 strategy_log_service.info(strategy_id, f"{symbol} WT1={wt['wt1']} WT2={wt['wt2']} 信号={signal.value}")
         else:
-            rsi = calculate_rsi(klines, strategy.rsi_period)
+            rsi = calculate_rsi(klines_signal, strategy.rsi_period)
             if rsi is None:
                 return
             signal = generate_signal(rsi, strategy.direction, strategy.rsi_entry_threshold)
@@ -794,8 +817,11 @@ class PositionManager:
 
         # Signal re-check for martingale add (if enabled)
         if strategy.martingale_rsi_enabled and klines is not None and public_binance is not None:
+            klines_confirm = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
             if strategy.signal_source == "wavetrend":
-                wt = calculate_wavetrend(klines, strategy.wt_channel_length, strategy.wt_average_length)
+                wt = calculate_wavetrend(
+                    klines_confirm, strategy.wt_channel_length, strategy.wt_average_length
+                )
                 if wt is not None:
                     confirm = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
                     if confirm == Signal.NEUTRAL:
@@ -803,7 +829,7 @@ class PositionManager:
                         return
                     strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓WT确认 — WT1={wt['wt1']} WT2={wt['wt2']}")
             else:
-                rsi_val = calculate_rsi(klines, strategy.rsi_period)
+                rsi_val = calculate_rsi(klines_confirm, strategy.rsi_period)
                 if rsi_val is not None:
                     confirm = generate_signal(rsi_val, strategy.direction, strategy.rsi_entry_threshold)
                     if confirm == Signal.NEUTRAL:
