@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import time
+from typing import Any
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,64 +19,48 @@ from ..services.binance_service import get_binance_service
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
+# 仪表盘余额/全仓持仓走 REST，易被限流；短时缓存可显著减少 fetch_balance + fetch_positions
+_DASHBOARD_EXCHANGE_CACHE_TTL_SEC = 60.0
+_dashboard_exchange_cache: dict[int, tuple[float, dict[str, Any]]] = {}
 
-@router.get("", response_model=DashboardSnapshot)
-async def get_dashboard(
-    account_id: int | None = Query(default=None),
-    db: AsyncSession = Depends(get_db),
-):
+
+def _dashboard_exchange_cache_get(account_id: int) -> dict[str, Any] | None:
+    row = _dashboard_exchange_cache.get(account_id)
+    if not row:
+        return None
+    ts, payload = row
+    if time.monotonic() - ts > _DASHBOARD_EXCHANGE_CACHE_TTL_SEC:
+        return None
+    return payload
+
+
+def _dashboard_exchange_cache_set(account_id: int, payload: dict[str, Any]) -> None:
+    _dashboard_exchange_cache[account_id] = (time.monotonic(), payload)
+
+
+async def _fetch_dashboard_exchange_slice(binance) -> dict[str, Any]:
+    """REST: balance + positions for dashboard header. Does not touch DB."""
     total_balance = 0.0
     available_balance = 0.0
-    leverage_multiplier = 0.0
-    account_name = ""
-    balance_status = "no_account"
-    account = None
-    binance = None
-    filter_account_id = account_id
-
-    # Fetch balance and positions from Binance
-    try:
-        if filter_account_id:
-            result = await db.execute(select(Account).where(Account.id == filter_account_id))
-            account = result.scalar()
-        else:
-            result = await db.execute(select(Account).order_by(Account.id).limit(1))
-            account = result.scalar()
-
-        if account:
-            account_name = account.name
-            filter_account_id = account.id
-            try:
-                api_key = decrypt(account.api_key_encrypted)
-                api_secret = decrypt(account.api_secret_encrypted)
-                binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
-                balance = await asyncio.wait_for(binance.fetch_balance(), timeout=8.0)
-                total_balance = float(balance.get("total", {}).get("USDT", 0) or 0)
-                available_balance = float(balance.get("free", {}).get("USDT", 0) or 0)
-                balance_status = "ok"
-            except asyncio.TimeoutError:
-                balance_status = "error"
-            except Exception as e:
-                logging.error("Balance fetch error for account %s: %s", account.name, e)
-                balance_status = "error"
-    except Exception:
-        balance_status = "error"
-
-    # Active strategies count (filtered by account)
-    strat_stmt = select(func.count(Strategy.id)).where(Strategy.status == "running")
-    if filter_account_id:
-        strat_stmt = strat_stmt.where(Strategy.account_id == filter_account_id)
-    result = await db.execute(strat_stmt)
-    active_strategies = result.scalar() or 0
-
-    # Open positions & unrealized PnL from EXCHANGE
+    balance_status = "error"
     open_positions = 0
     unrealized_pnl = 0.0
     unrealized_pnl_long = 0.0
     unrealized_pnl_short = 0.0
     total_notional = 0.0
-    exchange_positions = []
-    if binance:
+    exchange_positions: list[dict] = []
+    try:
+        balance = await asyncio.wait_for(binance.fetch_balance(), timeout=8.0)
+        total_balance = float(balance.get("total", {}).get("USDT", 0) or 0)
+        available_balance = float(balance.get("free", {}).get("USDT", 0) or 0)
+        balance_status = "ok"
+    except asyncio.TimeoutError:
+        balance_status = "error"
+    except Exception as e:
+        logging.error("Balance fetch error in dashboard slice: %s", e)
+        balance_status = "error"
+
+    if balance_status == "ok":
         try:
             positions = await asyncio.wait_for(binance.fetch_positions(), timeout=8.0)
             for p in positions:
@@ -114,9 +101,102 @@ async def get_dashboard(
         except Exception as e:
             logging.error("Position fetch error for dashboard: %s", e)
 
-    # Leverage = total position notional / wallet balance
+    leverage_multiplier = 0.0
     if total_balance > 0 and total_notional > 0:
         leverage_multiplier = round(total_notional / total_balance, 2)
+
+    return {
+        "total_balance": total_balance,
+        "available_balance": available_balance,
+        "balance_status": balance_status,
+        "open_positions": open_positions,
+        "unrealized_pnl": unrealized_pnl,
+        "unrealized_pnl_long": unrealized_pnl_long,
+        "unrealized_pnl_short": unrealized_pnl_short,
+        "leverage_multiplier": leverage_multiplier,
+        "exchange_positions": exchange_positions,
+    }
+
+
+@router.get("", response_model=DashboardSnapshot)
+async def get_dashboard(
+    account_id: int | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    total_balance = 0.0
+    available_balance = 0.0
+    leverage_multiplier = 0.0
+    account_name = ""
+    balance_status = "no_account"
+    account = None
+    binance = None
+    filter_account_id = account_id
+    open_positions = 0
+    unrealized_pnl = 0.0
+    unrealized_pnl_long = 0.0
+    unrealized_pnl_short = 0.0
+    exchange_positions: list[dict] = []
+
+    # Fetch balance and positions from Binance
+    try:
+        if filter_account_id:
+            result = await db.execute(select(Account).where(Account.id == filter_account_id))
+            account = result.scalar()
+        else:
+            result = await db.execute(select(Account).order_by(Account.id).limit(1))
+            account = result.scalar()
+
+        if account:
+            account_name = account.name
+            filter_account_id = account.id
+            try:
+                api_key = decrypt(account.api_key_encrypted)
+                api_secret = decrypt(account.api_secret_encrypted)
+                binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+                cached = (
+                    _dashboard_exchange_cache_get(filter_account_id)
+                    if filter_account_id is not None
+                    else None
+                )
+                if cached is not None:
+                    total_balance = float(cached["total_balance"])
+                    available_balance = float(cached["available_balance"])
+                    balance_status = str(cached["balance_status"])
+                    open_positions = int(cached["open_positions"])
+                    unrealized_pnl = float(cached["unrealized_pnl"])
+                    unrealized_pnl_long = float(cached["unrealized_pnl_long"])
+                    unrealized_pnl_short = float(cached["unrealized_pnl_short"])
+                    leverage_multiplier = float(cached["leverage_multiplier"])
+                    exchange_positions = list(cached["exchange_positions"])
+                else:
+                    ex = await _fetch_dashboard_exchange_slice(binance)
+                    total_balance = float(ex["total_balance"])
+                    available_balance = float(ex["available_balance"])
+                    balance_status = str(ex["balance_status"])
+                    open_positions = int(ex["open_positions"])
+                    unrealized_pnl = float(ex["unrealized_pnl"])
+                    unrealized_pnl_long = float(ex["unrealized_pnl_long"])
+                    unrealized_pnl_short = float(ex["unrealized_pnl_short"])
+                    leverage_multiplier = float(ex["leverage_multiplier"])
+                    exchange_positions = list(ex["exchange_positions"])
+                    if balance_status == "ok" and filter_account_id is not None:
+                        _dashboard_exchange_cache_set(filter_account_id, ex)
+            except asyncio.TimeoutError:
+                balance_status = "error"
+            except Exception as e:
+                logging.error("Balance fetch error for account %s: %s", account.name, e)
+                balance_status = "error"
+    except Exception:
+        balance_status = "error"
+
+    # Active strategies count (filtered by account)
+    strat_stmt = select(func.count(Strategy.id)).where(Strategy.status == "running")
+    if filter_account_id:
+        strat_stmt = strat_stmt.where(Strategy.account_id == filter_account_id)
+    result = await db.execute(strat_stmt)
+    active_strategies = result.scalar() or 0
+
+    # Open positions & unrealized PnL: filled above from cache or _fetch_dashboard_exchange_slice
 
     # Daily trades and PnL (today 00:00 Beijing, filtered by account)
     today_start = now_beijing().replace(hour=0, minute=0, second=0, microsecond=0)

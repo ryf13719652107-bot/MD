@@ -121,7 +121,7 @@ export default function PositionsPage() {
   }, [selectedAccountId]);
 
   useEffect(() => {
-    const timer = setInterval(() => loadRef.current(), 30000);
+    const timer = setInterval(() => loadRef.current(), 60000);
     return () => clearInterval(timer);
   }, []);
 

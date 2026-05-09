@@ -47,7 +47,7 @@ export default function StatusBar() {
     fetchRef.current = fetchDashboard;
 
     fetchDashboard();
-    const interval = setInterval(fetchDashboard, 30000);
+    const interval = setInterval(fetchDashboard, 60000);
     return () => clearInterval(interval);
   }, [selectedAccountId]);
 

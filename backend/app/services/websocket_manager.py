@@ -6,8 +6,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# 与前端 StatusBar 轮询对齐；避免每个 WS 连接各自 sleep(3) 导致多标签页疯狂刷新
-_DASHBOARD_SNAPSHOT_INTERVAL_SEC = 30
+# 与前端 StatusBar 轮询对齐（约 60s）；避免每个 WS 连接各自高频 broadcast
+_DASHBOARD_SNAPSHOT_INTERVAL_SEC = 60
 
 
 class WebSocketManager:
