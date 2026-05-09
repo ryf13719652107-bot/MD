@@ -29,6 +29,56 @@ def _norm_sym(s: str) -> str:
     return (s or "").replace("/", "").replace(":USDT", "").upper()
 
 
+def _timeframe_ms(timeframe: str) -> int:
+    """K 线周期 → 毫秒（与 scheduler TIMEFRAME_SECONDS 对齐，未知周期按 1m）。"""
+    mapping = {
+        "1m": 60_000,
+        "3m": 180_000,
+        "5m": 300_000,
+        "15m": 900_000,
+        "30m": 1_800_000,
+        "1h": 3_600_000,
+        "2h": 7_200_000,
+        "4h": 14_400_000,
+        "1d": 86_400_000,
+    }
+    return mapping.get(timeframe, 60_000)
+
+
+def _normalize_candles(raw) -> list[list]:
+    """统一 WS / REST 返回为 [[ts,o,h,l,c,v], ...]。
+
+    ccxt `watch_ohlcv` 一般为蜡烛列表；个别版本或中间态可能是单根扁平数组。
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) == 0:
+        return []
+    if isinstance(raw[0], (list, tuple)):
+        out: list[list] = []
+        for x in raw:
+            if isinstance(x, (list, tuple)) and len(x) >= 6:
+                out.append([x[0], x[1], x[2], x[3], x[4], x[5]])
+        return out
+    if len(raw) >= 6 and isinstance(raw[0], (int, float)):
+        return [[raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]]]
+    return []
+
+
+def _buffer_stale_for_timeframe(buf: list, timeframe: str) -> bool:
+    """最后一根 K 的开盘时间若长期不推进，说明 WS 可能未更新，应用 REST 纠偏。"""
+    if not buf:
+        return True
+    try:
+        last_open = int(buf[-1][0])
+    except (TypeError, ValueError, IndexError):
+        return True
+    now_ms = int(time.time() * 1000)
+    tf_ms = _timeframe_ms(timeframe)
+    # 新周期开始后应很快收到更新；超时仍停在旧开盘时间则视为停滞
+    return (now_ms - last_open) > (tf_ms + 15_000)
+
+
 class KlineStreamManager:
     """Per-(symbol, timeframe) OHLCV cache fed by ccxt.pro websockets."""
 
@@ -45,7 +95,8 @@ class KlineStreamManager:
     def _key(symbol: str, timeframe: str) -> tuple[str, str]:
         return (_norm_sym(symbol), timeframe)
 
-    def _merge(self, key: tuple[str, str], rows: list[list]) -> None:
+    def _merge(self, key: tuple[str, str], rows) -> None:
+        rows = _normalize_candles(rows)
         if not rows:
             return
         buf = self._buffers.get(key) or []
@@ -83,11 +134,10 @@ class KlineStreamManager:
         while True:
             try:
                 ohlcv = await public_binance.watch_klines(symbol, timeframe)
-                if isinstance(ohlcv, list):
-                    self._merge(key, ohlcv)
-                    ev = self._ready.get(key)
-                    if ev is not None and not ev.is_set():
-                        ev.set()
+                self._merge(key, ohlcv)
+                ev = self._ready.get(key)
+                if ev is not None and not ev.is_set():
+                    ev.set()
                 backoff = _RECONNECT_INITIAL_BACKOFF
             except asyncio.CancelledError:
                 raise
@@ -104,22 +154,27 @@ class KlineStreamManager:
 
     async def _ensure_started(self, public_binance, symbol: str, timeframe: str, min_bars: int) -> None:
         key = self._key(symbol, timeframe)
+        seed_limit = max(min_bars, self._max_bars)
+        need_start = False
         async with self._lock:
             self._last_access[key] = time.time()
             task = self._tasks.get(key)
             if task is None or task.done():
-                ev = asyncio.Event()
-                self._ready[key] = ev
-                seed_limit = max(min_bars, self._max_bars)
-                await self._seed_via_rest(public_binance, symbol, timeframe, seed_limit)
-                self._tasks[key] = asyncio.create_task(
-                    self._run_subscription(public_binance, symbol, timeframe),
-                    name=f"kline_ws:{key[0]}:{key[1]}",
-                )
-            if self._janitor_task is None or self._janitor_task.done():
-                self._janitor_task = asyncio.create_task(
-                    self._janitor_loop(), name="kline_stream_janitor"
-                )
+                need_start = True
+                self._ready[key] = asyncio.Event()
+        if need_start:
+            await self._seed_via_rest(public_binance, symbol, timeframe, seed_limit)
+            async with self._lock:
+                task2 = self._tasks.get(key)
+                if task2 is None or task2.done():
+                    self._tasks[key] = asyncio.create_task(
+                        self._run_subscription(public_binance, symbol, timeframe),
+                        name=f"kline_ws:{key[0]}:{key[1]}",
+                    )
+                if self._janitor_task is None or self._janitor_task.done():
+                    self._janitor_task = asyncio.create_task(
+                        self._janitor_loop(), name="kline_stream_janitor"
+                    )
 
     async def get(
         self,
@@ -131,14 +186,15 @@ class KlineStreamManager:
         """Return up to `min_bars` most recent OHLCV rows.
 
         - 若订阅未启动：启动并 REST 灌入种子。
-        - 若 WS 缓冲已经够 `min_bars`，直接返回快照。
-        - 否则 REST 兜底取最新数据并合并。
+        - 若缓冲够新且条数足：直接返回（减少 REST）。
+        - 条数不足或 K 线时间停滞：REST 拉取合并（防止 WS 挂了后永远停在种子数据上不开仓）。
         """
         key = self._key(symbol, timeframe)
         await self._ensure_started(public_binance, symbol, timeframe, min_bars)
         self._last_access[key] = time.time()
         buf = self._buffers.get(key) or []
-        if len(buf) >= min_bars:
+        need_rest = len(buf) < min_bars or _buffer_stale_for_timeframe(buf, timeframe)
+        if not need_rest:
             return list(buf[-self._max_bars :])
         try:
             data = await public_binance.fetch_klines(

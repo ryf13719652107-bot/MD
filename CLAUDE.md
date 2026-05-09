@@ -57,7 +57,7 @@ bash deploy.sh
 - **`sync_service.py`**：每 60 秒对账 DB ↔ 交易所。按 `(symbol, side)` 分组（`by_leg`），多层马丁共用一次 TP 订单查询。`_exit_price_from_tp_orders()` 查止盈单成交价，`_order_filled()` 宽松判定（`closed`/`filled` 或有 `filled>0` 且非活跃状态）。
 - **`strategy_engine.py`**：`calculate_wavetrend()` — 纯 Pine Script v5 LazyBear 实现。`generate_wt_signal()` 检查金叉/死叉 + 超买超卖区。`calculate_rsi()` 使用 Wilder 平滑。
 - **`websocket_manager.py`**：单例管理所有 WS 连接。dashboard 频道用单独的 async task 每 60s 广播一次 `request_update` 快照（非每连接轮询），前端收到后调 REST `/api/dashboard`。
-- **`kline_stream.py`**：策略信号用的 K 线缓存。每个 `(symbol, timeframe)` 启一个后台 `watch_ohlcv` 协程把推送写入内存缓冲；首次订阅 REST 灌种子；`get()` 提供最近 N 根快照（不足时 REST 兜底再合并）；15min 无人读取自动停订阅。后端 `lifespan` 关停时调用 `shutdown()` 释放所有 WS 任务。
+- **`kline_stream.py`**：策略信号用的 K 线缓存。每个 `(symbol, timeframe)` 启一个后台 `watch_ohlcv` 协程把推送写入内存缓冲；首次订阅 REST 灌种子；`get()` 提供最近 N 根快照；**条数不足或检测到缓冲区时间停滞**（WS 挂了仍当缓存够新）时 **REST 纠偏**，再合并；15min 无人读取自动停订阅。后端 `lifespan` 关停时调用 `shutdown()` 释放所有 WS 任务。
 
 ### 数据库
 - SQLite + aiosqlite，启动时 `Base.metadata.create_all()` + `init_db()` 内联 ALTER TABLE 迁移 + NULL `opened_at` 回填
