@@ -88,6 +88,11 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     strategy_scheduler.stop()
     await coin_pool_service.stop_auto_refresh()
+    try:
+        from .services.kline_stream import kline_stream_manager
+        await kline_stream_manager.shutdown()
+    except Exception as e:
+        logger.warning("kline_stream shutdown error: %s", e)
     logger.info("Backend stopped")
 
 

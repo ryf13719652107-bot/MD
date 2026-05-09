@@ -14,6 +14,7 @@ from .strategy_engine import calculate_rsi, generate_signal, Signal, calculate_w
 from .martingale_engine import MartingaleEngine
 from .risk_manager import RiskManager
 from .log_service import strategy_log_service
+from .kline_stream import kline_stream_manager
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,8 @@ RECONCILE_SKIPPED_OTHER_STRATEGY = "skipped_other_strategy"  # same acc: another
 RECONCILE_DB_ERROR = "db_error"
 
 
-# Shared caches and cooldown (module-level, shared with scheduler)
-_kline_cache: dict[tuple[str, str], tuple[float, list]] = {}
-_KLINE_CACHE_TTL = 30.0
+# Shared cooldown (module-level, shared with scheduler)
+# K 线缓存已迁移到 services/kline_stream.py，由 WS 订阅维持。
 _signal_cooldowns: dict[tuple[int, str], float] = {}
 _signal_cooldown_lock = asyncio.Lock()
 _SIGNAL_COOLDOWN_SECONDS = 5
@@ -69,21 +69,6 @@ _SIGNAL_COOLDOWN_SECONDS = 5
 def set_cooldown_lock(lock):
     global _signal_cooldown_lock
     _signal_cooldown_lock = lock
-
-
-def _get_cached_klines(symbol: str, timeframe: str) -> Optional[list]:
-    import time
-    key = (symbol, timeframe)
-    if key in _kline_cache:
-        ts, data = _kline_cache[key]
-        if time.time() - ts < _KLINE_CACHE_TTL:
-            return data
-    return None
-
-
-def _set_cached_klines(symbol: str, timeframe: str, klines: list):
-    import time
-    _kline_cache[(symbol, timeframe)] = (time.time(), klines)
 
 
 async def _check_cooldown(strategy_id: int, symbol: str) -> bool:
@@ -330,13 +315,24 @@ class PositionManager:
             if tradefi and _norm_sym(symbol) in tradefi and not open_positions:
                 return
 
-        # --- Fetch klines with cache ---
-        klines = _get_cached_klines(symbol, strategy.timeframe)
-        if klines is None:
-            # RSI Wilder smoothing needs ~100 bars to converge; WT needs 33+
-            limit = 50 if strategy.signal_source == "wavetrend" else 100
-            klines = await public_binance.fetch_klines(symbol, strategy.timeframe, limit=limit)
-            _set_cached_klines(symbol, strategy.timeframe, klines)
+        # --- Fetch klines via WebSocket stream (REST fallback inside manager) ---
+        # RSI Wilder smoothing needs ~100 bars to converge; WT needs 33+
+        limit = 50 if strategy.signal_source == "wavetrend" else 100
+        klines = await kline_stream_manager.get(
+            public_binance, symbol, strategy.timeframe, min_bars=limit
+        )
+        if not klines:
+            # 极端兜底：流和 REST 兜底都拿不到（例如刚启动时被限流），保留兼容路径
+            try:
+                klines = await public_binance.fetch_klines(
+                    symbol, strategy.timeframe, limit=limit
+                )
+            except Exception as e:
+                logger.warning(
+                    "Strategy %d: %s kline fetch failed: %s",
+                    strategy_id, symbol, e,
+                )
+                return
 
         # --- Generate signal based on source ---
         # Use the just-closed candle for signal detection (no lag).
