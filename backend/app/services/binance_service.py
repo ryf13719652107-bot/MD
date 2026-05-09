@@ -143,8 +143,29 @@ class BinanceService:
         )
 
     async def fetch_positions(self, symbols: list[str] | None = None) -> list[dict]:
-        formatted = [self._format_symbol(s) for s in symbols] if symbols else None
-        return await self.exchange.fetch_positions(formatted)
+        if not symbols:
+            return await self.exchange.fetch_positions(None)
+        try:
+            formatted = [self._format_symbol(s) for s in symbols]
+            return await self.exchange.fetch_positions(formatted)
+        except Exception as e:
+            # ccxt 在 markets 表里找不到统一符号时会抛错；对账仍可用「全量持仓」再按币种过滤
+            msg = str(e).lower()
+            if "does not have market symbol" in msg or "marketsymbol" in msg or "invalid symbol" in msg:
+                logger.warning(
+                    "fetch_positions(%s) unified symbol missing in ccxt markets, fallback fetch all: %s",
+                    symbols,
+                    e,
+                )
+                raw = await self.exchange.fetch_positions(None)
+                want = {_normalize_symbol_for_tradefi(s) for s in symbols}
+                out: list[dict] = []
+                for p in raw:
+                    sym = p.get("symbol") or ""
+                    if _normalize_symbol_for_tradefi(sym) in want:
+                        out.append(p)
+                return out
+            raise
 
     async def fetch_leverage(self, symbol: str | None = None, use_coin_pool: bool = False) -> float:
         """Fetch leverage for a symbol. Defaults to 20x if not set or if using coin pool."""
