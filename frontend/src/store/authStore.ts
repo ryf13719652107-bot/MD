@@ -37,9 +37,17 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ role: 'owner' });
       return { ok: true };
     }
-    const ownerPwd = import.meta.env.VITE_UI_OWNER_PASSWORD ?? '';
-    const guestPwd = import.meta.env.VITE_UI_GUEST_PASSWORD ?? '';
-    if (ownerPwd !== '' && password === ownerPwd) {
+    const ownerPwd = (import.meta.env.VITE_UI_OWNER_PASSWORD ?? '').trim();
+    const guestPwd = (import.meta.env.VITE_UI_GUEST_PASSWORD ?? '').trim();
+    const input = password.trim();
+    if (ownerPwd === '' && guestPwd === '') {
+      return {
+        ok: false,
+        error:
+          '未注入登录密码：请在 frontend 目录配置 .env.local 后重新执行 npm run build，并部署新的 dist',
+      };
+    }
+    if (ownerPwd !== '' && input === ownerPwd) {
       try {
         sessionStorage.setItem(STORAGE_KEY, 'owner');
       } catch {
@@ -48,7 +56,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ role: 'owner' });
       return { ok: true };
     }
-    if (guestPwd !== '' && password === guestPwd) {
+    if (guestPwd !== '' && input === guestPwd) {
       try {
         sessionStorage.setItem(STORAGE_KEY, 'guest');
       } catch {

@@ -30,9 +30,7 @@ export default function LoginModal() {
             <Lock size={28} />
           </div>
           <h1 className="text-xl font-bold text-gray-100">智能对冲马丁</h1>
-          <p className="text-xs text-gray-500 text-center">
-            请输入密码登录。主人密码可使用全部功能；访客密码仅可查看仪表盘、持仓与交易历史。
-          </p>
+          <p className="text-sm text-gray-500 text-center">请输入密码登录</p>
         </div>
 
         <form onSubmit={onSubmit} className="space-y-4">
