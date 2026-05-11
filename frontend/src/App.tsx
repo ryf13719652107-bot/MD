@@ -9,6 +9,9 @@ import PositionsPage from './components/positions/PositionsPage';
 import TradesPage from './components/trades/TradesPage';
 import CoinPoolPage from './components/coinpool/CoinPoolPage';
 import SettingsPage from './components/settings/SettingsPage';
+import LoginModal from './components/auth/LoginModal';
+import RoleRoute from './components/auth/RoleRoute';
+import { useAuthStore } from './store/authStore';
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   constructor(props: { children: ReactNode }) {
@@ -39,18 +42,59 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 export default function App() {
+  const role = useAuthStore((s) => s.role);
+
+  if (role === null) {
+    return <LoginModal />;
+  }
+
   return (
     <ErrorBoundary>
       <AppShell>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
-          <Route path="/chart/:symbol?" element={<ChartPage />} />
-          <Route path="/strategies" element={<StrategyPage />} />
-          <Route path="/strategies/:id" element={<StrategyDetailPage />} />
+          <Route
+            path="/chart/:symbol?"
+            element={
+              <RoleRoute allowedRoles={['owner']}>
+                <ChartPage />
+              </RoleRoute>
+            }
+          />
+          <Route
+            path="/strategies"
+            element={
+              <RoleRoute allowedRoles={['owner']}>
+                <StrategyPage />
+              </RoleRoute>
+            }
+          />
+          <Route
+            path="/strategies/:id"
+            element={
+              <RoleRoute allowedRoles={['owner']}>
+                <StrategyDetailPage />
+              </RoleRoute>
+            }
+          />
           <Route path="/positions" element={<PositionsPage />} />
           <Route path="/trades" element={<TradesPage />} />
-          <Route path="/coin-pool" element={<CoinPoolPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route
+            path="/coin-pool"
+            element={
+              <RoleRoute allowedRoles={['owner']}>
+                <CoinPoolPage />
+              </RoleRoute>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <RoleRoute allowedRoles={['owner']}>
+                <SettingsPage />
+              </RoleRoute>
+            }
+          />
         </Routes>
       </AppShell>
     </ErrorBoundary>

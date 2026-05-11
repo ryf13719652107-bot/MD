@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
+import { useAuthStore } from '../../store/authStore';
 import type { Trade } from '../../types';
 import { Download, Trash2 } from 'lucide-react';
 
@@ -10,6 +11,7 @@ export default function TradesPage() {
   const [page, setPage] = useState(0);
   const limit = 50;
   const selectedAccountId = useDashboardStore((s) => s.selectedAccountId);
+  const guest = useAuthStore((s) => s.role === 'guest');
   const loadRef = useRef<() => void>(() => {});
 
   const load = async () => {
@@ -52,7 +54,17 @@ export default function TradesPage() {
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">交易历史</h2>
         <div className="flex items-center gap-2">
-          <button onClick={handleDeleteAll} className="flex items-center gap-1.5 bg-red-600/20 hover:bg-red-600/40 text-red-400 px-3 py-1.5 rounded-lg text-sm">
+          <button
+            type="button"
+            onClick={guest ? undefined : handleDeleteAll}
+            disabled={guest}
+            title={guest ? '访客模式无法清空记录' : undefined}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm ${
+              guest
+                ? 'bg-red-600/10 text-red-400/50 cursor-not-allowed'
+                : 'bg-red-600/20 hover:bg-red-600/40 text-red-400'
+            }`}
+          >
             <Trash2 size={16} />
             清空
           </button>
@@ -114,7 +126,17 @@ export default function TradesPage() {
                   </span>
                 </td>
                 <td className="p-3">
-                  <button onClick={() => handleDeleteOne(t.id)} className="p-1 text-gray-500 hover:text-red-400 hover:bg-red-600/20 rounded" title="删除">
+                  <button
+                    type="button"
+                    onClick={guest ? undefined : () => handleDeleteOne(t.id)}
+                    disabled={guest}
+                    title={guest ? '访客模式无法删除记录' : '删除'}
+                    className={`p-1 rounded ${
+                      guest
+                        ? 'text-gray-600 cursor-not-allowed'
+                        : 'text-gray-500 hover:text-red-400 hover:bg-red-600/20'
+                    }`}
+                  >
                     <Trash2 size={14} />
                   </button>
                 </td>

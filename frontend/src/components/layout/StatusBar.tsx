@@ -1,12 +1,15 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
+import { useAuthStore } from '../../store/authStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { Power, Circle, ChevronDown } from 'lucide-react';
 import type { DashboardData, Account } from '../../types';
 
 export default function StatusBar() {
   const { data } = useDashboardStore();
+  const role = useAuthStore((s) => s.role);
+  const guest = role === 'guest';
   const [connected, setConnected] = useState(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
@@ -178,8 +181,13 @@ export default function StatusBar() {
       )}
 
       <button
-        onClick={handleToggle}
+        type="button"
+        onClick={guest ? undefined : handleToggle}
+        disabled={guest}
+        title={guest ? '访客模式无法切换总开关' : undefined}
         className={`flex items-center gap-1.5 px-3 py-1 rounded text-sm font-medium transition-colors ${
+          guest ? 'opacity-50 cursor-not-allowed' : ''
+        } ${
           data.master_switch
             ? 'bg-green-600/20 text-green-400 hover:bg-green-600/30'
             : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
