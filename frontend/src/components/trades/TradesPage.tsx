@@ -51,8 +51,12 @@ export default function TradesPage() {
   };
 
   const handleDeleteAll = async () => {
-    if (!confirm('确定要删除全部交易记录吗？此操作不可恢复。')) return;
-    await api.deleteAllTrades();
+    if (selectedAccountId == null) {
+      alert('请先在顶栏选择要清空的账户。');
+      return;
+    }
+    if (!confirm(`确定删除账户 ID ${selectedAccountId} 的全部交易记录吗？\n仅影响当前账户，其它账户记录保留。此操作不可从页面撤销（备份 JSONL 仍保留）。`)) return;
+    await api.deleteAllTrades(selectedAccountId);
     setPage(0);
     load();
   };
@@ -95,10 +99,14 @@ export default function TradesPage() {
           <button
             type="button"
             onClick={guest ? undefined : handleDeleteAll}
-            disabled={guest}
-            title={guest ? '访客模式无法清空记录' : undefined}
+            disabled={guest || selectedAccountId == null}
+            title={
+              guest ? '访客模式无法清空记录' :
+              selectedAccountId == null ? '请先在顶栏选择账户' :
+              `清空当前账户的全部交易记录（账户 ${selectedAccountId}）`
+            }
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm ${
-              guest
+              guest || selectedAccountId == null
                 ? 'bg-red-600/10 text-red-400/50 cursor-not-allowed'
                 : 'bg-red-600/20 hover:bg-red-600/40 text-red-400'
             }`}

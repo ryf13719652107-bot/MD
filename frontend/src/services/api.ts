@@ -73,7 +73,8 @@ export const api = {
     return request(`/trades${q ? `?${q}` : ''}`);
   },
   deleteTrade: (id: number): Promise<void> => request(`/trades/${id}`, { method: 'DELETE' }),
-  deleteAllTrades: (): Promise<void> => request('/trades', { method: 'DELETE' }),
+  deleteAllTrades: (accountId: number): Promise<void> =>
+    request(`/trades?account_id=${accountId}`, { method: 'DELETE' }),
   restoreTrades: (accountId: number): Promise<{ restored: number; skipped: number; total: number; account_id: number; invalid?: number }> =>
     request(`/trades/restore?account_id=${accountId}`, { method: 'POST' }),
   getBackupStats: (accountId: number): Promise<{ count: number; size_bytes: number; path: string; account_id: number }> =>

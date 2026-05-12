@@ -96,8 +96,11 @@ async def delete_trade(trade_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("", status_code=204)
-async def delete_all_trades(db: AsyncSession = Depends(get_db)):
-    await db.execute(delete(Trade))
+async def delete_all_trades(
+    db: AsyncSession = Depends(get_db),
+    account_id: int = Query(..., ge=1, description="只删除该账户下的交易记录"),
+):
+    await db.execute(delete(Trade).where(Trade.account_id == account_id))
     await db.commit()
 
 
