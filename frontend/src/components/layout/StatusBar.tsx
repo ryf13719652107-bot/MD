@@ -31,7 +31,7 @@ export default function StatusBar() {
         ? Number(saved)
         : (accs.length > 0 ? accs[0].id : null);
       setSelectedAccountId(initialId);
-      if (initialId) useDashboardStore.getState().setSelectedAccountId(initialId);
+      useDashboardStore.getState().setSelectedAccountId(initialId);
     });
   }, []);
 

@@ -86,21 +86,21 @@ async def list_trades(
     )
 
 
-@router.delete("/{trade_id}", status_code=204)
-async def delete_trade(trade_id: int, db: AsyncSession = Depends(get_db)):
-    trade = await db.get(Trade, trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    await db.delete(trade)
-    await db.commit()
-
-
 @router.delete("", status_code=204)
 async def delete_all_trades(
     db: AsyncSession = Depends(get_db),
     account_id: int = Query(..., ge=1, description="只删除该账户下的交易记录"),
 ):
     await db.execute(delete(Trade).where(Trade.account_id == account_id))
+    await db.commit()
+
+
+@router.delete("/{trade_id}", status_code=204)
+async def delete_trade(trade_id: int, db: AsyncSession = Depends(get_db)):
+    trade = await db.get(Trade, trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    await db.delete(trade)
     await db.commit()
 
 

@@ -56,9 +56,13 @@ export default function TradesPage() {
       return;
     }
     if (!confirm(`确定删除账户 ID ${selectedAccountId} 的全部交易记录吗？\n仅影响当前账户，其它账户记录保留。此操作不可从页面撤销（备份 JSONL 仍保留）。`)) return;
-    await api.deleteAllTrades(selectedAccountId);
-    setPage(0);
-    load();
+    try {
+      await api.deleteAllTrades(selectedAccountId);
+      setPage(0);
+      load();
+    } catch (e: any) {
+      alert(`清空失败: ${e?.message || e}`);
+    }
   };
 
   const handleRestore = async () => {
