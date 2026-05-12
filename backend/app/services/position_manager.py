@@ -15,6 +15,7 @@ from .martingale_engine import MartingaleEngine
 from .risk_manager import RiskManager
 from .log_service import strategy_log_service
 from .kline_stream import kline_stream_manager, _timeframe_ms
+from .backup_service import backup_trade
 
 logger = logging.getLogger(__name__)
 
@@ -808,6 +809,7 @@ class PositionManager:
                 entry_time=p.opened_at or now, exit_time=now, layer=p.layer, close_reason=close_reason,
             )
             session.add(trade)
+            backup_trade(trade)
         await session.flush()
 
     async def _martingale_add(self, session, strategy, symbol, auth_binance, open_positions, eng, result, avg_entry, total_qty, pos_side, current_price, klines=None, public_binance=None):

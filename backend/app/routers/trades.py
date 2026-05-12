@@ -63,6 +63,53 @@ async def delete_all_trades(db: AsyncSession = Depends(get_db)):
     await db.commit()
 
 
+@router.get("/backup-stats")
+async def get_backup_stats():
+    from ..services.backup_service import backup_stats
+    return backup_stats()
+
+
+@router.post("/restore")
+async def restore_trades(db: AsyncSession = Depends(get_db)):
+    """Re-insert all trades from the append-only JSONL backup into the DB.
+    Skips rows whose id already exists (idempotent)."""
+    from ..services.backup_service import restore_trades_from_backup
+    from ..config import now_beijing
+
+    backups = restore_trades_from_backup()
+    if not backups:
+        return {"restored": 0, "skipped": 0, "message": "No backup records found"}
+
+    restored = 0
+    skipped = 0
+    for d in backups:
+        existing = await db.get(Trade, d.get("id"))
+        if existing:
+            skipped += 1
+            continue
+        trade = Trade(
+            id=d.get("id"),
+            strategy_id=d.get("strategy_id"),
+            account_id=d.get("account_id"),
+            symbol=d.get("symbol"),
+            side=d.get("side"),
+            quantity=d.get("quantity"),
+            entry_price=d.get("entry_price"),
+            exit_price=d.get("exit_price"),
+            realized_pnl=d.get("realized_pnl"),
+            pnl_pct=d.get("pnl_pct"),
+            entry_time=d.get("entry_time"),
+            exit_time=d.get("exit_time"),
+            layer=d.get("layer", 0),
+            close_reason=d.get("close_reason", "sync"),
+        )
+        db.add(trade)
+        restored += 1
+
+    await db.commit()
+    return {"restored": restored, "skipped": skipped, "total": len(backups)}
+
+
 @router.get("/export")
 async def export_trades(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Trade).order_by(Trade.exit_time.desc()).limit(10000))

@@ -9,6 +9,7 @@ from ..models.account import Account
 from ..schemas.position import PositionResponse
 from ..services.encryption import decrypt
 from ..services.binance_service import get_binance_service
+from ..services.backup_service import backup_trade
 
 router = APIRouter(prefix="/api/positions", tags=["positions"])
 
@@ -88,6 +89,7 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
         close_reason="manual",
     )
     db.add(trade)
+    backup_trade(trade)
     position.closed_at = now_beijing()
     await db.commit()
 

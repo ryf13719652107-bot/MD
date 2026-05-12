@@ -17,6 +17,7 @@ from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
 from .sync_service import PositionSyncService
 from .position_manager import PositionManager, set_cooldown_lock, _norm_sym
+from .backup_service import backup_trade
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +260,7 @@ class StrategyScheduler:
                                             layer=lp2.layer, close_reason="margin_stop",
                                         )
                                         session.add(trade)
+                                        backup_trade(trade)
                                         lp2.closed_at = now_beijing()
                                     logger.info("Margin stop: closed %s %s (contracts=%s)", sym, side, contracts)
                             await session.commit()

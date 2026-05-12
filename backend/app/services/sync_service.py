@@ -8,6 +8,7 @@ from ..models.position import Position
 from ..models.trade import Trade
 from ..config import now_beijing
 from ..services.binance_service import BinanceService
+from ..services.backup_service import backup_trade
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,7 @@ class PositionSyncService:
                             close_reason=close_reason,
                         )
                         session.add(trade)
+                        backup_trade(trade)
                         lp.closed_at = sync_now
                     logger.warning(
                         "Sync: leg %s %s (%d DB rows) missing on exchange — closed with %s exit=%.8f",

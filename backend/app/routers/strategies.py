@@ -6,6 +6,7 @@ from ..models.strategy import Strategy
 from ..models.position import Position
 from ..schemas.strategy import StrategyCreate, StrategyUpdate, StrategyResponse
 from ..services.scheduler import strategy_scheduler
+from ..services.backup_service import backup_trade
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
@@ -189,6 +190,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                 close_reason="panic_close",
             )
             db.add(trade)
+            backup_trade(trade)
             p.closed_at = now0
         if lingering:
             await db.commit()
@@ -264,6 +266,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                 layer=p.layer, close_reason="panic_close",
             )
             db.add(trade)
+            backup_trade(trade)
             p.closed_at = now
 
     await db.commit()

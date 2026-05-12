@@ -3,7 +3,7 @@ import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import { useAuthStore } from '../../store/authStore';
 import type { Trade } from '../../types';
-import { Download, Trash2 } from 'lucide-react';
+import { Download, Trash2, RotateCcw } from 'lucide-react';
 
 export default function TradesPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -32,6 +32,14 @@ export default function TradesPage() {
     return () => clearInterval(timer);
   }, []);
 
+  const [backupCount, setBackupCount] = useState(0);
+  const [restoring, setRestoring] = useState(false);
+
+  // load backup stats on mount
+  useEffect(() => {
+    api.getBackupStats().then((s) => setBackupCount(s.count)).catch(() => {});
+  }, []);
+
   const handleDeleteOne = async (id: number) => {
     if (!confirm('确定要删除这条交易记录吗？')) return;
     await api.deleteTrade(id);
@@ -43,6 +51,27 @@ export default function TradesPage() {
     await api.deleteAllTrades();
     setPage(0);
     load();
+  };
+
+  const handleRestore = async () => {
+    if (backupCount === 0) {
+      alert('备份文件为空，没有可恢复的记录。');
+      return;
+    }
+    if (!confirm(`备份中有 ${backupCount} 条记录，确定要恢复到数据库吗？\n已存在的记录会自动跳过。`)) return;
+    setRestoring(true);
+    try {
+      const res = await api.restoreTrades();
+      alert(`恢复完成！成功恢复 ${res.restored} 条，跳过 ${res.skipped} 条（已存在）。`);
+      setPage(0);
+      load();
+      const stats = await api.getBackupStats();
+      setBackupCount(stats.count);
+    } catch (e: any) {
+      alert(`恢复失败: ${e?.message || e}`);
+    } finally {
+      setRestoring(false);
+    }
   };
 
   const exportCsv = () => {
@@ -67,6 +96,25 @@ export default function TradesPage() {
           >
             <Trash2 size={16} />
             清空
+          </button>
+          <button
+            type="button"
+            onClick={guest ? undefined : handleRestore}
+            disabled={guest || restoring || backupCount === 0}
+            title={
+              guest ? '访客模式无法恢复' :
+              restoring ? '恢复中...' :
+              backupCount === 0 ? '暂无备份记录' :
+              `从备份恢复（共${backupCount}条）`
+            }
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm ${
+              guest || backupCount === 0
+                ? 'bg-green-600/10 text-green-400/50 cursor-not-allowed'
+                : 'bg-green-600/20 hover:bg-green-600/40 text-green-400'
+            }`}
+          >
+            <RotateCcw size={16} className={restoring ? 'animate-spin' : ''} />
+            {restoring ? '恢复中...' : `恢复备份${backupCount > 0 ? ` (${backupCount})` : ''}`}
           </button>
           <button onClick={exportCsv} className="flex items-center gap-1.5 bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg text-sm">
             <Download size={16} />
