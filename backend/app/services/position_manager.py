@@ -798,6 +798,7 @@ class PositionManager:
         # Common: create Trade records and mark positions closed
         logger.info("Strategy %d: closed %s due to %s", strategy_id, symbol, close_reason)
         now = now_beijing()
+        trades_to_backup: list[Trade] = []
         for p in open_positions:
             p.closed_at = now
             exit_pnl = (exit_price - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - exit_price) * p.quantity
@@ -809,8 +810,10 @@ class PositionManager:
                 entry_time=p.opened_at or now, exit_time=now, layer=p.layer, close_reason=close_reason,
             )
             session.add(trade)
-            backup_trade(trade)
+            trades_to_backup.append(trade)
         await session.flush()
+        for trade in trades_to_backup:
+            backup_trade(trade)
 
     async def _martingale_add(self, session, strategy, symbol, auth_binance, open_positions, eng, result, avg_entry, total_qty, pos_side, current_price, klines=None, public_binance=None):
         strategy_id = strategy.id

@@ -167,6 +167,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         )
         lingering = list((await db.execute(stmt_ling)).scalars().all())
         now0 = now_beijing()
+        trades_to_backup: list[Trade] = []
         for p in lingering:
             exit_price = float(p.mark_price or p.entry_price or 0)
             if exit_price <= 0:
@@ -190,10 +191,12 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                 close_reason="panic_close",
             )
             db.add(trade)
-            backup_trade(trade)
+            trades_to_backup.append(trade)
             p.closed_at = now0
         if lingering:
             await db.commit()
+            for t in trades_to_backup:
+                backup_trade(t)
         await strategy_scheduler.remove_strategy(strategy_id)
         return {
             "closed": 0,
@@ -237,6 +240,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         logging.info("Panic close: closed %s %s contracts=%.4f", symbol, side, contracts)
 
     # Match ALL account DB rows for each closed (symbol, side) — not only this strategy_id
+    trades_to_backup: list[Trade] = []
     for r in results:
         if r["status"] != "ok":
             continue
@@ -266,10 +270,12 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                 layer=p.layer, close_reason="panic_close",
             )
             db.add(trade)
-            backup_trade(trade)
+            trades_to_backup.append(trade)
             p.closed_at = now
 
     await db.commit()
+    for t in trades_to_backup:
+        backup_trade(t)
     await strategy_scheduler.remove_strategy(strategy_id)
 
     closed_count = sum(1 for r in results if r["status"] == "ok")

@@ -218,6 +218,7 @@ class StrategyScheduler:
                         from ..models.trade import Trade
                         try:
                             eps = await auth_binance.fetch_positions()
+                            margin_trades_to_backup: list[Trade] = []
                             for ep in eps:
                                 contracts = float(ep.get("contracts", 0) or 0)
                                 if contracts <= 0:
@@ -260,10 +261,12 @@ class StrategyScheduler:
                                             layer=lp2.layer, close_reason="margin_stop",
                                         )
                                         session.add(trade)
-                                        backup_trade(trade)
+                                        margin_trades_to_backup.append(trade)
                                         lp2.closed_at = now_beijing()
                                     logger.info("Margin stop: closed %s %s (contracts=%s)", sym, side, contracts)
                             await session.commit()
+                            for t in margin_trades_to_backup:
+                                backup_trade(t)
                         except Exception as e:
                             logger.error("Margin stop: failed to close positions for strategy %d: %s", strategy_id, e)
                         return

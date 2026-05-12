@@ -97,6 +97,7 @@ class PositionSyncService:
                     exchange_map[(sym, side)] = ep
 
                 sync_now = now_beijing()
+                trades_to_backup: list[Trade] = []
                 # Group local open rows by (normalized symbol, side) so Martin layers share one TP order id lookup
                 by_leg: dict[tuple[str, str], list[Position]] = defaultdict(list)
                 for lp in local_positions:
@@ -156,7 +157,7 @@ class PositionSyncService:
                             close_reason=close_reason,
                         )
                         session.add(trade)
-                        backup_trade(trade)
+                        trades_to_backup.append(trade)
                         lp.closed_at = sync_now
                     logger.warning(
                         "Sync: leg %s %s (%d DB rows) missing on exchange — closed with %s exit=%.8f",
@@ -173,5 +174,7 @@ class PositionSyncService:
                         logger.warning("Sync: exchange position %s %s not in DB — no local record created", sym, side)
 
                 await session.commit()
+                for t in trades_to_backup:
+                    backup_trade(t)
         except Exception as e:
             logger.error("Position sync for account %d failed: %s", account_id, e)
