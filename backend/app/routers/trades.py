@@ -102,25 +102,32 @@ async def delete_all_trades(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/backup-stats")
-async def get_backup_stats():
+async def get_backup_stats(account_id: int = Query(..., ge=1, description="只统计该账户在备份中的条数")):
     from ..services.backup_service import backup_stats
-    return backup_stats()
+
+    return backup_stats(account_id)
 
 
 @router.post("/restore")
-async def restore_trades(db: AsyncSession = Depends(get_db)):
-    """Re-insert all trades from the append-only JSONL backup into the DB.
-    Skips rows whose id already exists (idempotent)."""
+async def restore_trades(
+    db: AsyncSession = Depends(get_db),
+    account_id: int = Query(..., ge=1, description="只恢复该账户对应的备份行，不影响其他账户"),
+):
+    """Re-insert backed-up trades for one account only. Skips rows whose id already exists."""
     from ..services.backup_service import restore_trades_from_backup
 
-    backups = restore_trades_from_backup()
+    backups = restore_trades_from_backup(account_id)
     if not backups:
-        return {"restored": 0, "skipped": 0, "message": "No backup records found"}
+        return {"restored": 0, "skipped": 0, "account_id": account_id, "message": "No backup records found for this account"}
 
     restored = 0
     skipped = 0
     invalid = 0
     for d in backups:
+        row_account = _restore_pk(d.get("account_id"))
+        if row_account != account_id:
+            invalid += 1
+            continue
         pk = _restore_pk(d.get("id"))
         if pk is not None:
             existing = await db.get(Trade, pk)
@@ -131,8 +138,7 @@ async def restore_trades(db: AsyncSession = Depends(get_db)):
         exit_time = _parse_backup_datetime(d.get("exit_time"))
         symbol = d.get("symbol")
         side = d.get("side")
-        account_id = _restore_pk(d.get("account_id"))
-        if not symbol or not side or account_id is None or entry_time is None or exit_time is None:
+        if not symbol or not side or row_account is None or entry_time is None or exit_time is None:
             invalid += 1
             logger.warning("Restore skip: missing fields or bad times in backup row id=%r", d.get("id"))
             continue
@@ -142,7 +148,7 @@ async def restore_trades(db: AsyncSession = Depends(get_db)):
 
         kwargs = dict(
             strategy_id=strategy_id,
-            account_id=account_id,
+            account_id=row_account,
             symbol=str(symbol),
             side=str(side),
             quantity=float(d.get("quantity") or 0),
@@ -171,7 +177,7 @@ async def restore_trades(db: AsyncSession = Depends(get_db)):
             status_code=400,
             detail=f"恢复写入失败（数据库约束）：{orig or e}",
         ) from e
-    out = {"restored": restored, "skipped": skipped, "total": len(backups)}
+    out = {"restored": restored, "skipped": skipped, "total": len(backups), "account_id": account_id}
     if invalid:
         out["invalid"] = invalid
     return out

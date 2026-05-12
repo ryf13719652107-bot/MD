@@ -35,10 +35,14 @@ export default function TradesPage() {
   const [backupCount, setBackupCount] = useState(0);
   const [restoring, setRestoring] = useState(false);
 
-  // load backup stats on mount
+  // 按当前选中账户统计备份条数（与其它列表一致）
   useEffect(() => {
-    api.getBackupStats().then((s) => setBackupCount(s.count)).catch(() => {});
-  }, []);
+    if (selectedAccountId == null) {
+      setBackupCount(0);
+      return;
+    }
+    api.getBackupStats(selectedAccountId).then((s) => setBackupCount(s.count)).catch(() => setBackupCount(0));
+  }, [selectedAccountId]);
 
   const handleDeleteOne = async (id: number) => {
     if (!confirm('确定要删除这条交易记录吗？')) return;
@@ -54,18 +58,23 @@ export default function TradesPage() {
   };
 
   const handleRestore = async () => {
-    if (backupCount === 0) {
-      alert('备份文件为空，没有可恢复的记录。');
+    if (selectedAccountId == null) {
+      alert('请先在顶栏选择要恢复的账户。');
       return;
     }
-    if (!confirm(`备份中有 ${backupCount} 条记录，确定要恢复到数据库吗？\n已存在的记录会自动跳过。`)) return;
+    if (backupCount === 0) {
+      alert('当前账户在备份中没有可恢复的记录。');
+      return;
+    }
+    if (!confirm(`将仅为当前账户（ID ${selectedAccountId}）恢复备份中的 ${backupCount} 条记录，不会影响其他账户。\n已存在的记录会自动跳过。\n确定继续？`)) return;
     setRestoring(true);
     try {
-      const res = await api.restoreTrades();
-      alert(`恢复完成！成功恢复 ${res.restored} 条，跳过 ${res.skipped} 条（已存在）。`);
+      const res = await api.restoreTrades(selectedAccountId);
+      const inv = res.invalid != null && res.invalid > 0 ? `，无效行 ${res.invalid}` : '';
+      alert(`恢复完成！账户 ${res.account_id}：成功 ${res.restored} 条，跳过 ${res.skipped} 条（已存在）${inv}。`);
       setPage(0);
       load();
-      const stats = await api.getBackupStats();
+      const stats = await api.getBackupStats(selectedAccountId);
       setBackupCount(stats.count);
     } catch (e: any) {
       alert(`恢复失败: ${e?.message || e}`);
@@ -100,21 +109,22 @@ export default function TradesPage() {
           <button
             type="button"
             onClick={guest ? undefined : handleRestore}
-            disabled={guest || restoring || backupCount === 0}
+            disabled={guest || restoring || selectedAccountId == null || backupCount === 0}
             title={
               guest ? '访客模式无法恢复' :
               restoring ? '恢复中...' :
-              backupCount === 0 ? '暂无备份记录' :
-              `从备份恢复（共${backupCount}条）`
+              selectedAccountId == null ? '请先在顶栏选择账户' :
+              backupCount === 0 ? '当前账户无备份记录' :
+              `仅为当前账户从备份恢复（${backupCount} 条）`
             }
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm ${
-              guest || backupCount === 0
+              guest || selectedAccountId == null || backupCount === 0
                 ? 'bg-green-600/10 text-green-400/50 cursor-not-allowed'
                 : 'bg-green-600/20 hover:bg-green-600/40 text-green-400'
             }`}
           >
             <RotateCcw size={16} className={restoring ? 'animate-spin' : ''} />
-            {restoring ? '恢复中...' : `恢复备份${backupCount > 0 ? ` (${backupCount})` : ''}`}
+            {restoring ? '恢复中...' : `恢复备份${selectedAccountId != null && backupCount > 0 ? ` (${backupCount})` : ''}`}
           </button>
           <button onClick={exportCsv} className="flex items-center gap-1.5 bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded-lg text-sm">
             <Download size={16} />

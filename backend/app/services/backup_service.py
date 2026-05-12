@@ -48,8 +48,18 @@ def backup_trade(trade) -> None:
         logger.exception("Failed to write trade backup — record may be lost if DB is wiped")
 
 
-def restore_trades_from_backup() -> list[dict]:
-    """Read all backed-up trades from JSONL. Returns list of dicts, newest first."""
+def _row_account_id(d: dict) -> int | None:
+    try:
+        v = d.get("account_id")
+        if v is None:
+            return None
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def restore_trades_from_backup(account_id: int) -> list[dict]:
+    """Read backed-up trades for one account from JSONL. Returns list of dicts, newest first."""
     trades: list[dict] = []
     try:
         if not _BACKUP_FILE.exists():
@@ -60,29 +70,40 @@ def restore_trades_from_backup() -> list[dict]:
                 if not line:
                     continue
                 try:
-                    trades.append(json.loads(line))
+                    d = json.loads(line)
                 except json.JSONDecodeError:
                     logger.warning("Skipping corrupt backup line: %.80s", line)
+                    continue
+                if _row_account_id(d) != account_id:
+                    continue
+                trades.append(d)
         trades.reverse()  # oldest first in file → newest first for consistency
     except Exception:
         logger.exception("Failed to read trade backup")
     return trades
 
 
-def backup_stats() -> dict:
-    """Return count and file size of the backup."""
+def backup_stats(account_id: int) -> dict:
+    """Return count (rows for this account only) and file size of the backup."""
     try:
         if not _BACKUP_FILE.exists():
-            return {"count": 0, "size_bytes": 0, "path": str(_BACKUP_FILE)}
+            return {"count": 0, "size_bytes": 0, "path": str(_BACKUP_FILE), "account_id": account_id}
         size = _BACKUP_FILE.stat().st_size
         count = 0
         with open(_BACKUP_FILE, "r", encoding="utf-8") as f:
             for line in f:
-                if line.strip():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if _row_account_id(d) == account_id:
                     count += 1
-        return {"count": count, "size_bytes": size, "path": str(_BACKUP_FILE)}
+        return {"count": count, "size_bytes": size, "path": str(_BACKUP_FILE), "account_id": account_id}
     except Exception:
-        return {"count": 0, "size_bytes": 0, "path": str(_BACKUP_FILE)}
+        return {"count": 0, "size_bytes": 0, "path": str(_BACKUP_FILE), "account_id": account_id}
 
 
 def _serialize_dt(dt) -> str | None:

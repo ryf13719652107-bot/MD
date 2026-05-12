@@ -74,10 +74,10 @@ export const api = {
   },
   deleteTrade: (id: number): Promise<void> => request(`/trades/${id}`, { method: 'DELETE' }),
   deleteAllTrades: (): Promise<void> => request('/trades', { method: 'DELETE' }),
-  restoreTrades: (): Promise<{ restored: number; skipped: number; total: number }> =>
-    request('/trades/restore', { method: 'POST' }),
-  getBackupStats: (): Promise<{ count: number; size_bytes: number; path: string }> =>
-    request('/trades/backup-stats'),
+  restoreTrades: (accountId: number): Promise<{ restored: number; skipped: number; total: number; account_id: number; invalid?: number }> =>
+    request(`/trades/restore?account_id=${accountId}`, { method: 'POST' }),
+  getBackupStats: (accountId: number): Promise<{ count: number; size_bytes: number; path: string; account_id: number }> =>
+    request(`/trades/backup-stats?account_id=${accountId}`),
 
   // Dashboard
   getDashboard: (accountId?: number): Promise<DashboardData> =>
