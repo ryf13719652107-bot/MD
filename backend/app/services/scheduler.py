@@ -10,6 +10,7 @@ from ..database import async_session
 from ..models.strategy import Strategy
 from ..models.account import Account
 from ..models.bot_config import BotConfig
+from ..models.position import Position
 from ..config import now_beijing, BEIJING_TZ
 from .binance_service import BinanceService, get_binance_service, get_public_binance, get_cached_tradefi_symbols
 from .encryption import decrypt
@@ -23,6 +24,42 @@ logger = logging.getLogger(__name__)
 
 TIMEFRAME_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
 _STRATEGY_SEMAPHORE = asyncio.Semaphore(5)
+
+
+def _exchange_leg_map_from_positions(raw_positions: list) -> dict[tuple[str, str], float]:
+    """Merge exchange position rows by (symbol, side) → contracts (same as panic close)."""
+    leg_map: dict[tuple[str, str], float] = {}
+    for ep in raw_positions:
+        contracts = float(ep.get("contracts", 0) or 0)
+        if contracts <= 0:
+            continue
+        sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
+        side = (ep.get("side") or "").lower()
+        leg_map[(sym, side)] = leg_map.get((sym, side), 0) + contracts
+    return leg_map
+
+
+def _merge_pool_and_open_symbols(pool_symbols: list[str], open_symbols: list[str]) -> list[str]:
+    """Dedupe by _norm_sym: pool first (new entries only on pool), then orphan open legs."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for s in pool_symbols:
+        if not s:
+            continue
+        k = _norm_sym(s)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    for s in open_symbols:
+        if not s:
+            continue
+        k = _norm_sym(s)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    return out
 
 
 def _next_candle_close(timeframe: str) -> datetime:
@@ -213,48 +250,56 @@ class StrategyScheduler:
                             if self._scheduler.get_job(jid):
                                 self._scheduler.remove_job(jid)
                         logger.warning("Strategy %d margin %.2f below threshold %.2f — stopping and closing all positions", strategy_id, total_margin, strategy.margin_threshold)
-                        # Close ALL exchange positions with -1106 retry fallback
-                        from ..models.position import Position as PosModel
+                        # Close ALL exchange positions (closePosition + chunked maxQty, same as panic close)
                         from ..models.trade import Trade
                         try:
-                            eps = await auth_binance.fetch_positions()
                             margin_trades_to_backup: list[Trade] = []
-                            for ep in eps:
-                                contracts = float(ep.get("contracts", 0) or 0)
-                                if contracts <= 0:
-                                    continue
-                                sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
-                                side = (ep.get("side") or "").lower()
-                                ps = "LONG" if side == "long" else "SHORT"
-                                cs = "sell" if side == "long" else "buy"
-                                order = None
-                                try:
-                                    order = await auth_binance.create_market_order(sym, cs, contracts, reduce_only=True, position_side=ps)
-                                except Exception as ex1:
-                                    if "-1106" in str(ex1):
-                                        try:
-                                            order = await auth_binance.create_market_order(sym, cs, contracts, reduce_only=False, position_side=ps)
-                                        except Exception as ex2:
-                                            logger.error("Margin stop: failed to close %s %s: %s", sym, side, ex2)
-                                            continue
-                                    else:
+                            max_rounds = 3
+                            initial_nonempty = False
+                            for round_i in range(max_rounds):
+                                eps = await auth_binance.fetch_positions()
+                                leg_map = _exchange_leg_map_from_positions(eps)
+                                if not leg_map:
+                                    break
+                                if round_i == 0:
+                                    initial_nonempty = True
+                                logger.info(
+                                    "Strategy %d margin stop: close round %d/%d, %d leg(s)",
+                                    strategy_id, round_i + 1, max_rounds, len(leg_map),
+                                )
+                                stmt_open_batch = select(Position).where(
+                                    Position.strategy_id == strategy_id,
+                                    Position.closed_at.is_(None),
+                                )
+                                pos_batch = list((await session.execute(stmt_open_batch)).scalars().all())
+
+                                for (sym, side), contracts in leg_map.items():
+                                    order = None
+                                    try:
+                                        order = await auth_binance.close_position(sym, side)
+                                    except Exception as ex1:
                                         logger.error("Margin stop: failed to close %s %s: %s", sym, side, ex1)
                                         continue
-                                if order:
+                                    if not order:
+                                        logger.error(
+                                            "Margin stop: empty order %s %s (contracts=%.6f)",
+                                            sym, side, contracts,
+                                        )
+                                        continue
                                     exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
-                                    # Mark local positions as closed and record trades
-                                    stmt_pos = select(PosModel).where(
-                                        PosModel.strategy_id == strategy_id, PosModel.closed_at.is_(None),
-                                        PosModel.symbol == sym, PosModel.side == side
-                                    )
-                                    pos_result = await session.execute(stmt_pos)
-                                    for lp2 in pos_result.scalars().all():
+                                    sk = _norm_sym(sym)
+                                    sd = side.lower()
+                                    for lp2 in pos_batch:
+                                        if lp2.closed_at is not None:
+                                            continue
+                                        if _norm_sym(lp2.symbol) != sk or (lp2.side or "").lower() != sd:
+                                            continue
                                         ep_val = exit_price if exit_price > 0 else (lp2.mark_price or lp2.entry_price)
                                         pnl = (ep_val - lp2.entry_price) * lp2.quantity if lp2.side == "long" else (lp2.entry_price - ep_val) * lp2.quantity
                                         pct = ((ep_val - lp2.entry_price) / lp2.entry_price * 100) if lp2.side == "long" else ((lp2.entry_price - ep_val) / lp2.entry_price * 100)
                                         trade = Trade(
                                             strategy_id=strategy_id, account_id=strategy.account_id,
-                                            symbol=sym, side=lp2.side, quantity=lp2.quantity,
+                                            symbol=lp2.symbol, side=lp2.side, quantity=lp2.quantity,
                                             entry_price=lp2.entry_price, exit_price=ep_val,
                                             realized_pnl=pnl, pnl_pct=round(pct, 2),
                                             entry_time=lp2.opened_at or now_beijing(), exit_time=now_beijing(),
@@ -264,6 +309,18 @@ class StrategyScheduler:
                                         margin_trades_to_backup.append(trade)
                                         lp2.closed_at = now_beijing()
                                     logger.info("Margin stop: closed %s %s (contracts=%s)", sym, side, contracts)
+
+                            eps_final = await auth_binance.fetch_positions()
+                            remaining = _exchange_leg_map_from_positions(eps_final)
+                            if remaining:
+                                parts = [f"{s} {d} x{c:g}" for (s, d), c in sorted(remaining.items())]
+                                verify_msg = "保证金止损后校验失败，交易所仍有持仓: " + "; ".join(parts)
+                                logger.error("Strategy %d: %s", strategy_id, verify_msg)
+                                strategy_log_service.error(strategy_id, verify_msg)
+                            elif initial_nonempty:
+                                strategy_log_service.success(
+                                    strategy_id, "保证金止损平仓已完成（交易所校验无持仓）"
+                                )
                             await session.commit()
                             for t in margin_trades_to_backup:
                                 backup_trade(t)
@@ -274,40 +331,60 @@ class StrategyScheduler:
                     logger.error("Strategy %d: balance check failed: %s", strategy_id, e)
                     strategy_log_service.error(strategy_id, f"余额获取失败 — {e}")
 
-            # Get symbols from coin pool or fixed
-            symbols = []
+            # Get symbols: coin pool or fixed (for new entries), ∪ DB open positions (manage always)
+            pool_symbols: list[str] = []
             if strategy.use_coin_pool:
                 try:
-                    symbols = await coin_pool_service.get_pool_symbols(strategy.coin_pool_source, strategy.coin_pool_top_n)
-                    if strategy.exclude_tradefi and symbols:
+                    pool_symbols = await coin_pool_service.get_pool_symbols(strategy.coin_pool_source, strategy.coin_pool_top_n)
+                    if strategy.exclude_tradefi and pool_symbols:
                         td = await get_cached_tradefi_symbols(public_binance)
-                        symbols = [s for s in symbols if _norm_sym(s) not in td]
-                    if not symbols:
+                        pool_symbols = [s for s in pool_symbols if _norm_sym(s) not in td]
+                    if not pool_symbols:
                         pool_count = await coin_pool_service.get_pool_count()
                         pool_status = coin_pool_service.status
-                        logger.warning("Strategy %d: coin pool returned 0 symbols (total=%d, ok=%s)", strategy_id, pool_count, pool_status["last_refresh_ok"])
+                        logger.warning(
+                            "Strategy %d: coin pool returned 0 symbols (total=%d, ok=%s)",
+                            strategy_id, pool_count, pool_status["last_refresh_ok"],
+                        )
                 except Exception as e:
                     logger.error("Strategy %d: coin pool query failed: %s", strategy_id, e)
-                    return
+                    pool_symbols = []
             elif strategy.symbol:
-                symbols = [strategy.symbol]
+                pool_symbols = [strategy.symbol]
+
+            stmt_open_syms = (
+                select(Position.symbol)
+                .where(Position.strategy_id == strategy_id, Position.closed_at.is_(None))
+                .distinct()
+            )
+            open_sym_rows = (await session.execute(stmt_open_syms)).scalars().all()
+            open_syms = [s for s in open_sym_rows if s]
+
+            symbols = _merge_pool_and_open_symbols(pool_symbols, open_syms)
+
+            if strategy.use_coin_pool:
+                pool_entry_norms = {_norm_sym(s) for s in pool_symbols if s}
+            else:
+                pool_entry_norms = None
 
             if not symbols:
                 if strategy.use_coin_pool:
                     strategy.last_signal = "no_pool"
                     strategy.last_signal_at = now_beijing()
                     await session.commit()
-                    strategy_log_service.warning(strategy_id, "选币池为空，无法交易")
+                    strategy_log_service.warning(strategy_id, "选币池为空且无未平持仓，无法交易")
                 else:
                     strategy_log_service.warning(strategy_id, "未设置交易对")
                 return
 
             # Process each symbol — commit after each symbol so one failure does not roll back the entire tick
             for symbol in symbols:
+                allow_new = pool_entry_norms is None or _norm_sym(symbol) in pool_entry_norms
                 try:
                     await self._position_mgr.process_symbol(
                         session, strategy, symbol, auth_binance, public_binance,
                         total_margin, leverage,
+                        allow_new_position=allow_new,
                     )
                 except Exception as e:
                     logger.error("Strategy %d: error processing %s: %s", strategy_id, symbol, e)

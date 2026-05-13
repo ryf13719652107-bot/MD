@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.strategy import Strategy
 from ..models.position import Position
@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 def _norm_sym(s: str) -> str:
-    return (s or "").replace("/", "").replace(":USDT", "").upper()
+    """Canonical perp key (e.g. BTCUSDT). Uppercase so DB/exchange format differences still match."""
+    return (s or "").upper().replace("/", "").replace(":USDT", "")
 
 
 def _naive_beijing_from_ms_or_s(ts) -> Optional[datetime]:
@@ -320,12 +321,24 @@ class PositionManager:
         public_binance: BinanceService,
         total_margin: float,
         leverage: float,
+        *,
+        allow_new_position: bool = True,
     ):
         strategy_id = strategy.id
 
+        sym_key = _norm_sym(symbol)
+        symbol_norm = func.replace(
+            func.replace(func.upper(Position.symbol), "/", ""),
+            ":USDT",
+            "",
+        )
         stmt = (
             select(Position)
-            .where(Position.strategy_id == strategy_id, Position.symbol == symbol, Position.closed_at.is_(None))
+            .where(
+                Position.strategy_id == strategy_id,
+                Position.closed_at.is_(None),
+                symbol_norm == sym_key,
+            )
             .order_by(Position.layer.desc())
         )
         result = await session.execute(stmt)
@@ -426,8 +439,11 @@ class PositionManager:
             await session.flush()
             return
 
-        # --- Open new position ---
+        # --- Open new position (use_coin_pool + 仅池内币才允许首单；已有仓仅管理) ---
         if signal != Signal.NEUTRAL and not open_positions:
+            if not allow_new_position:
+                await session.flush()
+                return
             logger.info("Strategy %d: %s signal=%s, attempting to open...", strategy_id, symbol, signal.value)
             try:
                 eps = await auth_binance.fetch_positions([symbol])

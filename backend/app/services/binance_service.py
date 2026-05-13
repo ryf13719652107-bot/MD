@@ -1,3 +1,4 @@
+import math
 import time
 import logging
 import ccxt.async_support as ccxt_async
@@ -198,6 +199,119 @@ class BinanceService:
                 params["reduceOnly"] = True
         return params
 
+    def _futures_market_max_order_qty(self, formatted_symbol: str) -> float | None:
+        """Binance USDM MARKET_LOT_SIZE.maxQty (fallback LOT_SIZE), or None if unknown."""
+        try:
+            market = self.exchange.market(formatted_symbol)
+        except Exception:
+            return None
+        filters = (market.get("info") or {}).get("filters") or []
+        for f in filters:
+            if f.get("filterType") == "MARKET_LOT_SIZE":
+                mx = f.get("maxQty")
+                if mx is not None and float(mx) > 0:
+                    return float(mx)
+        for f in filters:
+            if f.get("filterType") == "LOT_SIZE":
+                mx = f.get("maxQty")
+                if mx is not None and float(mx) > 0:
+                    return float(mx)
+        return None
+
+    def _lot_step_and_min(self, formatted_symbol: str) -> tuple[float, float]:
+        step = 0.0
+        min_q = 0.0
+        try:
+            market = self.exchange.market(formatted_symbol)
+            for f in (market.get("info") or {}).get("filters") or []:
+                if f.get("filterType") == "LOT_SIZE":
+                    step = float(f.get("stepSize", 0) or 0)
+                    min_q = float(f.get("minQty", 0) or 0)
+                    break
+        except Exception:
+            pass
+        return step, min_q
+
+    async def _create_market_reduce_chunked(
+        self,
+        symbol: str,
+        close_side: str,
+        total_contracts: float,
+        position_side: str,
+    ) -> dict:
+        """Close a hedge leg with multiple MARKET reduce orders when size exceeds exchange max."""
+        formatted = self._format_symbol(symbol)
+        await self.exchange.load_markets()
+        max_mkt = self._futures_market_max_order_qty(formatted)
+        step, min_q = self._lot_step_and_min(formatted)
+
+        remaining = float(total_contracts)
+        total_filled = 0.0
+        vwap_num = 0.0
+        last_order: dict | None = None
+        for _ in range(512):
+            if remaining <= 1e-12:
+                break
+            cap = remaining if max_mkt is None or max_mkt <= 0 else min(remaining, max_mkt)
+            if step > 0:
+                chunk = math.floor(cap / step + 1e-12) * step
+            else:
+                try:
+                    chunk = float(self.exchange.amount_to_precision(formatted, cap))
+                except Exception:
+                    chunk = cap
+            if chunk <= 0:
+                break
+            if min_q > 0 and chunk < min_q:
+                if remaining + 1e-12 >= min_q:
+                    if step > 0:
+                        n = max(1, math.ceil(min_q / step - 1e-12))
+                        chunk = n * step
+                    else:
+                        chunk = min_q
+                    if max_mkt and max_mkt > 0 and chunk > max_mkt + 1e-12:
+                        chunk = math.floor(max_mkt / step + 1e-12) * step if step > 0 else max_mkt
+                else:
+                    break
+            try:
+                order = await self.exchange.create_order(
+                    formatted,
+                    "market",
+                    close_side,
+                    chunk,
+                    None,
+                    self._order_params(position_side, reduce_only=True),
+                )
+            except Exception as e:
+                if "-1106" in str(e):
+                    order = await self.exchange.create_order(
+                        formatted,
+                        "market",
+                        close_side,
+                        chunk,
+                        None,
+                        self._order_params(position_side, reduce_only=False),
+                    )
+                else:
+                    raise
+            last_order = order
+            filled = float(order.get("filled") or 0)
+            if filled <= 0:
+                filled = float(order.get("amount") or chunk)
+            avg = float(order.get("average") or order.get("price") or 0)
+            if filled > 0 and avg > 0:
+                vwap_num += avg * filled
+            total_filled += filled
+            remaining -= filled
+
+        if last_order is None:
+            return {}
+        out_avg = (vwap_num / total_filled) if total_filled > 0 else float(last_order.get("average") or 0)
+        merged = dict(last_order)
+        merged["average"] = out_avg
+        merged["filled"] = total_filled
+        return merged
+
     async def cancel_order(self, order_id: str, symbol: str) -> dict:
         """Cancel an existing order by ID."""
         formatted_symbol = self._format_symbol(symbol)
@@ -257,12 +371,28 @@ class BinanceService:
         )
 
     async def close_position(self, symbol: str, side: str) -> dict:
-        """Close all positions for symbol+side. Handles hedge mode with multiple entries."""
+        """Close entire symbol+side leg. Hedge: prefer Binance closePosition; else chunked reduce."""
         formatted_symbol = self._format_symbol(symbol)
-        positions = await self.fetch_positions([symbol])
+        await self.exchange.load_markets()
         position_side = "LONG" if side == "long" else "SHORT"
+        close_side = "sell" if side == "long" else "buy"
 
-        # In hedge mode, aggregate all contracts for the same symbol+side
+        if self.hedge_mode:
+            params = dict(self._order_params(position_side, reduce_only=True))
+            params["closePosition"] = True
+            try:
+                return await self.exchange.create_order(
+                    formatted_symbol, "market", close_side, 0, None, params
+                )
+            except Exception as e:
+                logger.warning(
+                    "close_position: closePosition failed for %s %s, falling back to chunked reduce: %s",
+                    symbol,
+                    side,
+                    e,
+                )
+
+        positions = await self.fetch_positions([symbol])
         total_contracts = 0.0
         for pos in positions:
             pos_side_exchange = (pos.get("side") or "").lower()
@@ -273,20 +403,24 @@ class BinanceService:
             logger.warning("close_position: no contracts found for %s %s (positions: %d)", symbol, side, len(positions))
             return {}
 
-        close_side = "sell" if side == "long" else "buy"
-        try:
-            return await self.create_market_order(
-                symbol, close_side, total_contracts,
-                reduce_only=True, position_side=position_side,
-            )
-        except Exception as e:
-            if "-1106" in str(e):
-                # reduceOnly rejected — retry with positionSide, no reduceOnly
+        max_mkt = self._futures_market_max_order_qty(formatted_symbol)
+        if max_mkt is None or max_mkt <= 0 or total_contracts <= max_mkt:
+            try:
                 return await self.create_market_order(
                     symbol, close_side, total_contracts,
-                    reduce_only=False, position_side=position_side,
+                    reduce_only=True, position_side=position_side,
                 )
-            raise
+            except Exception as e:
+                err = str(e)
+                if "-1106" in err:
+                    return await self.create_market_order(
+                        symbol, close_side, total_contracts,
+                        reduce_only=False, position_side=position_side,
+                    )
+                if "-4005" in err:
+                    return await self._create_market_reduce_chunked(symbol, close_side, total_contracts, position_side)
+                raise
+        return await self._create_market_reduce_chunked(symbol, close_side, total_contracts, position_side)
 
     async def close_position_with_limit(self, symbol: str, side: str, price: float) -> dict:
         """Close position using a limit order at the specified price. Handles hedge mode."""

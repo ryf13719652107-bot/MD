@@ -211,30 +211,16 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
 
     # Close each exchange position
     for (symbol, side), contracts in exchange_map.items():
-        close_side = "sell" if side == "long" else "buy"
-        ps = "LONG" if side == "long" else "SHORT"
         try:
-            order = await binance.create_market_order(
-                symbol, close_side, contracts,
-                reduce_only=True, position_side=ps,
-            )
+            order = await binance.close_position(symbol, side)
         except Exception as e1:
-            err_str = str(e1)
-            if "-1106" in err_str:
-                # reduceOnly rejected — retry with positionSide only, no reduceOnly
-                try:
-                    order = await binance.create_market_order(
-                        symbol, close_side, contracts,
-                        reduce_only=False, position_side=ps,
-                    )
-                except Exception as e2:
-                    results.append({"symbol": symbol, "side": side, "status": "failed", "error": str(e2)})
-                    logging.error("Panic close: failed %s %s: %s", symbol, side, e2)
-                    continue
-            else:
-                results.append({"symbol": symbol, "side": side, "status": "failed", "error": err_str})
-                logging.error("Panic close: failed %s %s: %s", symbol, side, e1)
-                continue
+            results.append({"symbol": symbol, "side": side, "status": "failed", "error": str(e1)})
+            logging.error("Panic close: failed %s %s: %s", symbol, side, e1)
+            continue
+        if not order:
+            results.append({"symbol": symbol, "side": side, "status": "failed", "error": "empty_order_response"})
+            logging.error("Panic close: empty response %s %s (exchange had contracts=%.6f)", symbol, side, contracts)
+            continue
         exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
         results.append({"symbol": symbol, "side": side, "status": "ok", "exit_price": exit_price})
         logging.info("Panic close: closed %s %s contracts=%.4f", symbol, side, contracts)

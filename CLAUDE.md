@@ -58,6 +58,13 @@ bash deploy.sh
 - **`strategy_engine.py`**：`calculate_wavetrend()` — 纯 Pine Script v5 LazyBear 实现。`generate_wt_signal()` 检查金叉/死叉 + 超买超卖区。`calculate_rsi()` 使用 Wilder 平滑。
 - **`websocket_manager.py`**：单例管理所有 WS 连接。dashboard 频道用单独的 async task 每 60s 广播一次 `request_update` 快照（非每连接轮询），前端收到后调 REST `/api/dashboard`。
 - **`kline_stream.py`**：策略信号用的 K 线缓存。每个 `(symbol, timeframe)` 启一个后台 `watch_ohlcv` 协程把推送写入内存缓冲；首次订阅 REST 灌种子；`get()` 提供最近 N 根快照；**条数不足或检测到缓冲区时间停滞**（WS 挂了仍当缓存够新）时 **REST 纠偏**，再合并；15min 无人读取自动停订阅。后端 `lifespan` 关停时调用 `shutdown()` 释放所有 WS 任务。
+- **`backup_service.py`**：历史成交 append-only JSONL 备份（`backend/data/backups/trades.jsonl`）。每条 `Trade` 落库后在 **已获得主键之后** 再写入（`commit` 后或 `flush` 后），保证备份里 `id` 与 DB 一致；恢复时按账户过滤。删除备份：停服务后删该文件或清空文件即可，无单独 API。
+
+### 历史交易备份与 REST（`/api/trades`）
+- **备份写入**：调度/平仓/手工平仓/同步等对 `Trade` 写入的路径调用 `backup_trade()`（见 `position_manager`、`scheduler`、`sync_service`、`routers/positions`、`routers/strategies` 等），须在 **持久化拿到 `id` 之后** 再调（与 DB 事务顺序一致）。
+- **按账户隔离**：`GET /backup-stats?account_id=`、`POST /restore?account_id=` 仅统计/恢复该 `account_id` 的行；库里 `DELETE /api/trades?account_id=` **只删该账户** 的交易行（**整库清空已取消**）。
+- **路由顺序**：`DELETE ""`（按 `account_id` 批量删）必须声明在 `DELETE /{trade_id}` **之前**，避免 Starlette 错配动态路由。
+- **恢复**：JSONL 时间字段在 `routers/trades.py` 内解析为 naive `datetime`；主键已存在则跳过；`IntegrityError` 返回 400。
 
 ### 数据库
 - SQLite + aiosqlite，启动时 `Base.metadata.create_all()` + `init_db()` 内联 ALTER TABLE 迁移 + NULL `opened_at` 回填
@@ -82,6 +89,8 @@ bash deploy.sh
 - `__FRONTEND_BUILD_STAMP__`：vite 构建时注入时间戳，持仓页显示用于确认包版本
 - 持仓页 `buildRows()`：以交易所数据为主构建行，匹配合并 DB 层数/止盈单/开仓时间，标注"仅交易所"行
 - Dashboard 顶栏显示**累计**（非当日）多空比，右侧分栏展示当日/累计盈亏、胜率
+- **顶栏账户与全局 store**：`StatusBar` 在 `listAccounts` 解析出默认/记忆账户后，必须同步 `useDashboardStore.setSelectedAccountId`（含 `null`），与本地 `useState` 一致；策略列表、交易历史、备份统计/恢复/清空均依赖 store 中的 `selectedAccountId`。
+- **交易历史页**：列表、`backup` 操作、`DELETE` 批量清空均带当前选中 `account_id`；无选中账户时「清空/恢复」不可用。API 错误在 `api.ts` 的 `request()` 中格式化（含 422 `detail` 数组）。
 
 ## 关键约定
 
@@ -91,4 +100,5 @@ bash deploy.sh
 - **符号标准化**：比较时统一去 `/`、`:USDT`、大写。函数：`_norm_sym()`（position_manager）、`_norm_leg_symbol()`（sync_service）、`_panic_symbol_key()`（strategies）。
 - **TradFi 过滤**：`exclude_tradefi` 策略级开关，默认关闭。两层过滤 — 选币池在调度器筛 + 逐币种在 `process_symbol` 入口筛。已有持仓的 TradFi 币不会被抛弃。
 - **新增数据库列**：同步添加 model + schema + 前端 types + `init_db()` 迁移 + NULL 兜底。
+- **历史备份与库表**：页面「清空」只删 SQLite `trades` 中当前账户；JSONL 仍追加保留，需删文件才能在备份侧移除记录。
 - **Python 命令**：Windows 环境使用 `python`（非 `python3.11`）。
