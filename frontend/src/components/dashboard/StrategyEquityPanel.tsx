@@ -271,10 +271,6 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
         )}
       </div>
 
-      {!panelOpen && (
-        <p className="text-xs text-gray-600">点击标题栏展开。数据按北京时间每小时整点记录，时间轴从左到右递增。</p>
-      )}
-
       {panelOpen && accountId == null && (
         <p className="text-gray-500 text-sm py-8 text-center">请在顶部状态栏选择账户后查看收益曲线。</p>
       )}
@@ -319,8 +315,6 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
               </div>
             </div>
           </div>
-          <p className="text-xs text-gray-600 mb-1">后端按北京时间每小时整点写入一条余额快照；曲线从左到右为时间正序。鼠标在图上移动可查看该时刻回报率。</p>
-          {!data?.points.length ? (
             <p className="text-gray-500 text-sm py-6 text-center">
               尚无小时快照数据；服务启动后会自动写入，整点亦会采集。可先点击「重置收益」固定基准。
             </p>
