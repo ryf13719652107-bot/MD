@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useMemo } from 'react';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { DashboardData, Position } from '../../types';
-import { Check, Minus } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronsUpDown, Minus } from 'lucide-react';
 
 type ExchangePos = DashboardData['exchange_positions'][number];
 
@@ -17,8 +17,12 @@ type DisplayRow = {
   tp_has_order: boolean;
   tp_target_only: boolean;
   opened_at_label: string;
+  /** 用于排序；无则 null（如仅交易所无主记录） */
+  opened_at_ms: number | null;
   exchange_only: boolean;
 };
+
+type SortKey = 'notional' | 'pnl' | 'opened_at';
 
 function exchangeNotionalUsdt(ep: ExchangePos): number {
   let u = typeof ep.usdt === 'number' ? ep.usdt : 0;
@@ -52,6 +56,7 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
         .map((m) => m.opened_at)
         .filter(Boolean)
         .sort()[0];
+      const openedMs = opened ? new Date(opened as string).getTime() : null;
       const hasTpPrice = tp != null;
       return {
         key: `${sym}-${side}`,
@@ -64,6 +69,7 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
         tp_has_order: tpId,
         tp_target_only: hasTpPrice && !tpId,
         opened_at_label: opened ? new Date(opened as string).toLocaleString() : '-',
+        opened_at_ms: Number.isFinite(openedMs ?? NaN) ? openedMs : null,
         exchange_only: match.length === 0,
       };
     });
@@ -71,6 +77,7 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
   if (dbPositions.length > 0) {
     return dbPositions.map((p) => {
       const px = p.mark_price ?? p.entry_price;
+      const oms = p.opened_at ? new Date(p.opened_at).getTime() : null;
       return {
         key: String(p.id),
         symbol: p.symbol,
@@ -82,6 +89,7 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
         tp_has_order: !!p.tp_limit_order_id,
         tp_target_only: p.take_profit_price != null && !p.tp_limit_order_id,
         opened_at_label: p.opened_at ? new Date(p.opened_at).toLocaleString() : '-',
+        opened_at_ms: Number.isFinite(oms ?? NaN) ? oms : null,
         exchange_only: false,
       };
     });
@@ -89,10 +97,65 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
   return [];
 }
 
+function sortRows(rows: DisplayRow[], key: SortKey, dir: 'asc' | 'desc'): DisplayRow[] {
+  const next = [...rows];
+  const inv = dir === 'desc' ? -1 : 1;
+  next.sort((a, b) => {
+    if (key === 'opened_at') {
+      const na = a.opened_at_ms;
+      const nb = b.opened_at_ms;
+      if (na == null && nb == null) return 0;
+      if (na == null) return 1;
+      if (nb == null) return -1;
+      return (na - nb) * inv;
+    }
+    if (key === 'notional') {
+      return (a.notional_usdt - b.notional_usdt) * inv;
+    }
+    return (a.unrealized_pnl - b.unrealized_pnl) * inv;
+  });
+  return next;
+}
+
+function SortTh({
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: 'asc' | 'desc';
+  onClick: () => void;
+}) {
+  return (
+    <th className="p-3">
+      <button
+        type="button"
+        onClick={onClick}
+        className="inline-flex items-center gap-1.5 text-left font-medium text-gray-500 hover:text-gray-300 transition-colors select-none"
+      >
+        {label}
+        {active ? (
+          dir === 'asc' ? (
+            <ArrowUp className="w-3.5 h-3.5 shrink-0 text-cyan-400" aria-hidden />
+          ) : (
+            <ArrowDown className="w-3.5 h-3.5 shrink-0 text-cyan-400" aria-hidden />
+          )
+        ) : (
+          <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-gray-600 opacity-70" aria-hidden />
+        )}
+      </button>
+    </th>
+  );
+}
+
 export default function PositionsPage() {
   const { selectedAccountId } = useDashboardStore();
   const [dbPositions, setDbPositions] = useState<Position[]>([]);
   const [exchangePositions, setExchangePositions] = useState<ExchangePos[]>([]);
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const loadRef = useRef<() => void>(() => {});
 
   const load = async () => {
@@ -130,6 +193,20 @@ export default function PositionsPage() {
     [dbPositions, exchangePositions],
   );
 
+  const sortedRows = useMemo(
+    () => (sortKey ? sortRows(rows, sortKey, sortDir) : rows),
+    [rows, sortKey, sortDir],
+  );
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('desc');
+    }
+  };
+
   const hasExchangeHint = exchangePositions.length > 0 && dbPositions.length === 0;
 
   return (
@@ -156,16 +233,31 @@ export default function PositionsPage() {
             <tr className="text-gray-500 text-left border-b border-gray-800">
               <th className="p-3">交易对</th>
               <th className="p-3">方向</th>
-              <th className="p-3">持仓(USDT)</th>
+              <SortTh
+                label="持仓(USDT)"
+                active={sortKey === 'notional'}
+                dir={sortDir}
+                onClick={() => toggleSort('notional')}
+              />
               <th className="p-3">层数</th>
               <th className="p-3">入场价</th>
               <th className="p-3">限价止盈</th>
-              <th className="p-3">未实现盈亏</th>
-              <th className="p-3">开仓时间</th>
+              <SortTh
+                label="未实现盈亏"
+                active={sortKey === 'pnl'}
+                dir={sortDir}
+                onClick={() => toggleSort('pnl')}
+              />
+              <SortTh
+                label="开仓时间"
+                active={sortKey === 'opened_at'}
+                dir={sortDir}
+                onClick={() => toggleSort('opened_at')}
+              />
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {sortedRows.map((row) => (
               <tr
                 key={row.key}
                 className="border-b border-gray-800/50 hover:bg-gray-800/30"
@@ -204,7 +296,7 @@ export default function PositionsPage() {
                 <td className="p-3 text-gray-500 text-xs">{row.opened_at_label}</td>
               </tr>
             ))}
-            {rows.length === 0 && (
+            {sortedRows.length === 0 && (
               <tr>
                 <td colSpan={8} className="p-8 text-center text-gray-600">
                   暂无持仓
