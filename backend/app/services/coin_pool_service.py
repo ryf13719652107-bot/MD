@@ -43,6 +43,13 @@ class CoinPoolService:
             source=self._config["pool_source"],
             limit=self._config["max_symbols"],
         )
+        if not movers:
+            self._last_refresh_ok = False
+            self._last_error = "选币池接口返回空列表"
+            logger.warning(
+                "选币池拉取结果为空，保留库内旧池与上次刷新时间（不清空表，避免节拍丢失）"
+            )
+            return
         async with async_session() as session:
             await session.execute(delete(CoinPool))
             for item in movers:
@@ -89,29 +96,47 @@ class CoinPoolService:
             result = await session.execute(select(func.count(CoinPool.id)))
             return result.scalar() or 0
 
-    async def start_auto_refresh(self, binance_service: BinanceService):
-        """Start periodic coin pool refresh."""
-        async def _loop():
-            # Initial refresh with 30s timeout
-            try:
-                await asyncio.wait_for(self.refresh_pool(binance_service), timeout=30.0)
-            except asyncio.TimeoutError:
-                self._last_refresh_ok = False
-                self._last_error = "Initial refresh timed out after 30s"
-                logger.error("Coin pool initial refresh timed out")
-            except Exception as e:
-                self._last_refresh_ok = False
-                self._last_error = str(e)[:200]
-                logger.error("Coin pool initial refresh failed: %s", e)
+    async def _last_refresh_datetime_from_db(self) -> datetime | None:
+        """上一次整池写入时间（各行 last_updated 在 refresh 时一致，取 max 即可）。"""
+        async with async_session() as session:
+            r = await session.execute(select(func.max(CoinPool.last_updated)))
+            return r.scalar()
 
+    def _seconds_until_next_refresh(self, last_dt: datetime | None) -> float:
+        """距下一次「按计划」刷新应等待的秒数；无记录或已过期则 0（应尽快刷新）。"""
+        interval = float(self._config["refresh_interval_seconds"])
+        if last_dt is None:
+            return 0.0
+        elapsed = (now_beijing() - last_dt).total_seconds()
+        return max(0.0, interval - elapsed)
+
+    async def start_auto_refresh(self, binance_service: BinanceService):
+        """按计划间隔循环刷新；重启后根据库内上次刷新时间补齐等待，避免整点相位被重置。"""
+
+        async def _loop():
             while True:
-                await asyncio.sleep(self._config["refresh_interval_seconds"])
+                last_dt = await self._last_refresh_datetime_from_db()
+                delay = self._seconds_until_next_refresh(last_dt)
+                if delay > 0:
+                    if last_dt is not None:
+                        self._last_refresh_time = last_dt.timestamp()
+                    logger.info(
+                        "选币池将在 %.0f 秒后刷新（与重启前间隔对齐，周期=%ds）",
+                        delay,
+                        int(self._config["refresh_interval_seconds"]),
+                    )
+                    await asyncio.sleep(delay)
                 try:
-                    await self.refresh_pool(binance_service)
+                    await asyncio.wait_for(self.refresh_pool(binance_service), timeout=90.0)
+                except asyncio.TimeoutError:
+                    self._last_refresh_ok = False
+                    self._last_error = "选币池刷新超时(90s)"
+                    logger.error("Coin pool refresh timed out")
                 except Exception as e:
                     self._last_refresh_ok = False
                     self._last_error = str(e)[:200]
                     logger.error("Coin pool refresh error: %s", e)
+                await asyncio.sleep(self._config["refresh_interval_seconds"])
 
         if self._refresh_task is None or self._refresh_task.done():
             self._refresh_task = asyncio.create_task(_loop())
