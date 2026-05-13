@@ -399,9 +399,6 @@ class PositionManager:
             if signal != Signal.NEUTRAL:
                 strategy_log_service.info(strategy_id, f"{symbol} RSI={round(rsi,1)} 信号={signal.value}")
 
-        if open_positions:
-            strategy_log_service.info(strategy_id, f"{symbol} 已有{len(open_positions)}个持仓，进入管理")
-
         # --- Current price ---
         try:
             current_price = float(klines[-1][4])

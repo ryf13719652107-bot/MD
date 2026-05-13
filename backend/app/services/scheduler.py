@@ -377,6 +377,17 @@ class StrategyScheduler:
                     strategy_log_service.warning(strategy_id, "未设置交易对")
                 return
 
+            if open_syms:
+                uniq_norm = sorted({_norm_sym(s) for s in open_syms if s})
+                n = len(uniq_norm)
+                max_show = 25
+                head = ", ".join(uniq_norm[:max_show])
+                if n > max_show:
+                    summ = f"未平仓 {n} 个: {head} …(+{n - max_show})"
+                else:
+                    summ = f"未平仓 {n} 个: {head}"
+                strategy_log_service.info(strategy_id, summ)
+
             # Process each symbol — commit after each symbol so one failure does not roll back the entire tick
             for symbol in symbols:
                 allow_new = pool_entry_norms is None or _norm_sym(symbol) in pool_entry_norms
