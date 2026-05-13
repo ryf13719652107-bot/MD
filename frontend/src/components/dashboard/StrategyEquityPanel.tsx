@@ -204,7 +204,12 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
 
   const resetBaseline = async () => {
     if (accountId == null) return;
-    if (!window.confirm('将使用当前交易所余额作为新基准，确认重置收益曲线？')) return;
+    if (
+      !window.confirm(
+        '将清空该账户收益曲线的历史小时快照与收益基准，下个北京时间整点起重新记录。确认？',
+      )
+    )
+      return;
     try {
       await api.resetEquityBaseline(accountId);
       const d = await api.getEquitySeries(accountId, days);
@@ -315,8 +320,9 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
               </div>
             </div>
           </div>
+          {!data?.points.length ? (
             <p className="text-gray-500 text-sm py-6 text-center">
-              尚无小时快照数据；服务启动后会自动写入，整点亦会采集。可先点击「重置收益」固定基准。
+              尚无小时快照数据；服务启动或整点任务会写入。也可「重置收益」清空历史后，等下一整点再记第一条。
             </p>
           ) : (
             <div className="relative w-full">

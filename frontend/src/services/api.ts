@@ -95,7 +95,9 @@ export const api = {
 
   getEquitySeries: (accountId: number, days = 30): Promise<EquitySeriesData> =>
     request<EquitySeriesData>(`/equity/series?account_id=${accountId}&days=${days}`),
-  resetEquityBaseline: (accountId: number): Promise<{ ok: boolean; baseline_total_usdt: number; set_at: string }> =>
+  resetEquityBaseline: (
+    accountId: number,
+  ): Promise<{ ok: boolean; deleted_snapshots: number; message: string }> =>
     request(`/equity/baseline-reset?account_id=${accountId}`, { method: 'POST' }),
 
   // Klines

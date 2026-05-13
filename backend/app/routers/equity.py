@@ -1,9 +1,8 @@
-import asyncio
 import logging
 from datetime import timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
@@ -11,8 +10,6 @@ from ..config import now_beijing
 from ..models.account import Account
 from ..models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline
 from ..schemas.equity import EquityPointOut, EquitySeriesResponse, EquitySummaryOut
-from ..services.encryption import decrypt
-from ..services.binance_service import get_binance_service
 
 logger = logging.getLogger(__name__)
 
@@ -134,40 +131,22 @@ async def reset_equity_baseline(
     account_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
+    """清空该账户收益曲线历史快照与手动基准；下个整点由定时任务重新写入第一条快照。"""
     result = await db.execute(select(Account).where(Account.id == account_id))
     account = result.scalar()
     if not account:
         raise HTTPException(status_code=404, detail="账户不存在")
 
-    try:
-        api_key = decrypt(account.api_key_encrypted)
-        api_secret = decrypt(account.api_secret_encrypted)
-        binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
-        balance = await asyncio.wait_for(binance.fetch_balance(), timeout=8.0)
-        live_total = float(balance.get("total", {}).get("USDT", 0) or 0)
-    except Exception as e:
-        logger.error("baseline-reset balance error account %s: %s", account_id, e)
-        raise HTTPException(status_code=502, detail="无法从交易所读取余额")
+    r_snaps = await db.execute(
+        delete(AccountBalanceSnapshot).where(AccountBalanceSnapshot.account_id == account_id)
+    )
+    deleted_snaps = int(r_snaps.rowcount or 0)
 
-    now = now_beijing()
-    row = (
-        await db.execute(select(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
-    ).scalar_one_or_none()
-    if row:
-        row.baseline_total_usdt = live_total
-        row.set_at = now
-    else:
-        db.add(
-            AccountEquityBaseline(
-                account_id=account_id,
-                baseline_total_usdt=live_total,
-                set_at=now,
-            )
-        )
+    await db.execute(delete(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
     await db.commit()
 
     return {
         "ok": True,
-        "baseline_total_usdt": round(live_total, 2),
-        "set_at": _fmt_ts(now),
+        "deleted_snapshots": deleted_snaps,
+        "message": "已清空历史快照与收益基准，将在下一北京时间整点重新记录。",
     }
