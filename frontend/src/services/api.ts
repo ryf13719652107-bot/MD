@@ -1,4 +1,4 @@
-import type { Account, Position, Trade, DashboardData, CoinPoolEntry, KlineData } from '../types';
+import type { Account, Position, Trade, DashboardData, CoinPoolEntry, KlineData, EquitySeriesData } from '../types';
 import type { Strategy, StrategyFormData } from '../types/strategy';
 
 // Same-origin `/api`: Vite dev server proxies to backend; production is served by FastAPI with API on the same host (also works behind reverse proxy on 80/443).
@@ -92,6 +92,11 @@ export const api = {
   // Dashboard
   getDashboard: (accountId?: number): Promise<DashboardData> =>
     request<DashboardData>(`/dashboard${accountId ? `?account_id=${accountId}` : ''}`),
+
+  getEquitySeries: (accountId: number, days = 30): Promise<EquitySeriesData> =>
+    request<EquitySeriesData>(`/equity/series?account_id=${accountId}&days=${days}`),
+  resetEquityBaseline: (accountId: number): Promise<{ ok: boolean; baseline_total_usdt: number; set_at: string }> =>
+    request(`/equity/baseline-reset?account_id=${accountId}`, { method: 'POST' }),
 
   // Klines
   getKlines: (symbol: string, timeframe = '1m', limit = 200): Promise<KlineData[]> =>

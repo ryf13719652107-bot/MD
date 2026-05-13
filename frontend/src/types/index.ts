@@ -102,3 +102,28 @@ export interface KlineData {
   close: number;
   volume: number;
 }
+
+export type EquityViewMode = 'return' | 'balance' | 'pnl';
+
+export interface EquitySeriesPoint {
+  t_unix: number;
+  total_usdt: number;
+  return_pct: number;
+  pnl_usdt: number;
+}
+
+export interface EquitySummary {
+  total_balance: number;
+  pnl_usdt: number;
+  return_pct: number;
+  max_drawdown_pct: number;
+  return_drawdown_ratio: number | null;
+  baseline_total_usdt: number;
+  baseline_set_at: string | null;
+  implicit_baseline: boolean;
+}
+
+export interface EquitySeriesData {
+  points: EquitySeriesPoint[];
+  summary: EquitySummary;
+}

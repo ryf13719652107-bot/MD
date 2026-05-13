@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -7,11 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from .config import settings
+from .config import settings, BEIJING_TZ
 from .database import init_db, get_db, async_session
 from .models.bot_config import BotConfig
 from .models.strategy import Strategy
-from .routers import account, strategies, positions, trades, dashboard, coin_pool, websocket
+from .routers import account, strategies, positions, trades, dashboard, coin_pool, websocket, equity
 from .services.scheduler import strategy_scheduler
 from .services.binance_service import get_public_binance
 from .services.coin_pool_service import coin_pool_service
@@ -61,6 +62,32 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Step 2/6: scheduler.start...")
     strategy_scheduler.start()
+    from apscheduler.triggers.cron import CronTrigger
+
+    async def _equity_hourly_job():
+        from .services.equity_snapshot_job import run_hourly_equity_snapshots
+
+        await run_hourly_equity_snapshots()
+
+    strategy_scheduler.scheduler.add_job(
+        _equity_hourly_job,
+        CronTrigger(minute=0, timezone=BEIJING_TZ),
+        id="equity_hourly_snapshots",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    async def _equity_bootstrap_snap():
+        await asyncio.sleep(4)
+        try:
+            from .services.equity_snapshot_job import run_hourly_equity_snapshots
+
+            await run_hourly_equity_snapshots()
+        except Exception as e:
+            logger.warning("equity bootstrap snapshot: %s", e)
+
+    asyncio.create_task(_equity_bootstrap_snap())
+
     logger.info("Step 3/6: resume_running_strategies...")
     await strategy_scheduler.resume_running_strategies()
     logger.info("Step 4/6: get_public_binance...")
@@ -135,6 +162,7 @@ app.include_router(trades.router)
 app.include_router(dashboard.router)
 app.include_router(coin_pool.router)
 app.include_router(websocket.router)
+app.include_router(equity.router)
 
 # Serve frontend static files
 # __file__ = backend/app/main.py → go up 3 levels to project root

@@ -3,6 +3,7 @@ import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { Trade } from '../../types';
 import { TrendingDown, Layers, BarChart3, Activity, Target, Wallet, PiggyBank, Gauge } from 'lucide-react';
+import StrategyEquityPanel from './StrategyEquityPanel';
 
 function PanelRow({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
   return (
@@ -68,6 +69,8 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
+
+          <StrategyEquityPanel accountId={selectedAccountId ?? null} />
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
