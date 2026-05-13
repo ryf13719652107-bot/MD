@@ -23,7 +23,8 @@ from .backup_service import backup_trade
 logger = logging.getLogger(__name__)
 
 TIMEFRAME_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
-_STRATEGY_SEMAPHORE = asyncio.Semaphore(5)
+# 并发跑「收盘整轮」的策略数；≥ running 策略数可避免整点排队。多账户分散 API，可适当提高（单账户一堆策略时勿过大以防 429）。
+_STRATEGY_SEMAPHORE = asyncio.Semaphore(10)
 
 
 def _exchange_leg_map_from_positions(raw_positions: list) -> dict[tuple[str, str], float]:
