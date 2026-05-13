@@ -53,6 +53,7 @@ async def get_equity_series(
     days: int = Query(30, ge=1, le=366),
     db: AsyncSession = Depends(get_db),
 ):
+    """收益序列与汇总仅使用库内按整点写入的小时快照；刷新页面不会拉交易所实时余额。"""
     result = await db.execute(select(Account).where(Account.id == account_id))
     account = result.scalar()
     if not account:
@@ -78,18 +79,6 @@ async def get_equity_series(
         await db.execute(select(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
     ).scalar_one_or_none()
 
-    live_total = 0.0
-    balance_ok = False
-    try:
-        api_key = decrypt(account.api_key_encrypted)
-        api_secret = decrypt(account.api_secret_encrypted)
-        binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
-        balance = await asyncio.wait_for(binance.fetch_balance(), timeout=8.0)
-        live_total = float(balance.get("total", {}).get("USDT", 0) or 0)
-        balance_ok = True
-    except Exception as e:
-        logger.warning("equity series live balance failed account %s: %s", account_id, e)
-
     if baseline_row:
         baseline = float(baseline_row.baseline_total_usdt)
         implicit = False
@@ -99,18 +88,11 @@ async def get_equity_series(
         implicit = True
         baseline_set_at = None
     else:
-        baseline = live_total if balance_ok else 0.0
+        baseline = 0.0
         implicit = True
         baseline_set_at = None
 
     points_raw: list[tuple] = [(s.snapshot_at, float(s.total_usdt)) for s in snaps]
-    hour_floor = now_beijing().replace(minute=0, second=0, microsecond=0)
-
-    if balance_ok:
-        if points_raw and points_raw[-1][0] == hour_floor:
-            points_raw[-1] = (hour_floor, live_total)
-        else:
-            points_raw.append((hour_floor, live_total))
 
     points_out: list[EquityPointOut] = []
     balances_for_dd: list[float] = []
@@ -128,7 +110,7 @@ async def get_equity_series(
         balances_for_dd.append(tot)
 
     max_dd = _max_drawdown_pct(balances_for_dd)
-    cur_bal = live_total if balance_ok else (points_raw[-1][1] if points_raw else 0.0)
+    cur_bal = float(points_raw[-1][1]) if points_raw else 0.0
     pnl = cur_bal - baseline
     ret_pct = round((pnl / baseline * 100.0) if baseline > 1e-12 else 0.0, 2)
     ratio = round(ret_pct / max_dd, 2) if max_dd > 1e-6 else None
