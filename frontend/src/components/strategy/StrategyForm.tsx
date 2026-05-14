@@ -23,7 +23,7 @@ const schema = z.object({
   rsi_entry_threshold: z.number().min(0).max(100),
   price_drop_pct: z.number().min(0.1).max(100),
   martingale_mult: z.number().min(1).max(10),
-  max_layers: z.number().min(1).max(10),
+  max_layers: z.number().min(1).max(200),
   martingale_rsi_enabled: z.coerce.boolean(),
   take_profit_pct: z.number().min(0.1).max(50),
   take_profit_limit_order: z.coerce.boolean(),

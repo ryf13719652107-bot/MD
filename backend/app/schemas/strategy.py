@@ -23,7 +23,7 @@ class StrategyCreate(BaseModel):
     # Martingale
     price_drop_pct: float = Field(default=30.0, gt=0, le=100)
     martingale_mult: float = Field(default=1.5, ge=1.0, le=10.0)
-    max_layers: int = Field(default=8, ge=1, le=10)
+    max_layers: int = Field(default=8, ge=1, le=200)
     martingale_rsi_enabled: bool = False
     # Take profit
     take_profit_pct: float = Field(default=2.0, gt=0, le=50)
@@ -60,7 +60,7 @@ class StrategyUpdate(BaseModel):
     rsi_entry_threshold: Optional[float] = Field(default=None, ge=0, le=100)
     price_drop_pct: Optional[float] = Field(default=None, gt=0, le=100)
     martingale_mult: Optional[float] = Field(default=None, ge=1.0, le=10.0)
-    max_layers: Optional[int] = Field(default=None, ge=1, le=10)
+    max_layers: Optional[int] = Field(default=None, ge=1, le=200)
     martingale_rsi_enabled: Optional[bool] = None
     take_profit_pct: Optional[float] = Field(default=None, gt=0, le=50)
     take_profit_limit_order: Optional[bool] = None
