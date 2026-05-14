@@ -23,7 +23,11 @@ const schema = z.object({
   rsi_entry_threshold: z.number().min(0).max(100),
   price_drop_pct: z.number().min(0.1).max(100),
   martingale_mult: z.number().min(1).max(10),
-  max_layers: z.number().min(1).max(200),
+  max_layers: z.coerce
+    .number({ invalid_type_error: '请输入数字' })
+    .int({ message: '最大加仓次数须为整数' })
+    .min(1, '至少为 1')
+    .max(200, '最大为 200'),
   martingale_rsi_enabled: z.coerce.boolean(),
   take_profit_pct: z.number().min(0.1).max(50),
   take_profit_limit_order: z.coerce.boolean(),
@@ -65,7 +69,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       rsi_entry_threshold: initialData.rsi_entry_threshold,
       price_drop_pct: initialData.price_drop_pct,
       martingale_mult: initialData.martingale_mult,
-      max_layers: initialData.max_layers,
+      max_layers: Number(initialData.max_layers ?? 8),
       martingale_rsi_enabled: initialData.martingale_rsi_enabled ?? false,
       take_profit_pct: initialData.take_profit_pct,
       take_profit_limit_order: initialData.take_profit_limit_order,
@@ -322,7 +326,15 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           </div>
           <div>
             <label className={labelClass}>最大加仓次数</label>
-            <input type="number" {...register('max_layers', { valueAsNumber: true })} className={inputClass} />
+            <input
+              type="number"
+              min={1}
+              max={200}
+              step={1}
+              {...register('max_layers', { valueAsNumber: true })}
+              className={inputClass}
+            />
+            {errors.max_layers && <p className={errorClass}>{errors.max_layers.message}</p>}
           </div>
         </div>
 

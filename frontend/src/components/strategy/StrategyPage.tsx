@@ -67,14 +67,18 @@ export default function StrategyPage() {
   };
 
   const handleSubmit = async (data: any) => {
-    if (editing) {
-      await api.updateStrategy(editing.id, data);
-    } else {
-      await api.createStrategy(data);
+    try {
+      if (editing) {
+        await api.updateStrategy(editing.id, data);
+      } else {
+        await api.createStrategy(data);
+      }
+      setShowForm(false);
+      setEditing(null);
+      load();
+    } catch (e: any) {
+      alert(editing ? `保存失败: ${e.message || e}` : `创建失败: ${e.message || e}`);
     }
-    setShowForm(false);
-    setEditing(null);
-    load();
   };
 
   return (

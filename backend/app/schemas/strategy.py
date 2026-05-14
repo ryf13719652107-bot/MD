@@ -46,6 +46,7 @@ class StrategyCreate(BaseModel):
 
 class StrategyUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    direction: Optional[Literal["long", "short"]] = None
     symbol: Optional[str] = None
     signal_source: Optional[Literal["rsi", "wavetrend"]] = None
     rsi_period: Optional[int] = Field(default=None, ge=5, le=50)
