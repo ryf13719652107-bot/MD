@@ -92,14 +92,14 @@ class CoinPoolService:
         min_volume_24h: float = 0,
         exclude_symbols_norm: set[str] | None = None,
     ) -> list[CoinPool]:
-        """Strategy-facing pool: volume floor → optional symbol exclude → top N (rank order)."""
+        """Strategy-facing pool: leaderboard top N → volume floor → optional symbol exclude."""
         coins = await self.get_pool(source)
+        if limit > 0:
+            coins = coins[:limit]
         if min_volume_24h > 0:
             coins = [c for c in coins if (c.volume_24h or 0) >= min_volume_24h]
         if exclude_symbols_norm:
             coins = [c for c in coins if _norm_sym(c.symbol) not in exclude_symbols_norm]
-        if limit > 0:
-            coins = coins[:limit]
         return coins
 
     async def get_pool_symbols(
