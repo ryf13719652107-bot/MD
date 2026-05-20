@@ -83,9 +83,20 @@ class CoinPoolService:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
-    async def get_pool_symbols(self, source: str | None = None, limit: int = 0) -> list[str]:
-        """Get list of symbols from coin pool, optionally limited to top N."""
+    async def get_pool_symbols(
+        self,
+        source: str | None = None,
+        limit: int = 0,
+        min_volume_24h: float = 0,
+    ) -> list[str]:
+        """Get list of symbols from coin pool, optionally limited to top N.
+
+        min_volume_24h: USDT quote volume floor; 0 = no filter.
+        Filtering runs before top-N slice so rank order is preserved among qualifiers.
+        """
         coins = await self.get_pool(source)
+        if min_volume_24h > 0:
+            coins = [c for c in coins if (c.volume_24h or 0) >= min_volume_24h]
         if limit > 0:
             coins = coins[:limit]
         return [c.symbol for c in coins]

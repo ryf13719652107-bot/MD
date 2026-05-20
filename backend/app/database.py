@@ -42,6 +42,7 @@ async def init_db():
             "ALTER TABLE positions ADD COLUMN opened_at TIMESTAMP",
             "ALTER TABLE positions ADD COLUMN closed_at TIMESTAMP",
             "ALTER TABLE strategies ADD COLUMN exclude_tradefi BOOLEAN DEFAULT 0",
+            "ALTER TABLE strategies ADD COLUMN coin_pool_min_volume_24h FLOAT DEFAULT 0",
         ]
         for sql in migrations:
             try:

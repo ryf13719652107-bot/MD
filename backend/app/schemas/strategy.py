@@ -41,6 +41,11 @@ class StrategyCreate(BaseModel):
     coin_pool_refresh_seconds: int = Field(default=3600, ge=30, le=86400)
     coin_pool_fetch_mode: Literal["immediate", "interval"] = "interval"
     coin_pool_top_n: int = Field(default=20, ge=1, le=50)
+    coin_pool_min_volume_24h: float = Field(
+        default=0.0,
+        ge=0,
+        description="最低 24h 成交额(USDT)，0=不限制；仅过滤本策略可开仓的选币池币种",
+    )
     exclude_tradefi: bool = False
 
 
@@ -74,6 +79,7 @@ class StrategyUpdate(BaseModel):
     coin_pool_refresh_seconds: Optional[int] = Field(default=None, ge=30, le=86400)
     coin_pool_fetch_mode: Optional[Literal["immediate", "interval"]] = None
     coin_pool_top_n: Optional[int] = Field(default=None, ge=1, le=50)
+    coin_pool_min_volume_24h: Optional[float] = Field(default=None, ge=0)
     exclude_tradefi: Optional[bool] = None
 
 
@@ -109,6 +115,7 @@ class StrategyResponse(BaseModel):
     coin_pool_refresh_seconds: int
     coin_pool_fetch_mode: str
     coin_pool_top_n: int
+    coin_pool_min_volume_24h: float
     exclude_tradefi: bool
     status: str
     started_at: Optional[datetime] = None

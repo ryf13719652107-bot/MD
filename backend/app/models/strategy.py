@@ -63,6 +63,8 @@ class Strategy(Base):
     coin_pool_refresh_seconds: Mapped[int] = mapped_column(Integer, default=3600)  # how often to refresh coin pool
     coin_pool_fetch_mode: Mapped[str] = mapped_column(String(20), default="interval")  # 'immediate' or 'interval'
     coin_pool_top_n: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
+    # 最低 24h 成交额（USDT quoteVolume）；0 = 不限制。仅本策略过滤选币池新开仓列表
+    coin_pool_min_volume_24h: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     # False by default. True: 排除 TRADIFI_PERPETUAL（股票/TradFi 永续），仅本策略扫描列表过滤
     exclude_tradefi: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 

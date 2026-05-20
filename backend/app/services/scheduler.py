@@ -336,7 +336,18 @@ class StrategyScheduler:
             pool_symbols: list[str] = []
             if strategy.use_coin_pool:
                 try:
-                    pool_symbols = await coin_pool_service.get_pool_symbols(strategy.coin_pool_source, strategy.coin_pool_top_n)
+                    min_vol = float(getattr(strategy, "coin_pool_min_volume_24h", 0) or 0)
+                    pool_symbols = await coin_pool_service.get_pool_symbols(
+                        strategy.coin_pool_source,
+                        strategy.coin_pool_top_n,
+                        min_volume_24h=min_vol,
+                    )
+                    if min_vol > 0 and not pool_symbols:
+                        logger.info(
+                            "Strategy %d: coin pool empty after min_volume_24h=%.0f USDT",
+                            strategy_id,
+                            min_vol,
+                        )
                     if strategy.exclude_tradefi and pool_symbols:
                         td = await get_cached_tradefi_symbols(public_binance)
                         pool_symbols = [s for s in pool_symbols if _norm_sym(s) not in td]

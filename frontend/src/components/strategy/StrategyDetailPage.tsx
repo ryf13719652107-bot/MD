@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { formatUsdtVolume } from '../../utils/format';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import type { Strategy } from '../../types/strategy';
@@ -36,6 +37,18 @@ export default function StrategyDetailPage() {
   const [loading, setLoading] = useState(true);
 
   const loadRef = useRef<() => void>(() => {});
+
+  const effectivePool = useMemo(() => {
+    if (!strategy) return pool;
+    let rows = [...pool];
+    const min = strategy.coin_pool_min_volume_24h ?? 0;
+    if (min > 0) {
+      rows = rows.filter((e) => (e.volume_24h ?? 0) >= min);
+    }
+    const n = strategy.coin_pool_top_n;
+    if (n > 0) rows = rows.slice(0, n);
+    return rows;
+  }, [pool, strategy]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -171,6 +184,16 @@ export default function StrategyDetailPage() {
                 : '固定交易对'}
             </div>
           </div>
+          {strategy.use_coin_pool && (
+            <div>
+              <span className={labelClass}>成交量过滤（本策略）</span>
+              <div className={valClass}>
+                {(strategy.coin_pool_min_volume_24h ?? 0) > 0
+                  ? `24h ≥ ${(strategy.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`
+                  : '不限制'}
+              </div>
+            </div>
+          )}
           <div>
             <span className={labelClass}>TradFi / 股票永续</span>
             <div className={valClass}>
@@ -197,10 +220,11 @@ export default function StrategyDetailPage() {
               选币池
               <span className="text-gray-500 ml-2 text-xs">
                 {strategy.coin_pool_source === 'both' ? '涨幅榜+跌幅榜' : strategy.coin_pool_source === 'gainers' ? '涨幅榜' : '跌幅榜'}
-                ({pool.length} 个币种)
+                ({effectivePool.length} 个可交易
+                {(strategy.coin_pool_min_volume_24h ?? 0) > 0 ? '，已按成交量过滤' : ''})
               </span>
             </h3>
-            {pool.length === 0 ? (
+            {effectivePool.length === 0 ? (
               <div className="text-gray-600 text-sm py-4 text-center">暂无数据</div>
             ) : (
               <div className="overflow-x-auto">
@@ -210,18 +234,20 @@ export default function StrategyDetailPage() {
                       <th className="text-left py-1.5 px-2">排名</th>
                       <th className="text-left py-1.5 px-2">币种</th>
                       <th className="text-right py-1.5 px-2">涨跌幅</th>
+                      <th className="text-right py-1.5 px-2">24h成交量</th>
                       <th className="text-right py-1.5 px-2">来源</th>
                       <th className="text-right py-1.5 px-2">入选时间</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {pool.map((e) => (
+                    {effectivePool.map((e) => (
                       <tr key={e.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
                         <td className="py-1.5 px-2 text-gray-400">#{e.rank}</td>
                         <td className="py-1.5 px-2 text-gray-200 font-mono">{e.symbol}</td>
                         <td className={`py-1.5 px-2 text-right font-mono ${e.price_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                           {e.price_change_pct >= 0 ? '+' : ''}{e.price_change_pct?.toFixed(2)}%
                         </td>
+                        <td className="py-1.5 px-2 text-right text-gray-400">{formatUsdtVolume(e.volume_24h)}</td>
                         <td className="py-1.5 px-2 text-right">
                           <span className={`px-1.5 py-0.5 rounded text-xs ${e.source === 'gainers' ? 'bg-green-600/20 text-green-400' : 'bg-red-600/20 text-red-400'}`}>
                             {e.source === 'gainers' ? '涨幅' : '跌幅'}

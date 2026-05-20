@@ -39,8 +39,12 @@ const schema = z.object({
   coin_pool_refresh_seconds: z.number().min(30).max(86400),
   coin_pool_fetch_mode: z.enum(['immediate', 'interval']),
   coin_pool_top_n: z.number().min(1).max(50),
+  /** 表单内以「万 USDT」录入，提交时 ×1e4 转为 USDT */
+  coin_pool_min_volume_24h: z.number().min(0).max(99999999),
   exclude_tradefi: z.coerce.boolean(),
 });
+
+const WAN = 1e4;
 
 interface Props {
   accounts: Account[];
@@ -82,6 +86,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       coin_pool_refresh_seconds: initialData.coin_pool_refresh_seconds ?? 3600,
       coin_pool_fetch_mode: initialData.coin_pool_fetch_mode ?? 'interval',
       coin_pool_top_n: initialData.coin_pool_top_n ?? 20,
+      coin_pool_min_volume_24h: (initialData.coin_pool_min_volume_24h ?? 0) / WAN,
       exclude_tradefi: initialData.exclude_tradefi ?? false,
     };
   }
@@ -116,7 +121,15 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     coin_pool_refresh_seconds: 3600,
     coin_pool_fetch_mode: 'interval',
     coin_pool_top_n: 20,
+    coin_pool_min_volume_24h: 0,
     exclude_tradefi: false,
+  };
+}
+
+function toApiPayload(data: StrategyFormData): StrategyFormData {
+  return {
+    ...data,
+    coin_pool_min_volume_24h: (data.coin_pool_min_volume_24h || 0) * WAN,
   };
 }
 
@@ -150,7 +163,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
       <h3 className="font-semibold mb-4">{initialData ? '编辑策略' : '新建策略'}</h3>
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
+      <form onSubmit={handleSubmit((data) => onSubmit(toApiPayload(data)))} className="space-y-3">
         <div className="grid grid-cols-3 gap-3">
           {!initialData && (
             <div>
@@ -308,6 +321,20 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <label className={labelClass}>抓取前几名</label>
               <input type="number" min={1} max={50} {...register('coin_pool_top_n', { valueAsNumber: true })} className={inputClass} />
               <span className="text-xs text-gray-600">默认20，最多50</span>
+            </div>
+            <div>
+              <label className={labelClass}>最低 24h 成交量（万 USDT）</label>
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                {...register('coin_pool_min_volume_24h', { valueAsNumber: true })}
+                className={inputClass}
+                placeholder="0"
+              />
+              <span className="text-xs text-gray-600">
+                0=不限制；低于该值的币不进本策略选币池（{direction === 'long' ? '做多' : '做空'}策略独立配置）
+              </span>
             </div>
           </div>
         )}
