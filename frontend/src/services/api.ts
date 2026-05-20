@@ -111,6 +111,9 @@ export const api = {
   // Coin pool
   getCoinPool: (source?: string): Promise<CoinPoolEntry[]> =>
     request<CoinPoolEntry[]>(`/coin-pool${source ? `?source=${source}` : ''}`),
+  /** 与调度器一致：按该策略成交量 / top_n / TradFi 过滤后的可开仓列表 */
+  getStrategyEffectiveCoinPool: (strategyId: number): Promise<CoinPoolEntry[]> =>
+    request<CoinPoolEntry[]>(`/strategies/${strategyId}/effective-coin-pool`),
   refreshCoinPool: (): Promise<{ status: string; message: string }> =>
     request('/coin-pool/refresh', { method: 'POST' }),
   getCoinPoolConfig: (): Promise<{ refresh_interval_seconds: number; pool_source: string; max_symbols: number }> =>

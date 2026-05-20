@@ -6,6 +6,7 @@ from ..database import async_session
 from ..models.coin_pool import CoinPool
 from ..config import now_beijing
 from .binance_service import BinanceService
+from .position_manager import _norm_sym
 
 logger = logging.getLogger(__name__)
 
@@ -83,22 +84,38 @@ class CoinPoolService:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
+    async def get_effective_pool_entries(
+        self,
+        *,
+        source: str | None = None,
+        limit: int = 0,
+        min_volume_24h: float = 0,
+        exclude_symbols_norm: set[str] | None = None,
+    ) -> list[CoinPool]:
+        """Strategy-facing pool: volume floor → optional symbol exclude → top N (rank order)."""
+        coins = await self.get_pool(source)
+        if min_volume_24h > 0:
+            coins = [c for c in coins if (c.volume_24h or 0) >= min_volume_24h]
+        if exclude_symbols_norm:
+            coins = [c for c in coins if _norm_sym(c.symbol) not in exclude_symbols_norm]
+        if limit > 0:
+            coins = coins[:limit]
+        return coins
+
     async def get_pool_symbols(
         self,
         source: str | None = None,
         limit: int = 0,
         min_volume_24h: float = 0,
+        exclude_symbols_norm: set[str] | None = None,
     ) -> list[str]:
-        """Get list of symbols from coin pool, optionally limited to top N.
-
-        min_volume_24h: USDT quote volume floor; 0 = no filter.
-        Filtering runs before top-N slice so rank order is preserved among qualifiers.
-        """
-        coins = await self.get_pool(source)
-        if min_volume_24h > 0:
-            coins = [c for c in coins if (c.volume_24h or 0) >= min_volume_24h]
-        if limit > 0:
-            coins = coins[:limit]
+        """Symbol list for scheduler — same rules as get_effective_pool_entries."""
+        coins = await self.get_effective_pool_entries(
+            source=source,
+            limit=limit,
+            min_volume_24h=min_volume_24h,
+            exclude_symbols_norm=exclude_symbols_norm,
+        )
         return [c.symbol for c in coins]
 
     async def get_pool_count(self) -> int:

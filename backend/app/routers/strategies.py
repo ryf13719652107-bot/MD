@@ -5,8 +5,10 @@ from ..database import get_db
 from ..models.strategy import Strategy
 from ..models.position import Position
 from ..schemas.strategy import StrategyCreate, StrategyUpdate, StrategyResponse
+from ..schemas.coin_pool import CoinPoolResponse
 from ..services.scheduler import strategy_scheduler
 from ..services.backup_service import backup_trade
+from ..services.coin_pool_service import coin_pool_service
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
@@ -45,6 +47,31 @@ async def get_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
     return StrategyResponse.model_validate(strategy)
+
+
+@router.get("/{strategy_id}/effective-coin-pool", response_model=list[CoinPoolResponse])
+async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = Depends(get_db)):
+    """本策略实盘用于新开仓的选币池（成交量 + top_n + TradFi 与调度器一致）。"""
+    strategy = await db.get(Strategy, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    if not strategy.use_coin_pool:
+        return []
+
+    tradefi_norm: set[str] = set()
+    if strategy.exclude_tradefi:
+        from ..services.binance_service import get_public_binance, get_cached_tradefi_symbols
+
+        public = await get_public_binance()
+        tradefi_norm = await get_cached_tradefi_symbols(public)
+
+    entries = await coin_pool_service.get_effective_pool_entries(
+        source=strategy.coin_pool_source,
+        limit=strategy.coin_pool_top_n,
+        min_volume_24h=float(strategy.coin_pool_min_volume_24h or 0),
+        exclude_symbols_norm=tradefi_norm if strategy.exclude_tradefi else None,
+    )
+    return [CoinPoolResponse.model_validate(c) for c in entries]
 
 
 @router.put("/{strategy_id}", response_model=StrategyResponse)

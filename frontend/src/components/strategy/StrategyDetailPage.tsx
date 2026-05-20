@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { formatUsdtVolume } from '../../utils/format';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
@@ -31,6 +31,8 @@ export default function StrategyDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [strategy, setStrategy] = useState<Strategy | null>(null);
   const [pool, setPool] = useState<CoinPoolEntry[]>([]);
+  const [rawPool, setRawPool] = useState<CoinPoolEntry[]>([]);
+  const [poolView, setPoolView] = useState<'effective' | 'raw'>('effective');
   const [positions, setPositions] = useState<any[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -38,17 +40,7 @@ export default function StrategyDetailPage() {
 
   const loadRef = useRef<() => void>(() => {});
 
-  const effectivePool = useMemo(() => {
-    if (!strategy) return pool;
-    let rows = [...pool];
-    const min = strategy.coin_pool_min_volume_24h ?? 0;
-    if (min > 0) {
-      rows = rows.filter((e) => (e.volume_24h ?? 0) >= min);
-    }
-    const n = strategy.coin_pool_top_n;
-    if (n > 0) rows = rows.slice(0, n);
-    return rows;
-  }, [pool, strategy]);
+  const displayPool = poolView === 'effective' ? pool : rawPool;
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -59,10 +51,23 @@ export default function StrategyDetailPage() {
 
       if (s.use_coin_pool) {
         try {
-          const source = s.coin_pool_source === 'both' ? undefined : s.coin_pool_source;
-          const p = await api.getCoinPool(source);
-          setPool(p);
-        } catch { setPool([]); }
+          const [effective, source] = await Promise.all([
+            api.getStrategyEffectiveCoinPool(Number(id)),
+            Promise.resolve(s.coin_pool_source === 'both' ? undefined : s.coin_pool_source),
+          ]);
+          setPool(effective);
+          try {
+            setRawPool(await api.getCoinPool(source));
+          } catch {
+            setRawPool([]);
+          }
+        } catch {
+          setPool([]);
+          setRawPool([]);
+        }
+      } else {
+        setPool([]);
+        setRawPool([]);
       }
 
       try {
@@ -216,16 +221,45 @@ export default function StrategyDetailPage() {
         {/* 区块2: 当前选币池 */}
         {strategy.use_coin_pool && (
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <h3 className="font-semibold mb-3 text-sm">
-              选币池
-              <span className="text-gray-500 ml-2 text-xs">
-                {strategy.coin_pool_source === 'both' ? '涨幅榜+跌幅榜' : strategy.coin_pool_source === 'gainers' ? '涨幅榜' : '跌幅榜'}
-                ({effectivePool.length} 个可交易
-                {(strategy.coin_pool_min_volume_24h ?? 0) > 0 ? '，已按成交量过滤' : ''})
-              </span>
-            </h3>
-            {effectivePool.length === 0 ? (
-              <div className="text-gray-600 text-sm py-4 text-center">暂无数据</div>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <h3 className="font-semibold text-sm">
+                选币池
+                <span className="text-gray-500 ml-2 text-xs font-normal">
+                  {strategy.coin_pool_source === 'both' ? '涨幅榜+跌幅榜' : strategy.coin_pool_source === 'gainers' ? '涨幅榜' : '跌幅榜'}
+                  （{displayPool.length} 个
+                  {poolView === 'effective' ? '可交易' : '未过滤'}）
+                </span>
+              </h3>
+              <div className="flex rounded-lg border border-gray-700 overflow-hidden text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPoolView('effective')}
+                  className={`px-2.5 py-1 ${poolView === 'effective' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}`}
+                >
+                  本策略可交易
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPoolView('raw')}
+                  className={`px-2.5 py-1 ${poolView === 'raw' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}`}
+                >
+                  全局未过滤
+                </button>
+              </div>
+            </div>
+            {poolView === 'effective' && (
+              <p className="text-xs text-gray-500 mb-2">
+                与实盘一致：前 {strategy.coin_pool_top_n} 名 + 成交量
+                {(strategy.coin_pool_min_volume_24h ?? 0) > 0
+                  ? ` ≥ ${(strategy.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`
+                  : '不限制'}
+                {strategy.exclude_tradefi ? ' + 已排除 TradFi' : ''}
+              </p>
+            )}
+            {displayPool.length === 0 ? (
+              <div className="text-gray-600 text-sm py-4 text-center">
+                {poolView === 'effective' ? '过滤后暂无可交易币种' : '暂无数据'}
+              </div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
@@ -240,7 +274,7 @@ export default function StrategyDetailPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {effectivePool.map((e) => (
+                    {displayPool.map((e) => (
                       <tr key={e.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
                         <td className="py-1.5 px-2 text-gray-400">#{e.rank}</td>
                         <td className="py-1.5 px-2 text-gray-200 font-mono">{e.symbol}</td>
