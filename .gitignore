@@ -36,3 +36,6 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# 本地部署说明（按需自建，不纳入远程仓库）
+部署教程.md

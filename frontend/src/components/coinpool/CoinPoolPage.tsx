@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { api } from '../../services/api';
 import type { CoinPoolEntry } from '../../types';
 import { RefreshCw, TrendingUp, TrendingDown, FlaskConical } from 'lucide-react';
+import { formatUsdtVolume } from '../../utils/format';
 
 export default function CoinPoolPage() {
   const [coins, setCoins] = useState<CoinPoolEntry[]>([]);
@@ -107,7 +108,7 @@ export default function CoinPoolPage() {
                       <td className={`p-1 ${item.price_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                         {item.price_change_pct >= 0 ? '+' : ''}{item.price_change_pct.toFixed(2)}%
                       </td>
-                      <td className="p-1 text-gray-400">{item.volume_24h ? (item.volume_24h / 1e6).toFixed(1) + 'M' : '-'}</td>
+                      <td className="p-1 text-gray-400">{formatUsdtVolume(item.volume_24h)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -180,7 +181,7 @@ export default function CoinPoolPage() {
                   <td className={`p-2 ${c.price_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                     {c.price_change_pct >= 0 ? '+' : ''}{c.price_change_pct.toFixed(2)}%
                   </td>
-                  <td className="p-2 text-gray-400">{c.volume_24h ? (c.volume_24h / 1e6).toFixed(1) + 'M' : '-'}</td>
+                  <td className="p-2 text-gray-400">{formatUsdtVolume(c.volume_24h)}</td>
                   <td className="p-2 text-gray-500 text-xs">{new Date(c.added_at).toLocaleString()}</td>
                 </tr>
               ))}
