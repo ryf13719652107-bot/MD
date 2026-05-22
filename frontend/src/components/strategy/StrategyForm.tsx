@@ -305,7 +305,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               </select>
               {watch('coin_pool_source') === 'range' && (
                 <span className="text-xs text-amber-500/90 block mt-0.5">
-                  扫描固定 ≥3000万 USDT 成交额；更严门槛用下方「最低24h成交量」；建议刷新间隔 ≥2 小时
+                  扫描≥3000万 USDT；入选需 4h 震荡指标(ADX/振幅等)，行情偏趋势时榜可能很少；建议刷新≥2小时
                 </span>
               )}
             </div>

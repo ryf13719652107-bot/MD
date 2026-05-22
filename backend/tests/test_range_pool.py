@@ -38,8 +38,11 @@ def test_calculate_adx_low_on_flat():
 def test_passes_range_filters():
     assert _passes_range_filters(18.0, 12.0, 3.0) is True
     assert _passes_range_filters(25.0, 12.0, 3.0) is False
-    assert _passes_range_filters(18.0, 5.0, 3.0) is False
-    assert _passes_range_filters(18.0, 12.0, 20.0) is False
+    assert _passes_range_filters(18.0, 4.0, 3.0) is False
+    assert _passes_range_filters(18.0, 45.0, 3.0) is True
+    assert _passes_range_filters(18.0, 55.0, 3.0) is False
+    assert _passes_range_filters(18.0, 12.0, 40.0) is True
+    assert _passes_range_filters(18.0, 12.0, 51.0) is False
 
 
 def test_oscillation_score_orders_lower_adx_higher():

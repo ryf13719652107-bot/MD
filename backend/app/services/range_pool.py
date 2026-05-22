@@ -15,12 +15,12 @@ from .binance_service import (
 
 logger = logging.getLogger(__name__)
 
-# 默认阈值（与文档建议一致）
+# 4h 震荡筛选阈值
 ADX_PERIOD = 14
 ADX_MAX = 22.0
-RANGE_MIN_PCT = 8.0
-RANGE_MAX_PCT = 22.0
-MAX_ABS_CHANGE_24H = 15.0
+RANGE_MIN_PCT = 5.0
+RANGE_MAX_PCT = 50.0
+MAX_ABS_CHANGE_24H = 50.0
 KLINE_TIMEFRAME = "4h"
 KLINE_LIMIT = 60
 # 扫描阶段固定门槛：仅拉成交额达标的候选（省 API）；策略成交量在读榜时再滤
@@ -137,18 +137,29 @@ def oscillation_score(
     return (ADX_MAX - adx) * 2.0 + range_term + vol_term - change_penalty
 
 
+def _range_filter_reject_reason(
+    adx: float,
+    range_pct: float,
+    price_change_pct: float,
+) -> str | None:
+    """未通过时返回原因标签，供统计日志。"""
+    if adx >= ADX_MAX:
+        return "adx_high"
+    if range_pct < RANGE_MIN_PCT:
+        return "range_low"
+    if range_pct > RANGE_MAX_PCT:
+        return "range_high"
+    if abs(price_change_pct) > MAX_ABS_CHANGE_24H:
+        return "change_24h"
+    return None
+
+
 def _passes_range_filters(
     adx: float,
     range_pct: float,
     price_change_pct: float,
 ) -> bool:
-    if adx >= ADX_MAX:
-        return False
-    if range_pct < RANGE_MIN_PCT or range_pct > RANGE_MAX_PCT:
-        return False
-    if abs(price_change_pct) > MAX_ABS_CHANGE_24H:
-        return False
-    return True
+    return _range_filter_reject_reason(adx, range_pct, price_change_pct) is None
 
 
 def build_scan_candidates(
@@ -219,6 +230,16 @@ async def fetch_range_oscillation_pool(
     )
 
     sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+    reject_stats: dict[str, int] = {
+        "klines_fail": 0,
+        "klines_short": 0,
+        "metric_none": 0,
+        "adx_high": 0,
+        "range_low": 0,
+        "range_high": 0,
+        "change_24h": 0,
+        "passed": 0,
+    }
 
     async def _scan_one(item: dict[str, Any]) -> Optional[dict[str, Any]]:
         sym = item["symbol"]
@@ -227,15 +248,23 @@ async def fetch_range_oscillation_pool(
                 klines = await binance.fetch_klines(sym, KLINE_TIMEFRAME, KLINE_LIMIT)
             except Exception as e:
                 logger.debug("range pool: %s klines failed: %s", sym, e)
+                reject_stats["klines_fail"] += 1
                 return None
         if not klines or len(klines) < ADX_PERIOD + 5:
+            reject_stats["klines_short"] += 1
             return None
         adx = calculate_adx(klines, ADX_PERIOD)
         range_pct = calculate_range_pct(klines)
         if adx is None or range_pct is None:
+            reject_stats["metric_none"] += 1
             return None
-        if not _passes_range_filters(adx, range_pct, item["price_change_pct"]):
+        reason = _range_filter_reject_reason(
+            adx, range_pct, item["price_change_pct"]
+        )
+        if reason:
+            reject_stats[reason] += 1
             return None
+        reject_stats["passed"] += 1
         score = oscillation_score(
             adx, range_pct, item["volume_24h"], item["price_change_pct"]
         )
@@ -264,10 +293,16 @@ async def fetch_range_oscillation_pool(
         })
 
     logger.info(
-        "Range pool: scan_vol_min=%.0f candidates=%d passed=%d return=%d",
-        MIN_CANDIDATE_VOLUME_24H,
+        "Range pool: candidates=%d passed=%d return=%d (limit=%d) reject=%s "
+        "thresholds adx<%.0f range=%.0f-%.0f |24h%%|<=%.0f",
         len(candidates),
         len(scored),
         len(result),
+        limit,
+        reject_stats,
+        ADX_MAX,
+        RANGE_MIN_PCT,
+        RANGE_MAX_PCT,
+        MAX_ABS_CHANGE_24H,
     )
     return result
