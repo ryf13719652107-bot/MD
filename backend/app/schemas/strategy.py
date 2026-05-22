@@ -46,7 +46,7 @@ class StrategyCreate(BaseModel):
         ge=0,
         description="最低 24h 成交额(USDT)，0=不限制；仅过滤本策略可开仓的选币池币种",
     )
-    exclude_tradefi: bool = False
+    exclude_tradefi: bool = True
 
 
 class StrategyUpdate(BaseModel):

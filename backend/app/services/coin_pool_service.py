@@ -159,7 +159,7 @@ class CoinPoolService:
         await self.sync_config_from_running_strategies()
         sources = sources or await self._running_pool_sources()
         for src in sources:
-            timeout = 300.0 if src == "range" else 90.0
+            timeout = 900.0 if src == "range" else 90.0
             try:
                 await asyncio.wait_for(
                     self.refresh_pool(binance_service, source=src),

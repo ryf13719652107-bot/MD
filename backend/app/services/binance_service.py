@@ -20,14 +20,63 @@ def _normalize_symbol_for_tradefi(s: str) -> str:
     return (s or "").replace("/", "").replace(":USDT", "").upper()
 
 
+# 币安 USDT-M 上的黄金/白银/原油等（含 TRADIFI 与部分永续命名）
+EXCLUDED_COMMODITY_SYMBOLS: frozenset[str] = frozenset({
+    "XAUUSDT",
+    "XAGUSDT",
+    "XPTUSDT",
+    "XPDUSDT",
+    "USOILUSDT",
+    "UKOILUSDT",
+    "OILUSDT",
+    "BRENTUSDT",
+    "WTIUSDT",
+    "CRUDEUSDT",
+    "NATGASUSDT",
+    "COPPERUSDT",
+})
+
+# 前缀匹配（base = 去掉 USDT 后），勿用 "GAS" 以免误伤加密货币 GASUSDT
+_NON_CRYPTO_BASE_PREFIXES: tuple[str, ...] = (
+    "XAU",
+    "XAG",
+    "XPT",
+    "XPD",
+    "USOIL",
+    "UKOIL",
+    "BRENT",
+    "WTI",
+    "CRUDE",
+    "NATGAS",
+    "COPPER",
+    "SILVER",
+    "GOLD",
+)
+
+
+def is_non_crypto_commodity_symbol(symbol: str) -> bool:
+    """黄金/白银/原油等非加密货币合约（静态表 + 前缀）。"""
+    s = _normalize_symbol_for_tradefi(symbol)
+    if s in EXCLUDED_COMMODITY_SYMBOLS:
+        return True
+    base = s[:-4] if s.endswith("USDT") and len(s) > 4 else s
+    return any(base.startswith(p) for p in _NON_CRYPTO_BASE_PREFIXES)
+
+
+def is_tradefi_or_commodity_symbol(symbol: str, tradefi_norm: frozenset[str]) -> bool:
+    s = _normalize_symbol_for_tradefi(symbol)
+    return s in tradefi_norm or is_non_crypto_commodity_symbol(s)
+
+
 async def get_cached_tradefi_symbols(binance: "BinanceService") -> frozenset[str]:
-    """Normalized symbols (e.g. SNDKUSDT) for TRADIFI_PERPETUAL + TRADING. Cached 1h."""
+    """TRADIFI_PERPETUAL + 黄金白银原油等；normalized，缓存 1h。"""
     global _TRADEFI_SYMBOLS_CACHE
     now = time.time()
     if _TRADEFI_SYMBOLS_CACHE is not None and now - _TRADEFI_SYMBOLS_CACHE[0] < _TRADEFI_CACHE_TTL:
         return _TRADEFI_SYMBOLS_CACHE[1]
     raw = await binance.fetch_tradefi_perpetual_symbols_raw()
     norm = frozenset(_normalize_symbol_for_tradefi(s) for s in raw)
+    norm = norm | EXCLUDED_COMMODITY_SYMBOLS
     _TRADEFI_SYMBOLS_CACHE = (now, norm)
     return norm
 

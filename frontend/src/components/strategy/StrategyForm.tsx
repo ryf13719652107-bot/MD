@@ -87,7 +87,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       coin_pool_fetch_mode: initialData.coin_pool_fetch_mode ?? 'interval',
       coin_pool_top_n: initialData.coin_pool_top_n ?? 20,
       coin_pool_min_volume_24h: (initialData.coin_pool_min_volume_24h ?? 0) / WAN,
-      exclude_tradefi: initialData.exclude_tradefi ?? false,
+      exclude_tradefi: initialData.exclude_tradefi ?? true,
     };
   }
   return {
@@ -122,7 +122,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     coin_pool_fetch_mode: 'interval',
     coin_pool_top_n: 20,
     coin_pool_min_volume_24h: 0,
-    exclude_tradefi: false,
+    exclude_tradefi: true,
   };
 }
 
@@ -279,8 +279,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           <div className="min-w-0">
             <div className="text-sm font-medium text-amber-100/95">排除 TradFi / 股票永续（如 SNDK、TSLA）</div>
             <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-              <strong className="text-gray-300">开启</strong>后，本策略不会交易币安 <code className="text-amber-200/80">TRADIFI_PERPETUAL</code> 合约；与选币池/固定交易对均生效。
-              全局选币池表里仍可能出现这些币种，仅本策略会跳过。
+              <strong className="text-gray-300">默认开启</strong>：排除股票 TradFi 永续及黄金/白银/原油等非加密货币合约；震荡榜刷新时也会剔除。已有持仓仍会管理。
             </p>
           </div>
         </div>

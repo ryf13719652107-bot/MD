@@ -147,7 +147,7 @@ export default function CoinPoolPage() {
               <option value="range">4h 震荡榜</option>
             </select>
             {config.pool_source === 'range' && (
-              <span className="text-xs text-amber-500/90 block mt-0.5">排除主流币；扫描仅 ≥3000万 USDT 成交额（最多约150个），建议刷新 ≥7200 秒</span>
+              <span className="text-xs text-amber-500/90 block mt-0.5">排除主流+TradFi/黄金白银原油；扫描≥3000万 USDT，最多500候选，建议刷新≥7200秒</span>
             )}
           </div>
           <div>

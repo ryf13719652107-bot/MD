@@ -7,7 +7,11 @@ import logging
 import math
 from typing import Any, Optional
 
-from .binance_service import BinanceService
+from .binance_service import (
+    BinanceService,
+    get_cached_tradefi_symbols,
+    is_tradefi_or_commodity_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +25,8 @@ KLINE_TIMEFRAME = "4h"
 KLINE_LIMIT = 60
 # 扫描阶段固定门槛：仅拉成交额达标的候选（省 API）；策略成交量在读榜时再滤
 MIN_CANDIDATE_VOLUME_24H = 30_000_000  # 3000 万 USDT
-# 最多扫描多少个币的 4h K 线（按成交额排序，排除主流币后取前 N）
-MAX_SCAN_COUNT = 150
+# 最多扫描多少个币的 4h K 线（按成交额排序，排除后取前 N）
+MAX_SCAN_COUNT = 500
 SCAN_CONCURRENCY = 8
 
 # 震荡榜不扫描、不入选（用户不做主流大盘）
@@ -151,17 +155,25 @@ def build_scan_candidates(
     ticker_items: list[dict[str, Any]],
     *,
     excluded_symbols: frozenset[str] = EXCLUDED_MAJOR_SYMBOLS,
+    tradefi_norm: frozenset[str] | None = None,
     min_volume_24h: float = MIN_CANDIDATE_VOLUME_24H,
     max_scan: int = MAX_SCAN_COUNT,
 ) -> list[dict[str, Any]]:
     """
-    候选 = 成交额达标 + 排除主流币，按成交额降序取前 max_scan 个再拉 4h K 线。
+    候选 = 成交额达标 + 排除主流/TradFi/黄金白银原油等，按成交额降序取前 max_scan。
     """
+    tradefi = tradefi_norm or frozenset()
+
+    def _skip(sym: str) -> bool:
+        if sym in excluded_symbols:
+            return True
+        return is_tradefi_or_commodity_symbol(sym, tradefi)
+
     eligible = [
         x
         for x in ticker_items
         if x.get("volume_24h", 0) >= min_volume_24h
-        and x.get("symbol") not in excluded_symbols
+        and not _skip(x.get("symbol", ""))
     ]
     eligible.sort(key=lambda x: -x["volume_24h"])
     return eligible[:max_scan]
@@ -199,7 +211,12 @@ async def fetch_range_oscillation_pool(
             "volume_24h": vol,
         })
 
-    candidates = build_scan_candidates(ticker_items, max_scan=scan_cap)
+    tradefi_norm = await get_cached_tradefi_symbols(binance)
+    candidates = build_scan_candidates(
+        ticker_items,
+        tradefi_norm=tradefi_norm,
+        max_scan=scan_cap,
+    )
 
     sem = asyncio.Semaphore(SCAN_CONCURRENCY)
 
