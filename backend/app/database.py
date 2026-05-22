@@ -59,3 +59,10 @@ async def init_db():
             )
         except Exception:
             pass
+
+        from .db_migrations.coin_pool_unique import migrate_coin_pool_symbol_source_unique
+
+        try:
+            await conn.run_sync(migrate_coin_pool_symbol_source_unique)
+        except Exception as e:
+            logger.warning("coin_pool (symbol, source) migration skipped or failed: %s", e)

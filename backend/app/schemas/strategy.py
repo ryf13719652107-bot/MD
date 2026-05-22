@@ -37,7 +37,7 @@ class StrategyCreate(BaseModel):
     leverage: int = Field(default=20, ge=1, le=125)
     # Coin pool
     use_coin_pool: bool = True
-    coin_pool_source: Literal["gainers", "losers", "both"] = "gainers"
+    coin_pool_source: Literal["gainers", "losers", "both", "range"] = "gainers"
     coin_pool_refresh_seconds: int = Field(default=3600, ge=30, le=86400)
     coin_pool_fetch_mode: Literal["immediate", "interval"] = "interval"
     coin_pool_top_n: int = Field(default=20, ge=1, le=50)
@@ -75,7 +75,7 @@ class StrategyUpdate(BaseModel):
     slippage_pct: Optional[float] = Field(default=None, ge=0, le=10)
     leverage: Optional[int] = Field(default=None, ge=1, le=125)
     use_coin_pool: Optional[bool] = None
-    coin_pool_source: Optional[Literal["gainers", "losers", "both"]] = None
+    coin_pool_source: Optional[Literal["gainers", "losers", "both", "range"]] = None
     coin_pool_refresh_seconds: Optional[int] = Field(default=None, ge=30, le=86400)
     coin_pool_fetch_mode: Optional[Literal["immediate", "interval"]] = None
     coin_pool_top_n: Optional[int] = Field(default=None, ge=1, le=50)

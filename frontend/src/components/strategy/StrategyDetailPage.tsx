@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { formatUsdtVolume } from '../../utils/format';
+import { poolSourceBadgeClass, poolSourceLabel } from '../../utils/poolSource';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import type { Strategy } from '../../types/strategy';
@@ -185,7 +186,7 @@ export default function StrategyDetailPage() {
             <span className={labelClass}>选币池</span>
             <div className={valClass}>
               {strategy.use_coin_pool
-                ? `${strategy.coin_pool_source === 'both' ? '涨幅+跌幅' : strategy.coin_pool_source === 'gainers' ? '仅涨幅' : '仅跌幅'} / ${Math.round(strategy.coin_pool_refresh_seconds / 60)}分钟 / ${strategy.coin_pool_fetch_mode === 'immediate' ? '立即抓取' : '间隔抓取'}`
+                ? `${poolSourceLabel(strategy.coin_pool_source)} / ${Math.round(strategy.coin_pool_refresh_seconds / 60)}分钟 / ${strategy.coin_pool_fetch_mode === 'immediate' ? '立即抓取' : '间隔抓取'}`
                 : '固定交易对'}
             </div>
           </div>
@@ -225,7 +226,7 @@ export default function StrategyDetailPage() {
               <h3 className="font-semibold text-sm">
                 选币池
                 <span className="text-gray-500 ml-2 text-xs font-normal">
-                  {strategy.coin_pool_source === 'both' ? '涨幅榜+跌幅榜' : strategy.coin_pool_source === 'gainers' ? '涨幅榜' : '跌幅榜'}
+                  {poolSourceLabel(strategy.coin_pool_source)}
                   （{displayPool.length} 个
                   {poolView === 'effective' ? '可交易' : '未过滤'}）
                 </span>
@@ -249,10 +250,12 @@ export default function StrategyDetailPage() {
             </div>
             {poolView === 'effective' && (
               <p className="text-xs text-gray-500 mb-2">
-                与实盘一致：涨幅/跌幅榜前 {strategy.coin_pool_top_n} 名内 + 成交量
+                {strategy.coin_pool_source === 'range'
+                  ? `与实盘一致：4h 震荡榜内前 ${strategy.coin_pool_top_n} 名 + 成交量`
+                  : `与实盘一致：榜单前 ${strategy.coin_pool_top_n} 名内 + 成交量`}
                 {(strategy.coin_pool_min_volume_24h ?? 0) > 0
                   ? ` ≥ ${(strategy.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`
-                  : '不限制'}
+                  : ' 不限制'}
                 {strategy.exclude_tradefi ? ' + 已排除 TradFi' : ''}
               </p>
             )}
@@ -283,8 +286,8 @@ export default function StrategyDetailPage() {
                         </td>
                         <td className="py-1.5 px-2 text-right text-gray-400">{formatUsdtVolume(e.volume_24h)}</td>
                         <td className="py-1.5 px-2 text-right">
-                          <span className={`px-1.5 py-0.5 rounded text-xs ${e.source === 'gainers' ? 'bg-green-600/20 text-green-400' : 'bg-red-600/20 text-red-400'}`}>
-                            {e.source === 'gainers' ? '涨幅' : '跌幅'}
+                          <span className={`px-1.5 py-0.5 rounded text-xs ${poolSourceBadgeClass(e.source)}`}>
+                            {poolSourceLabel(e.source)}
                           </span>
                         </td>
                         <td className="py-1.5 px-2 text-right text-gray-500">{fmtTime(e.added_at)}</td>

@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy import select, delete, func
 from ..database import async_session
 from ..models.coin_pool import CoinPool
+from ..models.strategy import Strategy
 from ..config import now_beijing
 from .binance_service import BinanceService
 from .position_manager import _norm_sym
@@ -38,21 +39,102 @@ class CoinPoolService:
     def update_config(self, **kwargs):
         self._config.update(kwargs)
 
-    async def refresh_pool(self, binance_service: BinanceService):
-        """Fetch top movers and update the coin pool in database."""
-        movers = await binance_service.fetch_top_movers(
-            source=self._config["pool_source"],
-            limit=self._config["max_symbols"],
-        )
+    async def sync_config_from_running_strategies(self) -> None:
+        """按运行中策略汇总刷新周期与入库条数；仅一条策略时同步测试用 pool_source。"""
+        async with async_session() as session:
+            r = await session.execute(
+                select(Strategy).where(
+                    Strategy.use_coin_pool.is_(True),
+                    Strategy.status == "running",
+                )
+            )
+            strategies = list(r.scalars().all())
+        if not strategies:
+            return
+        max_top = max(s.coin_pool_top_n for s in strategies)
+        min_refresh = min(s.coin_pool_refresh_seconds for s in strategies)
+        patch: dict = {
+            "max_symbols": max(max_top, self._config.get("max_symbols", 30)),
+            "refresh_interval_seconds": min_refresh,
+        }
+        if len(strategies) == 1:
+            patch["pool_source"] = strategies[0].coin_pool_source
+        self.update_config(**patch)
+
+    async def _limit_for_source(self, source: str) -> int:
+        """该来源下运行策略所需的最大 top_n；无运行策略时用 max_symbols。"""
+        async with async_session() as session:
+            stmt = select(Strategy.coin_pool_top_n).where(
+                Strategy.use_coin_pool.is_(True),
+                Strategy.status == "running",
+            )
+            if source == "both":
+                stmt = stmt.where(Strategy.coin_pool_source == "both")
+            elif source in ("gainers", "losers"):
+                stmt = stmt.where(Strategy.coin_pool_source.in_([source, "both"]))
+            else:
+                stmt = stmt.where(Strategy.coin_pool_source == source)
+            tops = [row[0] for row in (await session.execute(stmt)).all()]
+        if tops:
+            return max(tops)
+        return int(self._config.get("max_symbols", 30))
+
+    async def _running_pool_sources(self) -> list[str]:
+        """运行中策略需要的选币池来源（去重）；无运行策略时用全局配置。"""
+        async with async_session() as session:
+            r = await session.execute(
+                select(Strategy.coin_pool_source).where(
+                    Strategy.use_coin_pool.is_(True),
+                    Strategy.status == "running",
+                ).distinct()
+            )
+            rows = [row[0] for row in r.all() if row[0]]
+        if not rows:
+            return [self._config["pool_source"]]
+        out: list[str] = []
+        for s in rows:
+            if s == "both":
+                if "both" not in out:
+                    out.append("both")
+            elif s not in out:
+                out.append(s)
+        return out
+
+    async def refresh_pool(
+        self,
+        binance_service: BinanceService,
+        source: str | None = None,
+        *,
+        limit: int | None = None,
+    ):
+        """拉取并写入指定来源的选币池；只替换该来源行，与其它来源互不影响。"""
+        source = source or self._config["pool_source"]
+        if limit is None:
+            limit = await self._limit_for_source(source)
+        if source == "range":
+            from .range_pool import fetch_range_oscillation_pool
+
+            movers = await fetch_range_oscillation_pool(binance_service, limit=limit)
+        else:
+            movers = await binance_service.fetch_top_movers(
+                source=source,
+                limit=limit,
+            )
         if not movers:
             self._last_refresh_ok = False
-            self._last_error = "选币池接口返回空列表"
+            self._last_error = f"选币池[{source}]返回空列表"
             logger.warning(
-                "选币池拉取结果为空，保留库内旧池与上次刷新时间（不清空表，避免节拍丢失）"
+                "选币池[%s]拉取结果为空，保留该来源旧数据与其它来源",
+                source,
             )
             return
         async with async_session() as session:
-            await session.execute(delete(CoinPool))
+            if source == "both":
+                await session.execute(
+                    delete(CoinPool).where(CoinPool.source.in_(["gainers", "losers"]))
+                )
+            else:
+                await session.execute(delete(CoinPool).where(CoinPool.source == source))
             for item in movers:
                 coin = CoinPool(
                     symbol=item["symbol"],
@@ -68,18 +150,42 @@ class CoinPoolService:
         self._last_refresh_ok = True
         self._last_refresh_time = now_beijing().timestamp()
         self._last_error = ""
-        logger.info("Coin pool refreshed: %d symbols", len(movers))
+        logger.info("Coin pool refreshed [%s]: %d symbols", source, len(movers))
+
+    async def refresh_pool_sources(
+        self, binance_service: BinanceService, sources: list[str] | None = None
+    ) -> None:
+        """只刷新当前运行策略用到的来源（gainers / losers / both / range 各管各的）。"""
+        await self.sync_config_from_running_strategies()
+        sources = sources or await self._running_pool_sources()
+        for src in sources:
+            timeout = 300.0 if src == "range" else 90.0
+            try:
+                await asyncio.wait_for(
+                    self.refresh_pool(binance_service, source=src),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                self._last_refresh_ok = False
+                self._last_error = f"选币池[{src}]刷新超时({int(timeout)}s)"
+                logger.error("Coin pool refresh timed out for source=%s", src)
+            except Exception as e:
+                self._last_refresh_ok = False
+                self._last_error = str(e)[:200]
+                logger.error("Coin pool refresh error source=%s: %s", src, e)
 
     async def get_pool(self, source: str | None = None) -> list[CoinPool]:
         """Get current coin pool from database.
 
         Args:
-            source: 'gainers', 'losers', 'both', or None (all).
+            source: 'gainers', 'losers', 'range', 'both', or None (all).
                     'both' returns all coins without source filtering.
         """
         async with async_session() as session:
             stmt = select(CoinPool).order_by(CoinPool.rank)
-            if source and source != "both":
+            if source == "both":
+                stmt = stmt.where(CoinPool.source.in_(["gainers", "losers"]))
+            elif source:
                 stmt = stmt.where(CoinPool.source == source)
             result = await session.execute(stmt)
             return list(result.scalars().all())
@@ -155,11 +261,7 @@ class CoinPoolService:
                     )
                     await asyncio.sleep(delay)
                 try:
-                    await asyncio.wait_for(self.refresh_pool(binance_service), timeout=90.0)
-                except asyncio.TimeoutError:
-                    self._last_refresh_ok = False
-                    self._last_error = "选币池刷新超时(90s)"
-                    logger.error("Coin pool refresh timed out")
+                    await self.refresh_pool_sources(binance_service)
                 except Exception as e:
                     self._last_refresh_ok = False
                     self._last_error = str(e)[:200]

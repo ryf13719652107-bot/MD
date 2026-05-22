@@ -3,6 +3,7 @@ import { api } from '../../services/api';
 import type { CoinPoolEntry } from '../../types';
 import { RefreshCw, TrendingUp, TrendingDown, FlaskConical } from 'lucide-react';
 import { formatUsdtVolume } from '../../utils/format';
+import { poolSourceBadgeClass, poolSourceLabel, poolSourceTextClass } from '../../utils/poolSource';
 
 export default function CoinPoolPage() {
   const [coins, setCoins] = useState<CoinPoolEntry[]>([]);
@@ -102,8 +103,8 @@ export default function CoinPoolPage() {
                     <tr key={i} className="border-t border-gray-700/50">
                       <td className="p-1 text-gray-400">{item.rank}</td>
                       <td className="p-1 font-medium">{item.symbol}</td>
-                      <td className={`p-1 ${item.source === 'gainers' ? 'text-green-400' : 'text-red-400'}`}>
-                        {item.source === 'gainers' ? '涨幅榜' : '跌幅榜'}
+                      <td className={`p-1 ${poolSourceTextClass(item.source)}`}>
+                        {poolSourceLabel(item.source)}
                       </td>
                       <td className={`p-1 ${item.price_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                         {item.price_change_pct >= 0 ? '+' : ''}{item.price_change_pct.toFixed(2)}%
@@ -126,6 +127,7 @@ export default function CoinPoolPage() {
               <option value="">全部</option>
               <option value="gainers">涨幅榜</option>
               <option value="losers">跌幅榜</option>
+              <option value="range">4h 震荡榜</option>
             </select>
           </div>
           <div>
@@ -142,7 +144,11 @@ export default function CoinPoolPage() {
               <option value="both">两者</option>
               <option value="gainers">仅涨幅榜</option>
               <option value="losers">仅跌幅榜</option>
+              <option value="range">4h 震荡榜</option>
             </select>
+            {config.pool_source === 'range' && (
+              <span className="text-xs text-amber-500/90 block mt-0.5">排除主流币；扫描仅 ≥3000万 USDT 成交额（最多约150个），建议刷新 ≥7200 秒</span>
+            )}
           </div>
           <div>
             <label className="text-xs text-gray-400 block mb-1">最大数量</label>
@@ -173,9 +179,9 @@ export default function CoinPoolPage() {
                   <td className="p-2 text-gray-400">#{c.rank}</td>
                   <td className="p-2 font-medium">{c.symbol}</td>
                   <td className="p-2">
-                    <span className={`flex items-center gap-1 ${c.source === 'gainers' ? 'text-green-400' : 'text-red-400'}`}>
-                      {c.source === 'gainers' ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-                      {c.source === 'gainers' ? '涨幅榜' : '跌幅榜'}
+                    <span className={`flex items-center gap-1 ${poolSourceTextClass(c.source)}`}>
+                      {c.source === 'gainers' ? <TrendingUp size={14} /> : c.source === 'losers' ? <TrendingDown size={14} /> : null}
+                      {poolSourceLabel(c.source)}
                     </span>
                   </td>
                   <td className={`p-2 ${c.price_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>

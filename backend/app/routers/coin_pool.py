@@ -20,7 +20,7 @@ async def refresh_coin_pool():
 
     try:
         binance = await get_public_binance()
-        await coin_pool_service.refresh_pool(binance)
+        await coin_pool_service.refresh_pool_sources(binance)
         return {"status": "ok", "message": "选币池刷新成功"}
     except Exception as e:
         return {"status": "error", "message": f"刷新失败: {str(e)}"}
@@ -44,7 +44,13 @@ async def test_fetch_coin_pool():
 
     try:
         binance = await get_public_binance()
-        movers = await binance.fetch_top_movers(source="both", limit=20)
+        src = coin_pool_service.config.get("pool_source", "both")
+        if src == "range":
+            from ..services.range_pool import fetch_range_oscillation_pool
+
+            movers = await fetch_range_oscillation_pool(binance, limit=20)
+        else:
+            movers = await binance.fetch_top_movers(source=src, limit=20)
         return {
             "success": True,
             "count": len(movers),

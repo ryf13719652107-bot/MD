@@ -5,7 +5,7 @@ from typing import Literal, Optional
 
 class CoinPoolConfig(BaseModel):
     refresh_interval_seconds: int = Field(default=300, ge=30, le=3600)
-    pool_source: Literal["gainers", "losers", "both"] = "both"
+    pool_source: Literal["gainers", "losers", "both", "range"] = "both"
     max_symbols: int = Field(default=20, ge=5, le=50)
 
 

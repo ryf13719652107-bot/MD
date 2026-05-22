@@ -26,7 +26,7 @@ export interface Strategy {
   slippage_pct: number;
   leverage: number;
   use_coin_pool: boolean;
-  coin_pool_source: 'gainers' | 'losers' | 'both';
+  coin_pool_source: 'gainers' | 'losers' | 'both' | 'range';
   coin_pool_refresh_seconds: number;
   coin_pool_fetch_mode: 'immediate' | 'interval';
   coin_pool_top_n: number;
@@ -69,7 +69,7 @@ export interface StrategyFormData {
   slippage_pct: number;
   leverage: number;
   use_coin_pool: boolean;
-  coin_pool_source: 'gainers' | 'losers' | 'both';
+  coin_pool_source: 'gainers' | 'losers' | 'both' | 'range';
   coin_pool_refresh_seconds: number;
   coin_pool_fetch_mode: 'immediate' | 'interval';
   coin_pool_top_n: number;

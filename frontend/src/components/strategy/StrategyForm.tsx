@@ -35,7 +35,7 @@ const schema = z.object({
   stop_loss_pct: z.number().min(0.1).max(100),
   leverage: z.number().min(1).max(125),
   use_coin_pool: z.coerce.boolean(),
-  coin_pool_source: z.enum(['gainers', 'losers', 'both']),
+  coin_pool_source: z.enum(['gainers', 'losers', 'both', 'range']),
   coin_pool_refresh_seconds: z.number().min(30).max(86400),
   coin_pool_fetch_mode: z.enum(['immediate', 'interval']),
   coin_pool_top_n: z.number().min(1).max(50),
@@ -299,10 +299,16 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <div>
               <label className={labelClass}>选币池来源</label>
               <select {...register('coin_pool_source')} className={inputClass}>
+                <option value="range">4h 震荡榜（排除主流币）</option>
                 <option value="both">涨幅榜 + 跌幅榜</option>
                 <option value="gainers">仅涨幅榜</option>
                 <option value="losers">仅跌幅榜</option>
               </select>
+              {watch('coin_pool_source') === 'range' && (
+                <span className="text-xs text-amber-500/90 block mt-0.5">
+                  扫描固定 ≥3000万 USDT 成交额；更严门槛用下方「最低24h成交量」；建议刷新间隔 ≥2 小时
+                </span>
+              )}
             </div>
             <div>
               <label className={labelClass}>选币池刷新间隔(秒)</label>

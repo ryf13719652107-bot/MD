@@ -93,23 +93,21 @@ async def lifespan(app: FastAPI):
     logger.info("Step 4/6: get_public_binance...")
     public_binance = await get_public_binance()
 
-    # Apply coin pool config from strategies
     logger.info("Step 5/6: coin pool config...")
-    async with async_session() as session:
-        from sqlalchemy import select
-        result = await session.execute(
-            select(Strategy).where(Strategy.use_coin_pool == True, Strategy.status == "running").order_by(Strategy.coin_pool_refresh_seconds).limit(1)
-        )
-        strategy_with_pool = result.scalar()
-        if strategy_with_pool:
-            coin_pool_service.update_config(
-                refresh_interval_seconds=strategy_with_pool.coin_pool_refresh_seconds,
-                pool_source=strategy_with_pool.coin_pool_source,
-            )
+    await coin_pool_service.sync_config_from_running_strategies()
 
     logger.info("Step 6/6: start_auto_refresh...")
     await coin_pool_service.start_auto_refresh(public_binance)
     logger.info("Coin pool auto-refresh started")
+
+    async def _bootstrap_pool_refresh():
+        await asyncio.sleep(3)
+        try:
+            await coin_pool_service.refresh_pool_sources(public_binance)
+        except Exception as e:
+            logger.warning("Coin pool bootstrap refresh: %s", e)
+
+    asyncio.create_task(_bootstrap_pool_refresh())
     logger.info("Backend ready")
     yield
     logger.info("Shutting down...")
