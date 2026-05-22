@@ -47,6 +47,10 @@ class StrategyCreate(BaseModel):
         description="最低 24h 成交额(USDT)，0=不限制；仅过滤本策略可开仓的选币池币种",
     )
     exclude_tradefi: bool = True
+    exclude_delisting: bool = Field(
+        default=True,
+        description="排除 14 天内下架或非 TRADING 的 USDT 永续",
+    )
 
 
 class StrategyUpdate(BaseModel):
@@ -81,6 +85,7 @@ class StrategyUpdate(BaseModel):
     coin_pool_top_n: Optional[int] = Field(default=None, ge=1, le=50)
     coin_pool_min_volume_24h: Optional[float] = Field(default=None, ge=0)
     exclude_tradefi: Optional[bool] = None
+    exclude_delisting: Optional[bool] = None
 
 
 class StrategyResponse(BaseModel):
@@ -117,6 +122,7 @@ class StrategyResponse(BaseModel):
     coin_pool_top_n: int
     coin_pool_min_volume_24h: float
     exclude_tradefi: bool
+    exclude_delisting: bool
     status: str
     started_at: Optional[datetime] = None
     last_rsi: Optional[float] = None

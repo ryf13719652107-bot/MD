@@ -42,6 +42,7 @@ const schema = z.object({
   /** 表单内以「万 USDT」录入，提交时 ×1e4 转为 USDT */
   coin_pool_min_volume_24h: z.number().min(0).max(99999999),
   exclude_tradefi: z.coerce.boolean(),
+  exclude_delisting: z.coerce.boolean(),
 });
 
 const WAN = 1e4;
@@ -88,6 +89,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       coin_pool_top_n: initialData.coin_pool_top_n ?? 20,
       coin_pool_min_volume_24h: (initialData.coin_pool_min_volume_24h ?? 0) / WAN,
       exclude_tradefi: initialData.exclude_tradefi ?? true,
+      exclude_delisting: initialData.exclude_delisting ?? true,
     };
   }
   return {
@@ -123,6 +125,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     coin_pool_top_n: 20,
     coin_pool_min_volume_24h: 0,
     exclude_tradefi: true,
+    exclude_delisting: true,
   };
 }
 
@@ -280,6 +283,19 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <div className="text-sm font-medium text-amber-100/95">排除 TradFi / 股票永续（如 SNDK、TSLA）</div>
             <p className="text-xs text-gray-400 mt-1 leading-relaxed">
               <strong className="text-gray-300">默认开启</strong>：排除股票 TradFi 永续及黄金/白银/原油等非加密货币合约；震荡榜刷新时也会剔除。已有持仓仍会管理。
+            </p>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-orange-500/35 bg-orange-950/20 px-3 py-2.5 flex items-start gap-3">
+          <label className="relative inline-flex items-center cursor-pointer mt-0.5 shrink-0">
+            <input type="checkbox" {...register('exclude_delisting')} className="sr-only peer" />
+            <div className="w-9 h-5 bg-gray-600 peer-checked:bg-orange-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
+          </label>
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-orange-100/95">排除快下架合约（14 天内）</div>
+            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+              依据币安合约 <code className="text-orange-200/80">exchangeInfo</code>：非 TRADING 或交割日在 14 天内不进榜、不开新仓。震荡榜刷新同样剔除。
             </p>
           </div>
         </div>

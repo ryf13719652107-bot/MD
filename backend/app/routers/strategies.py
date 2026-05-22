@@ -9,6 +9,7 @@ from ..schemas.coin_pool import CoinPoolResponse
 from ..services.scheduler import strategy_scheduler
 from ..services.backup_service import backup_trade
 from ..services.coin_pool_service import coin_pool_service
+from ..services.strategy_flags import exclude_delisting_enabled
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
@@ -58,18 +59,20 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
     if not strategy.use_coin_pool:
         return []
 
-    tradefi_norm: set[str] = set()
-    if strategy.exclude_tradefi:
-        from ..services.binance_service import get_public_binance, get_cached_tradefi_symbols
+    from ..services.binance_service import get_public_binance, get_strategy_pool_exclude_symbols
 
-        public = await get_public_binance()
-        tradefi_norm = await get_cached_tradefi_symbols(public)
+    public = await get_public_binance()
+    exclude_norm = await get_strategy_pool_exclude_symbols(
+        public,
+        exclude_tradefi=bool(strategy.exclude_tradefi),
+        exclude_delisting=exclude_delisting_enabled(strategy),
+    )
 
     entries = await coin_pool_service.get_effective_pool_entries(
         source=strategy.coin_pool_source,
         limit=strategy.coin_pool_top_n,
         min_volume_24h=float(strategy.coin_pool_min_volume_24h or 0),
-        exclude_symbols_norm=tradefi_norm if strategy.exclude_tradefi else None,
+        exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
     )
     return [CoinPoolResponse.model_validate(c) for c in entries]
 

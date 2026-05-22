@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from .binance_service import (
     BinanceService,
+    get_cached_delisting_soon_symbols,
     get_cached_tradefi_symbols,
     is_tradefi_or_commodity_symbol,
 )
@@ -167,16 +168,19 @@ def build_scan_candidates(
     *,
     excluded_symbols: frozenset[str] = EXCLUDED_MAJOR_SYMBOLS,
     tradefi_norm: frozenset[str] | None = None,
+    delisting_norm: frozenset[str] | None = None,
     min_volume_24h: float = MIN_CANDIDATE_VOLUME_24H,
     max_scan: int = MAX_SCAN_COUNT,
 ) -> list[dict[str, Any]]:
     """
-    候选 = 成交额达标 + 排除主流/TradFi/黄金白银原油等，按成交额降序取前 max_scan。
+    候选 = 成交额达标 + 排除主流/TradFi/commodity/14天内下架，按成交额降序取前 max_scan。
     """
     tradefi = tradefi_norm or frozenset()
+    delisting = delisting_norm or frozenset()
 
     def _skip(sym: str) -> bool:
-        if sym in excluded_symbols:
+        s = sym.upper().replace("/", "").replace(":USDT", "")
+        if s in excluded_symbols or s in delisting:
             return True
         return is_tradefi_or_commodity_symbol(sym, tradefi)
 
@@ -223,9 +227,11 @@ async def fetch_range_oscillation_pool(
         })
 
     tradefi_norm = await get_cached_tradefi_symbols(binance)
+    delisting_norm = await get_cached_delisting_soon_symbols(binance)
     candidates = build_scan_candidates(
         ticker_items,
         tradefi_norm=tradefi_norm,
+        delisting_norm=delisting_norm,
         max_scan=scan_cap,
     )
 

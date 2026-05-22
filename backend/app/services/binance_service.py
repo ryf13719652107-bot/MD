@@ -8,12 +8,16 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _TRADEFI_SYMBOLS_CACHE: tuple[float, frozenset[str]] | None = None
+_DELISTING_SOON_CACHE: tuple[float, frozenset[str]] | None = None
 _TRADEFI_CACHE_TTL = 3600.0
+DELIST_LOOKAHEAD_DAYS = 14
+DELIST_LOOKAHEAD_MS = DELIST_LOOKAHEAD_DAYS * 24 * 3600 * 1000
 
 
 def tradefi_cache_clear():
-    global _TRADEFI_SYMBOLS_CACHE
+    global _TRADEFI_SYMBOLS_CACHE, _DELISTING_SOON_CACHE
     _TRADEFI_SYMBOLS_CACHE = None
+    _DELISTING_SOON_CACHE = None
 
 
 def _normalize_symbol_for_tradefi(s: str) -> str:
@@ -66,6 +70,54 @@ def is_non_crypto_commodity_symbol(symbol: str) -> bool:
 def is_tradefi_or_commodity_symbol(symbol: str, tradefi_norm: frozenset[str]) -> bool:
     s = _normalize_symbol_for_tradefi(symbol)
     return s in tradefi_norm or is_non_crypto_commodity_symbol(s)
+
+
+def _symbol_delisting_soon(info: dict, now_ms: int) -> bool:
+    """非 TRADING 或 deliveryDate 在 14 天内视为将下架。"""
+    status = (info.get("status") or "").upper()
+    if status != "TRADING":
+        return True
+    dd = info.get("deliveryDate")
+    if dd is None:
+        return False
+    try:
+        dms = int(dd)
+    except (TypeError, ValueError):
+        return False
+    # 0/缺失常表示永续无固定交割；勿当成已过期
+    if dms <= 0:
+        return False
+    if dms <= now_ms:
+        return True
+    return (dms - now_ms) <= DELIST_LOOKAHEAD_MS
+
+
+async def get_cached_delisting_soon_symbols(binance: "BinanceService") -> frozenset[str]:
+    """14 天内下架或非 TRADING 的 USDT 永续（normalized），缓存 1h。"""
+    global _DELISTING_SOON_CACHE
+    now = time.time()
+    if _DELISTING_SOON_CACHE is not None and now - _DELISTING_SOON_CACHE[0] < _TRADEFI_CACHE_TTL:
+        return _DELISTING_SOON_CACHE[1]
+    raw = await binance.fetch_delisting_soon_symbols_raw()
+    norm = frozenset(_normalize_symbol_for_tradefi(s) for s in raw)
+    _DELISTING_SOON_CACHE = (now, norm)
+    logger.info("Delisting-soon symbols (<%dd): %d", DELIST_LOOKAHEAD_DAYS, len(norm))
+    return norm
+
+
+async def get_strategy_pool_exclude_symbols(
+    binance: "BinanceService",
+    *,
+    exclude_tradefi: bool = False,
+    exclude_delisting: bool = True,
+) -> frozenset[str] | None:
+    """策略选币/开仓用排除集合（normalized）。"""
+    merged: set[str] = set()
+    if exclude_tradefi:
+        merged |= set(await get_cached_tradefi_symbols(binance))
+    if exclude_delisting:
+        merged |= set(await get_cached_delisting_soon_symbols(binance))
+    return frozenset(merged) if merged else None
 
 
 async def get_cached_tradefi_symbols(binance: "BinanceService") -> frozenset[str]:
@@ -129,19 +181,34 @@ class BinanceService:
         self._created_at = time.time()
         logger.info("BinanceService TTL expired, recreated exchange instances")
 
-    async def fetch_tradefi_perpetual_symbols_raw(self) -> set[str]:
-        """USDM symbols (BTCUSDT-style) that are TRADIFI_PERPETUAL and TRADING (public exchangeInfo)."""
+    async def fetch_exchange_info_symbols(self) -> list[dict]:
         try:
             r = await self.exchange.fapiPublicGetExchangeInfo()
         except Exception as e:
-            logger.warning("fapiPublicGetExchangeInfo (TradFi list) failed: %s", e)
-            return set()
+            logger.warning("fapiPublicGetExchangeInfo failed: %s", e)
+            return []
+        return list(r.get("symbols") or [])
+
+    async def fetch_tradefi_perpetual_symbols_raw(self) -> set[str]:
+        """USDM symbols (BTCUSDT-style) that are TRADIFI_PERPETUAL and TRADING."""
         out: set[str] = set()
-        for x in r.get("symbols") or []:
+        for x in await self.fetch_exchange_info_symbols():
             if x.get("status") == "TRADING" and x.get("contractType") == "TRADIFI_PERPETUAL":
                 sym = x.get("symbol")
                 if sym:
                     out.add(sym)
+        return out
+
+    async def fetch_delisting_soon_symbols_raw(self) -> set[str]:
+        """USDT 本位合约中 14 天内下架或非 TRADING 的 symbol（BTCUSDT 格式）。"""
+        now_ms = int(time.time() * 1000)
+        out: set[str] = set()
+        for x in await self.fetch_exchange_info_symbols():
+            if x.get("quoteAsset") != "USDT":
+                continue
+            sym = x.get("symbol")
+            if sym and _symbol_delisting_soon(x, now_ms):
+                out.add(sym)
         return out
 
     async def _safe_close(self, ex):

@@ -257,6 +257,7 @@ export default function StrategyDetailPage() {
                   ? ` ≥ ${(strategy.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`
                   : ' 不限制'}
                 {strategy.exclude_tradefi ? ' + 已排除 TradFi' : ''}
+                {strategy.exclude_delisting !== false ? ' + 已排除14天内下架' : ''}
               </p>
             )}
             {displayPool.length === 0 ? (

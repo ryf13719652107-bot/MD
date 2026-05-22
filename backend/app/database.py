@@ -42,6 +42,7 @@ async def init_db():
             "ALTER TABLE positions ADD COLUMN opened_at TIMESTAMP",
             "ALTER TABLE positions ADD COLUMN closed_at TIMESTAMP",
             "ALTER TABLE strategies ADD COLUMN exclude_tradefi BOOLEAN DEFAULT 1",
+            "ALTER TABLE strategies ADD COLUMN exclude_delisting BOOLEAN DEFAULT 1",
             "ALTER TABLE strategies ADD COLUMN coin_pool_min_volume_24h FLOAT DEFAULT 0",
         ]
         for sql in migrations:
@@ -66,3 +67,13 @@ async def init_db():
             await conn.run_sync(migrate_coin_pool_symbol_source_unique)
         except Exception as e:
             logger.warning("coin_pool (symbol, source) migration skipped or failed: %s", e)
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET exclude_delisting=1 "
+                    "WHERE exclude_delisting IS NULL"
+                )
+            )
+        except Exception:
+            pass

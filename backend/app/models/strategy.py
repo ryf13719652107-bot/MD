@@ -67,6 +67,8 @@ class Strategy(Base):
     coin_pool_min_volume_24h: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     # True: 排除 TRADIFI_PERPETUAL + 黄金白银原油等非加密货币合约
     exclude_tradefi: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # True: 排除 14 天内下架或非 TRADING 的合约（无仓时不开新单）
+    exclude_delisting: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
 
     # Runtime state
     status: Mapped[str] = mapped_column(String(20), default="stopped")  # 'running', 'stopped', 'error'

@@ -344,11 +344,19 @@ class PositionManager:
         result = await session.execute(stmt)
         open_positions = list(result.scalars().all())
 
-        if getattr(strategy, "exclude_tradefi", False):
-            from ..services.binance_service import get_cached_tradefi_symbols
+        from ..services.strategy_flags import exclude_delisting_enabled
 
-            tradefi = await get_cached_tradefi_symbols(public_binance)
-            if tradefi and _norm_sym(symbol) in tradefi and not open_positions:
+        if getattr(strategy, "exclude_tradefi", False) or exclude_delisting_enabled(
+            strategy
+        ):
+            from ..services.binance_service import get_strategy_pool_exclude_symbols
+
+            excluded = await get_strategy_pool_exclude_symbols(
+                public_binance,
+                exclude_tradefi=bool(getattr(strategy, "exclude_tradefi", False)),
+                exclude_delisting=exclude_delisting_enabled(strategy),
+            )
+            if excluded and _norm_sym(symbol) in excluded and not open_positions:
                 return
 
         # --- Fetch klines via WebSocket stream (REST fallback inside manager) ---

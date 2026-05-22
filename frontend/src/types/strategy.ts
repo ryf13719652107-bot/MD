@@ -33,6 +33,7 @@ export interface Strategy {
   /** 最低 24h 成交额(USDT)，0=不限制 */
   coin_pool_min_volume_24h: number;
   exclude_tradefi: boolean;
+  exclude_delisting: boolean;
   status: 'running' | 'stopped' | 'error';
   started_at: string | null;
   last_rsi: number | null;
@@ -75,4 +76,5 @@ export interface StrategyFormData {
   coin_pool_top_n: number;
   coin_pool_min_volume_24h: number;
   exclude_tradefi: boolean;
+  exclude_delisting: boolean;
 }

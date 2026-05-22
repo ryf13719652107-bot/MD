@@ -12,7 +12,13 @@ from ..models.account import Account
 from ..models.bot_config import BotConfig
 from ..models.position import Position
 from ..config import now_beijing, BEIJING_TZ
-from .binance_service import BinanceService, get_binance_service, get_public_binance, get_cached_tradefi_symbols
+from .binance_service import (
+    BinanceService,
+    get_binance_service,
+    get_public_binance,
+    get_strategy_pool_exclude_symbols,
+)
+from .strategy_flags import exclude_delisting_enabled
 from .encryption import decrypt
 from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
@@ -337,14 +343,16 @@ class StrategyScheduler:
             if strategy.use_coin_pool:
                 try:
                     min_vol = float(getattr(strategy, "coin_pool_min_volume_24h", 0) or 0)
-                    tradefi_norm: set[str] = set()
-                    if strategy.exclude_tradefi:
-                        tradefi_norm = await get_cached_tradefi_symbols(public_binance)
+                    exclude_norm = await get_strategy_pool_exclude_symbols(
+                        public_binance,
+                        exclude_tradefi=bool(strategy.exclude_tradefi),
+                        exclude_delisting=exclude_delisting_enabled(strategy),
+                    )
                     pool_symbols = await coin_pool_service.get_pool_symbols(
                         strategy.coin_pool_source,
                         strategy.coin_pool_top_n,
                         min_volume_24h=min_vol,
-                        exclude_symbols_norm=tradefi_norm if strategy.exclude_tradefi else None,
+                        exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
                     )
                     if min_vol > 0 and not pool_symbols:
                         logger.info(
