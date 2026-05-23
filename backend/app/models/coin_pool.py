@@ -16,7 +16,7 @@ class CoinPool(Base):
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
     price_change_pct: Mapped[float] = mapped_column(Float, nullable=False)
     volume_24h: Mapped[float] = mapped_column(Float, nullable=True)
-    source: Mapped[str] = mapped_column(String(20), nullable=False)  # gainers, losers, range
+    source: Mapped[str] = mapped_column(String(20), nullable=False)  # gainers, losers
     added_at: Mapped[datetime] = mapped_column(DateTime, default=now_beijing)
     last_updated: Mapped[datetime] = mapped_column(DateTime, default=now_beijing, onupdate=now_beijing)
 

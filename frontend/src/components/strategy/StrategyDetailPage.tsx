@@ -250,9 +250,7 @@ export default function StrategyDetailPage() {
             </div>
             {poolView === 'effective' && (
               <p className="text-xs text-gray-500 mb-2">
-                {strategy.coin_pool_source === 'range'
-                  ? `与实盘一致：4h 震荡榜内前 ${strategy.coin_pool_top_n} 名 + 成交量`
-                  : `与实盘一致：榜单前 ${strategy.coin_pool_top_n} 名内 + 成交量`}
+                与实盘一致：榜单前 {strategy.coin_pool_top_n} 名内 + 成交量
                 {(strategy.coin_pool_min_volume_24h ?? 0) > 0
                   ? ` ≥ ${(strategy.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`
                   : ' 不限制'}

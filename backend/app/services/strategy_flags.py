@@ -1,4 +1,4 @@
-"""策略布尔开关：兼容旧库 NULL 默认值。"""
+"""策略布尔开关与选币来源兼容。"""
 
 
 def exclude_delisting_enabled(strategy) -> bool:
@@ -6,3 +6,9 @@ def exclude_delisting_enabled(strategy) -> bool:
     if v is None:
         return True
     return bool(v)
+
+
+def normalize_coin_pool_source(source: str | None) -> str:
+    if not source:
+        return "gainers"
+    return source

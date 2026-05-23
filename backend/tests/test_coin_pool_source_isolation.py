@@ -3,14 +3,13 @@
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from app.database import Base
 from app.models.coin_pool import CoinPool
 from app.db_migrations.coin_pool_unique import migrate_coin_pool_symbol_source_unique
 
 
 def test_same_symbol_different_sources():
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
+    CoinPool.__table__.create(engine)
     with Session(engine) as session:
         session.add(
             CoinPool(
@@ -27,13 +26,13 @@ def test_same_symbol_different_sources():
                 rank=1,
                 price_change_pct=2.0,
                 volume_24h=1e8,
-                source="range",
+                source="losers",
             )
         )
         session.commit()
         rows = session.execute(select(CoinPool)).scalars().all()
     assert len(rows) == 2
-    assert {r.source for r in rows} == {"gainers", "range"}
+    assert {r.source for r in rows} == {"gainers", "losers"}
 
 
 def test_migrate_removes_symbol_only_unique():
@@ -60,5 +59,5 @@ def test_migrate_removes_symbol_only_unique():
         migrate_coin_pool_symbol_source_unique(conn)
         conn.exec_driver_sql(
             "INSERT INTO coin_pool (symbol, rank, price_change_pct, volume_24h, source) "
-            "VALUES ('X', 1, 2.0, 1e9, 'range')"
+            "VALUES ('X', 1, 2.0, 1e9, 'losers')"
         )

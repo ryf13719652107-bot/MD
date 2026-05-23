@@ -59,7 +59,7 @@ class Strategy(Base):
 
     # Coin pool
     use_coin_pool: Mapped[bool] = mapped_column(Boolean, default=True)
-    coin_pool_source: Mapped[str] = mapped_column(String(20), default="gainers")  # gainers, losers, both, range
+    coin_pool_source: Mapped[str] = mapped_column(String(20), default="gainers")  # gainers, losers, both
     coin_pool_refresh_seconds: Mapped[int] = mapped_column(Integer, default=3600)  # how often to refresh coin pool
     coin_pool_fetch_mode: Mapped[str] = mapped_column(String(20), default="interval")  # 'immediate' or 'interval'
     coin_pool_top_n: Mapped[int] = mapped_column(Integer, default=20, server_default="20")

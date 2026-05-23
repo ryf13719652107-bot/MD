@@ -89,7 +89,7 @@ export interface CoinPoolEntry {
   rank: number;
   price_change_pct: number;
   volume_24h: number | null;
-  source: 'gainers' | 'losers' | 'range';
+  source: 'gainers' | 'losers';
   added_at: string;
   last_updated: string;
 }

@@ -58,7 +58,11 @@ class CoinPoolService:
             "refresh_interval_seconds": min_refresh,
         }
         if len(strategies) == 1:
-            patch["pool_source"] = strategies[0].coin_pool_source
+            from .strategy_flags import normalize_coin_pool_source
+
+            patch["pool_source"] = normalize_coin_pool_source(
+                strategies[0].coin_pool_source
+            )
         self.update_config(**patch)
 
     async def _limit_for_source(self, source: str) -> int:
@@ -98,6 +102,8 @@ class CoinPoolService:
                     out.append("both")
             elif s not in out:
                 out.append(s)
+        if not out:
+            out = ["both"]
         return out
 
     async def refresh_pool(
@@ -109,17 +115,15 @@ class CoinPoolService:
     ):
         """拉取并写入指定来源的选币池；只替换该来源行，与其它来源互不影响。"""
         source = source or self._config["pool_source"]
+        from .strategy_flags import normalize_coin_pool_source
+
+        source = normalize_coin_pool_source(source)
         if limit is None:
             limit = await self._limit_for_source(source)
-        if source == "range":
-            from .range_pool import fetch_range_oscillation_pool
-
-            movers = await fetch_range_oscillation_pool(binance_service, limit=limit)
-        else:
-            movers = await binance_service.fetch_top_movers(
-                source=source,
-                limit=limit,
-            )
+        movers = await binance_service.fetch_top_movers(
+            source=source,
+            limit=limit,
+        )
         if not movers:
             self._last_refresh_ok = False
             self._last_error = f"选币池[{source}]返回空列表"
@@ -155,11 +159,11 @@ class CoinPoolService:
     async def refresh_pool_sources(
         self, binance_service: BinanceService, sources: list[str] | None = None
     ) -> None:
-        """只刷新当前运行策略用到的来源（gainers / losers / both / range 各管各的）。"""
+        """只刷新当前运行策略用到的来源（gainers / losers / both）。"""
         await self.sync_config_from_running_strategies()
         sources = sources or await self._running_pool_sources()
         for src in sources:
-            timeout = 900.0 if src == "range" else 90.0
+            timeout = 90.0
             try:
                 await asyncio.wait_for(
                     self.refresh_pool(binance_service, source=src),
@@ -178,7 +182,7 @@ class CoinPoolService:
         """Get current coin pool from database.
 
         Args:
-            source: 'gainers', 'losers', 'range', 'both', or None (all).
+            source: 'gainers', 'losers', 'both', or None (all).
                     'both' returns all coins without source filtering.
         """
         async with async_session() as session:

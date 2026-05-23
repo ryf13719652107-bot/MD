@@ -35,7 +35,7 @@ const schema = z.object({
   stop_loss_pct: z.number().min(0.1).max(100),
   leverage: z.number().min(1).max(125),
   use_coin_pool: z.coerce.boolean(),
-  coin_pool_source: z.enum(['gainers', 'losers', 'both', 'range']),
+  coin_pool_source: z.enum(['gainers', 'losers', 'both']),
   coin_pool_refresh_seconds: z.number().min(30).max(86400),
   coin_pool_fetch_mode: z.enum(['immediate', 'interval']),
   coin_pool_top_n: z.number().min(1).max(50),
@@ -282,7 +282,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           <div className="min-w-0">
             <div className="text-sm font-medium text-amber-100/95">排除 TradFi / 股票永续（如 SNDK、TSLA）</div>
             <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-              <strong className="text-gray-300">默认开启</strong>：排除股票 TradFi 永续及黄金/白银/原油等非加密货币合约；震荡榜刷新时也会剔除。已有持仓仍会管理。
+              <strong className="text-gray-300">默认开启</strong>：排除股票 TradFi 永续及黄金/白银/原油等非加密货币合约；已有持仓仍会管理。
             </p>
           </div>
         </div>
@@ -295,7 +295,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           <div className="min-w-0">
             <div className="text-sm font-medium text-orange-100/95">排除快下架合约（14 天内）</div>
             <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-              依据币安合约 <code className="text-orange-200/80">exchangeInfo</code>：非 TRADING 或交割日在 14 天内不进榜、不开新仓。震荡榜刷新同样剔除。
+              依据币安合约 <code className="text-orange-200/80">exchangeInfo</code>：非 TRADING 或交割日在 14 天内不进榜、不开新仓。
             </p>
           </div>
         </div>
@@ -314,16 +314,10 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <div>
               <label className={labelClass}>选币池来源</label>
               <select {...register('coin_pool_source')} className={inputClass}>
-                <option value="range">4h 震荡榜（排除主流币）</option>
                 <option value="both">涨幅榜 + 跌幅榜</option>
                 <option value="gainers">仅涨幅榜</option>
                 <option value="losers">仅跌幅榜</option>
               </select>
-              {watch('coin_pool_source') === 'range' && (
-                <span className="text-xs text-amber-500/90 block mt-0.5">
-                  扫描≥3000万 USDT；入选需 4h 震荡指标(ADX/振幅等)，行情偏趋势时榜可能很少；建议刷新≥2小时
-                </span>
-              )}
             </div>
             <div>
               <label className={labelClass}>选币池刷新间隔(秒)</label>

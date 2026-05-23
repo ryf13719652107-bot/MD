@@ -45,12 +45,7 @@ async def test_fetch_coin_pool():
     try:
         binance = await get_public_binance()
         src = coin_pool_service.config.get("pool_source", "both")
-        if src == "range":
-            from ..services.range_pool import fetch_range_oscillation_pool
-
-            movers = await fetch_range_oscillation_pool(binance, limit=20)
-        else:
-            movers = await binance.fetch_top_movers(source=src, limit=20)
+        movers = await binance.fetch_top_movers(source=src, limit=20)
         return {
             "success": True,
             "count": len(movers),
