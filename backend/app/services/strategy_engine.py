@@ -167,8 +167,8 @@ def calculate_wavetrend(
     wt2_last = wt2[-1]
 
     return {
-        "wt1": round(wt1_last, 2),
-        "wt2": round(wt2_last, 2),
+        "wt1": wt1_last,
+        "wt2": wt2_last,
         "cross_above": cross_above,
         "cross_below": cross_below,
     }

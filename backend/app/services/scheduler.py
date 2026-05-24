@@ -23,7 +23,7 @@ from .encryption import decrypt
 from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
 from .sync_service import PositionSyncService
-from .position_manager import PositionManager, set_cooldown_lock, _norm_sym
+from .position_manager import PositionManager, _norm_sym
 from .backup_service import backup_trade
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,6 @@ class StrategyScheduler:
         self._syncer = PositionSyncService()
         self._position_mgr = PositionManager()
         self._strategy_locks: dict[int, asyncio.Lock] = {}
-        set_cooldown_lock(asyncio.Lock())
 
     @property
     def scheduler(self) -> AsyncIOScheduler:

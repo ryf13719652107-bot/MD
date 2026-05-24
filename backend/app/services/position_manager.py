@@ -61,18 +61,6 @@ RECONCILE_SKIPPED_OTHER_STRATEGY = "skipped_other_strategy"  # same acc: another
 RECONCILE_DB_ERROR = "db_error"
 
 
-# Shared cooldown (module-level, shared with scheduler)
-# K 线缓存已迁移到 services/kline_stream.py，由 WS 订阅维持。
-_signal_cooldowns: dict[tuple[int, str], float] = {}
-_signal_cooldown_lock = asyncio.Lock()
-_SIGNAL_COOLDOWN_SECONDS = 5
-
-
-def set_cooldown_lock(lock):
-    global _signal_cooldown_lock
-    _signal_cooldown_lock = lock
-
-
 def _klines_for_confirmed_signal_only(klines: list, timeframe: str) -> list:
     """仅使用已收盘 K 线算信号，对齐 TradingView 等「收盘确认」逻辑。
 
@@ -93,27 +81,6 @@ def _klines_for_confirmed_signal_only(klines: list, timeframe: str) -> list:
     if now_ms >= last_open + tf_ms:
         return klines
     return klines[:-1]
-
-
-async def _check_cooldown(strategy_id: int, symbol: str) -> bool:
-    import time
-    async with _signal_cooldown_lock:
-        now = time.time()
-        key = (strategy_id, symbol)
-        # Cleanup stale entries
-        stale = [k for k, v in _signal_cooldowns.items() if now - v > _SIGNAL_COOLDOWN_SECONDS * 2]
-        for k in stale:
-            del _signal_cooldowns[k]
-        if key in _signal_cooldowns:
-            if now - _signal_cooldowns[key] < _SIGNAL_COOLDOWN_SECONDS:
-                return True
-        _signal_cooldowns[key] = now
-        return False
-
-
-async def _clear_cooldown(strategy_id: int, symbol: str):
-    async with _signal_cooldown_lock:
-        _signal_cooldowns.pop((strategy_id, symbol), None)
 
 
 class PositionManager:
@@ -352,8 +319,8 @@ class PositionManager:
                 return
 
         # --- Fetch klines via WebSocket stream (REST fallback inside manager) ---
-        # RSI Wilder smoothing needs ~100 bars to converge; WT needs 33+
-        limit = 50 if strategy.signal_source == "wavetrend" else 100
+        # WT EMA chain (esa→d→ci→wt1→wt2) needs ~200 bars to converge; RSI Wilder ~100
+        limit = 200 if strategy.signal_source == "wavetrend" else 100
         klines = await kline_stream_manager.get(
             public_binance, symbol, strategy.timeframe, min_bars=limit
         )
@@ -381,13 +348,13 @@ class PositionManager:
             if wt is None:
                 return
             signal = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
-            strategy.last_rsi = wt["wt1"]  # reuse field for WT1 display
+            strategy.last_rsi = round(wt["wt1"], 2)
             strategy.last_signal = signal.value
             strategy.last_signal_at = now_beijing()
             rsi = wt["wt1"]
             signal_label = "WT1"
             if signal != Signal.NEUTRAL:
-                strategy_log_service.info(strategy_id, f"{symbol} WT1={wt['wt1']} WT2={wt['wt2']} 信号={signal.value}")
+                strategy_log_service.info(strategy_id, f"{symbol} WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f} 信号={signal.value}")
         else:
             rsi = calculate_rsi(klines_signal, strategy.rsi_period)
             if rsi is None:
@@ -533,11 +500,6 @@ class PositionManager:
     ):
         strategy_id = strategy.id
 
-        if await _check_cooldown(strategy_id, symbol):
-            logger.info("Strategy %d: %s in cooldown, skipping", strategy_id, symbol)
-            strategy_log_service.info(strategy_id, f"{symbol} 冷却中，跳过")
-            return
-
         side = "buy" if signal == Signal.LONG else "sell"
         ps = "LONG" if signal == Signal.LONG else "SHORT"
         position_side = "long" if side == "buy" else "short"
@@ -552,7 +514,6 @@ class PositionManager:
                 logger.warning("Strategy %d: %s order filled but no average/price in response, using kline close", strategy_id, symbol)
             filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
         except Exception as e:
-            await _clear_cooldown(strategy_id, symbol)
             logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
             strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
             return
@@ -843,9 +804,9 @@ class PositionManager:
                 if wt is not None:
                     confirm = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
                     if confirm == Signal.NEUTRAL:
-                        strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓跳过 — WT1={wt['wt1']} 信号已消失")
+                        strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓跳过 — WT1={wt['wt1']:.2f} 信号已消失")
                         return
-                    strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓WT确认 — WT1={wt['wt1']} WT2={wt['wt2']}")
+                    strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓WT确认 — WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f}")
             else:
                 rsi_val = calculate_rsi(klines_confirm, strategy.rsi_period)
                 if rsi_val is not None:
