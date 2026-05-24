@@ -187,8 +187,14 @@ async def restore_trades(
 
 
 @router.get("/export")
-async def export_trades(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Trade).order_by(Trade.exit_time.desc()).limit(10000))
+async def export_trades(
+    account_id: int | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(Trade).order_by(Trade.exit_time.desc())
+    if account_id is not None:
+        stmt = stmt.where(Trade.account_id == account_id)
+    result = await db.execute(stmt)
     trades = result.scalars().all()
 
     output = io.StringIO()

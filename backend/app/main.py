@@ -172,6 +172,15 @@ _no_cache_html = {
 }
 if os.path.isdir(frontend_dist):
     logger.info("Frontend dist path: %s", frontend_dist)
+
+    @app.middleware("http")
+    async def no_cache_assets(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/assets"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="static")
 
     @app.get("/{full_path:path}")

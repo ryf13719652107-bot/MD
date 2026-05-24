@@ -7,7 +7,7 @@ class MartingaleResult:
     should_add: bool
     next_quantity: float
     next_layer: int
-    avg_entry_price: float
+    last_entry_price: float
     price_drop_from_last: float
 
 
@@ -55,7 +55,7 @@ class MartingaleEngine:
             should_add=should_add,
             next_quantity=next_quantity,
             next_layer=next_layer,
-            avg_entry_price=last_entry_price,
+            last_entry_price=last_entry_price,
             price_drop_from_last=price_drop_pct,
         )
 

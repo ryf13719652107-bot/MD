@@ -152,7 +152,7 @@ async def stop_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{strategy_id}/panic-close")
 async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
-    """Emergency close: close ALL exchange positions for this strategy's account at market price."""
+    """Emergency close: close exchange positions belonging to THIS strategy only."""
     from ..services.binance_service import get_binance_service
     from ..services.encryption import decrypt
     from ..models.account import Account
@@ -172,41 +172,58 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
     api_secret = decrypt(account.api_secret_encrypted)
     binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
 
-    # Get ALL exchange positions — emergency close must close everything
-    try:
-        raw_positions = await binance.fetch_positions()
-    except Exception as e:
-        logging.error("Panic close: fetch_positions failed: %s", e)
-        raise HTTPException(status_code=502, detail=f"无法获取交易所持仓: {e}")
+    stmt_open = select(Position).where(
+        Position.strategy_id == strategy_id,
+        Position.closed_at.is_(None),
+    )
+    open_rows = list((await db.execute(stmt_open)).scalars().all())
 
-    # Build map of (symbol, side) → exchange contracts (all positions)
-    exchange_map: dict[tuple[str, str], float] = {}
-    for ep in raw_positions:
-        contracts = float(ep.get("contracts", 0) or 0)
-        if contracts <= 0:
+    if not open_rows:
+        await strategy_scheduler.remove_strategy(strategy_id)
+        return {
+            "closed": 0,
+            "failed": 0,
+            "results": [],
+            "id": strategy_id,
+        }
+
+    legs_to_close: dict[tuple[str, str], list[Position]] = {}
+    for p in open_rows:
+        key = (_panic_symbol_key(p.symbol), p.side.lower())
+        legs_to_close.setdefault(key, []).append(p)
+
+    results = []
+    now = now_beijing()
+
+    for (sym_key, side), positions in legs_to_close.items():
+        try:
+            order = await binance.close_position(sym_key, side)
+        except Exception as e1:
+            results.append({"symbol": sym_key, "side": side, "status": "failed", "error": str(e1)})
+            logging.error("Panic close: failed %s %s: %s", sym_key, side, e1)
             continue
-        sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
-        sd = (ep.get("side") or "").lower()
-        exchange_map[(sym, sd)] = exchange_map.get((sym, sd), 0) + contracts
+        if not order:
+            results.append({"symbol": sym_key, "side": side, "status": "failed", "error": "empty_order_response"})
+            logging.error("Panic close: empty response %s %s", sym_key, side)
+            continue
+        exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
+        results.append({"symbol": sym_key, "side": side, "status": "ok", "exit_price": exit_price})
+        logging.info("Panic close: closed %s %s", sym_key, side)
 
-    if not exchange_map:
-        # Exchange already flat — still close any ghost open rows in DB for this account
-        stmt_ling = select(Position).where(
-            Position.account_id == account.id,
-            Position.closed_at.is_(None),
-        )
-        lingering = list((await db.execute(stmt_ling)).scalars().all())
-        now0 = now_beijing()
-        trades_to_backup: list[Trade] = []
-        for p in lingering:
-            exit_price = float(p.mark_price or p.entry_price or 0)
-            if exit_price <= 0:
-                exit_price = p.entry_price
-            ep = exit_price
+    trades_to_backup: list[Trade] = []
+    for r in results:
+        if r["status"] != "ok":
+            continue
+        sym_key = r["symbol"]
+        side = r["side"]
+        exit_price = r.get("exit_price", 0) or 0
+        positions = legs_to_close.get((sym_key, side), [])
+        for p in positions:
+            ep = exit_price if exit_price > 0 else (p.mark_price or p.entry_price)
             pnl = (ep - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - ep) * p.quantity
             pct = ((ep - p.entry_price) / p.entry_price * 100) if p.side == "long" and p.entry_price > 0 else ((p.entry_price - ep) / p.entry_price * 100) if p.entry_price > 0 else 0
             trade = Trade(
-                strategy_id=p.strategy_id,
+                strategy_id=strategy_id,
                 account_id=account.id,
                 symbol=p.symbol,
                 side=p.side,
@@ -215,75 +232,10 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                 exit_price=ep,
                 realized_pnl=pnl,
                 pnl_pct=round(pct, 2),
-                entry_time=p.opened_at or now0,
-                exit_time=now0,
+                entry_time=p.opened_at or now,
+                exit_time=now,
                 layer=p.layer,
                 close_reason="panic_close",
-            )
-            db.add(trade)
-            trades_to_backup.append(trade)
-            p.closed_at = now0
-        if lingering:
-            await db.commit()
-            for t in trades_to_backup:
-                backup_trade(t)
-        await strategy_scheduler.remove_strategy(strategy_id)
-        return {
-            "closed": 0,
-            "failed": 0,
-            "results": [],
-            "id": strategy_id,
-            "db_cleaned": len(lingering),
-        }
-
-    results = []
-    now = now_beijing()
-
-    # Close each exchange position
-    for (symbol, side), contracts in exchange_map.items():
-        try:
-            order = await binance.close_position(symbol, side)
-        except Exception as e1:
-            results.append({"symbol": symbol, "side": side, "status": "failed", "error": str(e1)})
-            logging.error("Panic close: failed %s %s: %s", symbol, side, e1)
-            continue
-        if not order:
-            results.append({"symbol": symbol, "side": side, "status": "failed", "error": "empty_order_response"})
-            logging.error("Panic close: empty response %s %s (exchange had contracts=%.6f)", symbol, side, contracts)
-            continue
-        exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
-        results.append({"symbol": symbol, "side": side, "status": "ok", "exit_price": exit_price})
-        logging.info("Panic close: closed %s %s contracts=%.4f", symbol, side, contracts)
-
-    # Match ALL account DB rows for each closed (symbol, side) — not only this strategy_id
-    trades_to_backup: list[Trade] = []
-    for r in results:
-        if r["status"] != "ok":
-            continue
-        symbol = r["symbol"]
-        side = r["side"]
-        exit_price = r.get("exit_price", 0) or 0
-        stmt_open = select(Position).where(
-            Position.account_id == account.id,
-            Position.closed_at.is_(None),
-        )
-        open_rows = list((await db.execute(stmt_open)).scalars().all())
-        sym_u = _panic_symbol_key(symbol)
-        matching = [
-            p for p in open_rows
-            if _panic_symbol_key(p.symbol) == sym_u and p.side.lower() == side.lower()
-        ]
-        for p in matching:
-            ep = exit_price if exit_price > 0 else (p.mark_price or p.entry_price)
-            pnl = (ep - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - ep) * p.quantity
-            pct = ((ep - p.entry_price) / p.entry_price * 100) if p.side == "long" else ((p.entry_price - ep) / p.entry_price * 100)
-            trade = Trade(
-                strategy_id=p.strategy_id, account_id=account.id,
-                symbol=p.symbol, side=p.side, quantity=p.quantity,
-                entry_price=p.entry_price, exit_price=ep,
-                realized_pnl=pnl, pnl_pct=round(pct, 2),
-                entry_time=p.opened_at or now, exit_time=now,
-                layer=p.layer, close_reason="panic_close",
             )
             db.add(trade)
             trades_to_backup.append(trade)

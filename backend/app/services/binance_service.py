@@ -146,9 +146,21 @@ class BinanceService:
         self._exchange: Optional[ccxt_async.binanceusdm] = None
         self._ws_exchange: Optional[ccxtpro.binanceusdm] = None
         self._created_at: float = time.time()
+        self._pinned: bool = False
 
     def _is_expired(self) -> bool:
+        if self._pinned:
+            return False
         return (time.time() - self._created_at) > self._TTL_SECONDS
+
+    def pin(self):
+        """Pin the exchange instance so TTL won't expire during long operations."""
+        self._pinned = True
+
+    def unpin(self):
+        """Unpin and refresh creation timestamp so next access won't immediately expire."""
+        self._pinned = False
+        self._created_at = time.time()
 
     @property
     def exchange(self) -> ccxt_async.binanceusdm:

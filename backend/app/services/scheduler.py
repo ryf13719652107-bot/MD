@@ -85,6 +85,7 @@ class StrategyScheduler:
         self._binance_services: dict[int, BinanceService] = {}
         self._syncer = PositionSyncService()
         self._position_mgr = PositionManager()
+        self._strategy_locks: dict[int, asyncio.Lock] = {}
         set_cooldown_lock(asyncio.Lock())
 
     @property
@@ -173,6 +174,7 @@ class StrategyScheduler:
         job_id = f"strategy_{strategy_id}"
         tp_job_id = f"strategy_{strategy_id}_tp"
         self._strategy_tasks.pop(strategy_id, None)
+        self._strategy_locks.pop(strategy_id, None)
         for jid in (job_id, tp_job_id):
             existing_job = self._scheduler.get_job(jid)
             if existing_job:
@@ -198,24 +200,38 @@ class StrategyScheduler:
             self._binance_services[strategy.account_id] = service
             return service
 
+    def _get_strategy_lock(self, strategy_id: int) -> asyncio.Lock:
+        if strategy_id not in self._strategy_locks:
+            self._strategy_locks[strategy_id] = asyncio.Lock()
+        return self._strategy_locks[strategy_id]
+
     async def _execute_strategy(self, strategy_id: int):
-        async with _STRATEGY_SEMAPHORE:
-            await self._execute_strategy_impl(strategy_id)
+        lock = self._get_strategy_lock(strategy_id)
+        if lock.locked():
+            logger.info("Strategy %d: skipping tick — previous tick or TP check still running", strategy_id)
+            return
+        async with lock:
+            async with _STRATEGY_SEMAPHORE:
+                await self._execute_strategy_impl(strategy_id)
 
     async def _execute_tp_check(self, strategy_id: int):
         """Mid-candle TP fill check — no trading, just detect filled limit orders."""
-        async with async_session() as session:
-            strategy = await session.get(Strategy, strategy_id)
-            if not strategy or strategy.status != "running":
-                return
-            auth_binance = await self._get_binance_for_strategy(strategy)
-            if not auth_binance:
-                return
-            try:
-                await self._position_mgr.check_tp_fills(session, strategy, auth_binance, 0)
-                await session.commit()
-            except Exception as e:
-                logger.error("Strategy %d TP check error: %s", strategy_id, e)
+        lock = self._get_strategy_lock(strategy_id)
+        if lock.locked():
+            return
+        async with lock:
+            async with async_session() as session:
+                strategy = await session.get(Strategy, strategy_id)
+                if not strategy or strategy.status != "running":
+                    return
+                auth_binance = await self._get_binance_for_strategy(strategy)
+                if not auth_binance:
+                    return
+                try:
+                    await self._position_mgr.check_tp_fills(session, strategy, auth_binance, 0)
+                    await session.commit()
+                except Exception as e:
+                    logger.error("Strategy %d TP check error: %s", strategy_id, e)
 
     async def _execute_strategy_impl(self, strategy_id: int):
         async with async_session() as session:
@@ -260,6 +276,7 @@ class StrategyScheduler:
                         # Close ALL exchange positions (closePosition + chunked maxQty, same as panic close)
                         from ..models.trade import Trade
                         try:
+                            auth_binance.pin()
                             margin_trades_to_backup: list[Trade] = []
                             max_rounds = 3
                             initial_nonempty = False
@@ -333,6 +350,8 @@ class StrategyScheduler:
                                 backup_trade(t)
                         except Exception as e:
                             logger.error("Margin stop: failed to close positions for strategy %d: %s", strategy_id, e)
+                        finally:
+                            auth_binance.unpin()
                         return
                 except Exception as e:
                     logger.error("Strategy %d: balance check failed: %s", strategy_id, e)

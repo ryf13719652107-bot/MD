@@ -111,17 +111,9 @@ async def _check_cooldown(strategy_id: int, symbol: str) -> bool:
         return False
 
 
-def _clear_cooldown(strategy_id: int, symbol: str):
-    import asyncio
-    async def _clear():
-        async with _signal_cooldown_lock:
-            _signal_cooldowns.pop((strategy_id, symbol), None)
-    # fire-and-forget if no loop, otherwise schedule
-    try:
-        loop = __import__('asyncio').get_running_loop()
-        loop.create_task(_clear())
-    except RuntimeError:
-        pass
+async def _clear_cooldown(strategy_id: int, symbol: str):
+    async with _signal_cooldown_lock:
+        _signal_cooldowns.pop((strategy_id, symbol), None)
 
 
 class PositionManager:
@@ -560,7 +552,7 @@ class PositionManager:
                 logger.warning("Strategy %d: %s order filled but no average/price in response, using kline close", strategy_id, symbol)
             filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
         except Exception as e:
-            _clear_cooldown(strategy_id, symbol)
+            await _clear_cooldown(strategy_id, symbol)
             logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
             strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
             return
