@@ -48,7 +48,7 @@ class MartingaleEngine:
         else:
             price_drop_pct = ((current_price - last_entry_price) / last_entry_price) * 100
 
-        required_drop = self.price_drop_pct * (self.price_drop_multiplier ** max(current_layer - 1, 0))
+        required_drop = self.price_drop_pct * (self.price_drop_multiplier ** max(current_layer, 0))
         should_add = price_drop_pct >= required_drop
 
         next_layer = current_layer + 1 if should_add else current_layer
