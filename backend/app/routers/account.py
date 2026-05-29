@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +7,7 @@ from ..models.account import Account
 from ..schemas.account import AccountCreate, AccountResponse
 from ..services.encryption import encrypt, decrypt, mask_key
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
 
@@ -70,13 +72,62 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     if not account:
         raise HTTPException(status_code=404, detail="账户不存在")
 
-    # Block deletion if strategies exist for this account
     from ..models.strategy import Strategy
-    result = await db.execute(select(Strategy).where(Strategy.account_id == account_id))
-    existing = result.scalars().all()
-    if existing:
-        names = ", ".join(s.name for s in existing)
-        raise HTTPException(status_code=400, detail=f"该账户下还有策略，请先删除策略：{names}")
+    from ..services.scheduler import strategy_scheduler
+    from ..services.log_service import strategy_log_service
+    from ..services.encryption import decrypt
 
-    await db.delete(account)
+    result = await db.execute(select(Strategy).where(Strategy.account_id == account_id))
+    strategies = result.scalars().all()
+
+    # 1. Stop all scheduler jobs for running strategies
+    for s in strategies:
+        if s.status == "running":
+            await strategy_scheduler.remove_strategy(s.id)
+        strategy_log_service.clear(s.id)
+
+    # 2. Close all exchange positions for this account before wiping DB
+    exchange_close_errors: list[str] = []
+    try:
+        from ..services.binance_service import get_binance_service
+
+        api_key = decrypt(account.api_key_encrypted)
+        api_secret = decrypt(account.api_secret_encrypted)
+        binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+
+        eps = await binance.fetch_positions()
+        legs: dict[tuple[str, str], float] = {}
+        for ep in eps:
+            contracts = float(ep.get("contracts", 0) or 0)
+            if contracts <= 0:
+                continue
+            sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
+            side = (ep.get("side") or "").lower()
+            legs[(sym, side)] = legs.get((sym, side), 0) + contracts
+
+        for (sym, side) in legs:
+            try:
+                await binance.close_position(sym, side)
+            except Exception as e:
+                exchange_close_errors.append(f"{sym} {side}: {e}")
+    except Exception as e:
+        exchange_close_errors.append(f"API连接失败: {e}")
+
+    if exchange_close_errors:
+        logger.warning(
+            "账户 %d 删除时部分仓位未能平仓: %s", account_id, "; ".join(exchange_close_errors)
+        )
+
+    # 3. Explicit cleanup — 逐表 DELETE，防御层；CASCADE 兜底
+    from ..models.position import Position
+    from ..models.trade import Trade
+    from ..models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline
+    from sqlalchemy import delete as sqla_delete
+
+    await db.execute(sqla_delete(AccountBalanceSnapshot).where(AccountBalanceSnapshot.account_id == account_id))
+    await db.execute(sqla_delete(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
+    await db.execute(sqla_delete(Position).where(Position.account_id == account_id))
+    await db.execute(sqla_delete(Trade).where(Trade.account_id == account_id))
+    await db.execute(sqla_delete(Strategy).where(Strategy.account_id == account_id))
+    await db.execute(sqla_delete(Account).where(Account.id == account_id))
     await db.commit()

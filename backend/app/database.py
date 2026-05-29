@@ -1,4 +1,5 @@
 import logging
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 import os
@@ -15,6 +16,13 @@ if db_dir and not os.path.exists(db_dir):
 
 engine = create_async_engine(settings.database_url, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 
 class Base(DeclarativeBase):
@@ -34,6 +42,7 @@ async def init_db():
 
     # Create tables from current model (no-op if already exist)
     async with engine.begin() as conn:
+        await conn.run_sync(lambda c: c.exec_driver_sql("PRAGMA foreign_keys=ON"))
         await conn.run_sync(Base.metadata.create_all)
         # Add new columns that may not exist in existing databases
         migrations = [

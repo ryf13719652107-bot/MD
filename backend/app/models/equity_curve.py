@@ -16,7 +16,7 @@ class AccountBalanceSnapshot(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), nullable=False, index=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
     snapshot_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     total_usdt: Mapped[float] = mapped_column(Float, nullable=False)
 
@@ -26,6 +26,6 @@ class AccountEquityBaseline(Base):
 
     __tablename__ = "account_equity_baselines"
 
-    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id"), primary_key=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
     baseline_total_usdt: Mapped[float] = mapped_column(Float, nullable=False)
     set_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_beijing)
