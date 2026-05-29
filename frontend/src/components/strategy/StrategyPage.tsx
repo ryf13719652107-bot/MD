@@ -159,7 +159,7 @@ export default function StrategyPage() {
               <div>首单仓位: <span className="text-gray-200">{s.base_qty_type === 'margin_pct' ? `保证金${s.base_qty_value}%` : `${s.base_qty_value} USDT`}</span></div>
               <div>加仓倍数: <span className="text-gray-200">x{s.martingale_mult}</span></div>
               <div>最大层数: <span className="text-gray-200">{s.max_layers}</span></div>
-              <div>跌幅触发: <span className="text-gray-200">{s.price_drop_pct}%</span></div>
+              <div>跌幅触发: <span className="text-gray-200">{s.price_drop_pct}%{s.price_drop_multiplier != null && s.price_drop_multiplier !== 1 ? ` (x${s.price_drop_multiplier} 递增)` : ''}</span></div>
               <div>止盈: <span className="text-gray-200">{s.take_profit_pct}% {s.take_profit_limit_order ? '(限价单)' : '(市价单)'}</span></div>
               <div>止损: <span className="text-gray-200">{s.stop_loss_enabled ? `${s.stop_loss_pct}%` : '已禁用'}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>

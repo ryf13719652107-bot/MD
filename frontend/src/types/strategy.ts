@@ -16,6 +16,7 @@ export interface Strategy {
   base_qty_value: number;
   rsi_entry_threshold: number;
   price_drop_pct: number;
+  price_drop_multiplier: number;
   martingale_mult: number;
   max_layers: number;
   martingale_rsi_enabled: boolean;
@@ -60,6 +61,7 @@ export interface StrategyFormData {
   base_qty_value: number;
   rsi_entry_threshold: number;
   price_drop_pct: number;
+  price_drop_multiplier: number;
   martingale_mult: number;
   max_layers: number;
   martingale_rsi_enabled: boolean;

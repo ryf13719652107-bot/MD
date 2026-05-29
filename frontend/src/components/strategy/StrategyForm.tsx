@@ -22,6 +22,7 @@ const schema = z.object({
   base_qty_value: z.number().min(0.01),
   rsi_entry_threshold: z.number().min(0).max(100),
   price_drop_pct: z.number().min(0.1).max(100),
+  price_drop_multiplier: z.number().min(1).max(5),
   martingale_mult: z.number().min(1).max(10),
   max_layers: z.coerce
     .number({ invalid_type_error: '请输入数字' })
@@ -73,6 +74,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       base_qty_value: initialData.base_qty_value,
       rsi_entry_threshold: initialData.rsi_entry_threshold,
       price_drop_pct: initialData.price_drop_pct,
+      price_drop_multiplier: initialData.price_drop_multiplier ?? 1,
       martingale_mult: initialData.martingale_mult,
       max_layers: Number(initialData.max_layers ?? 8),
       martingale_rsi_enabled: initialData.martingale_rsi_enabled ?? false,
@@ -109,6 +111,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     base_qty_value: 6,
     rsi_entry_threshold: 30,
     price_drop_pct: 30,
+    price_drop_multiplier: 1,
     martingale_mult: 1.5,
     max_layers: 8,
     martingale_rsi_enabled: false,
@@ -361,6 +364,11 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           <div>
             <label className={labelClass}>价格跌幅 (%)</label>
             <input type="number" step="0.1" {...register('price_drop_pct', { valueAsNumber: true })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>跌幅倍数</label>
+            <input type="number" step="0.1" {...register('price_drop_multiplier', { valueAsNumber: true })} className={inputClass} />
+            <span className="text-xs text-gray-600">每层递增，1=固定跌幅</span>
           </div>
           <div>
             <label className={labelClass}>加仓倍数</label>

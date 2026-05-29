@@ -167,8 +167,8 @@ export default function StrategyDetailPage() {
             <div className={valClass}>x{strategy.martingale_mult} / {strategy.max_layers}层</div>
           </div>
           <div>
-            <span className={labelClass}>跌幅触发</span>
-            <div className={valClass}>{strategy.price_drop_pct}%</div>
+            <span className={labelClass}>跌幅触发 / 倍数</span>
+            <div className={valClass}>{strategy.price_drop_pct}% {strategy.price_drop_multiplier != null && strategy.price_drop_multiplier !== 1 ? `(x${strategy.price_drop_multiplier} 递增)` : ''}</div>
           </div>
           <div>
             <span className={labelClass}>止盈 / 止损</span>

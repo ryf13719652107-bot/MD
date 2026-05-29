@@ -53,6 +53,7 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN exclude_tradefi BOOLEAN DEFAULT 1",
             "ALTER TABLE strategies ADD COLUMN exclude_delisting BOOLEAN DEFAULT 1",
             "ALTER TABLE strategies ADD COLUMN coin_pool_min_volume_24h FLOAT DEFAULT 0",
+            "ALTER TABLE strategies ADD COLUMN price_drop_multiplier FLOAT DEFAULT 1.0",
         ]
         for sql in migrations:
             try:
@@ -82,6 +83,17 @@ async def init_db():
                 lambda c: c.exec_driver_sql(
                     "UPDATE strategies SET exclude_delisting=1 "
                     "WHERE exclude_delisting IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        # Backfill NULL price_drop_multiplier for existing strategies
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET price_drop_multiplier=1.0 "
+                    "WHERE price_drop_multiplier IS NULL"
                 )
             )
         except Exception:

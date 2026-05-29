@@ -18,12 +18,14 @@ class MartingaleEngine:
         multiplier: float = 1.5,
         max_layers: int = 8,
         price_drop_pct: float = 30.0,
+        price_drop_multiplier: float = 1.0,
         take_profit_pct: float = 2.0,
     ):
         self.base_quantity = base_quantity
         self.multiplier = multiplier
         self.max_layers = max_layers
         self.price_drop_pct = price_drop_pct
+        self.price_drop_multiplier = price_drop_multiplier
         self.take_profit_pct = take_profit_pct
 
     def calculate_position_size(self, layer: int) -> float:
@@ -46,7 +48,8 @@ class MartingaleEngine:
         else:
             price_drop_pct = ((current_price - last_entry_price) / last_entry_price) * 100
 
-        should_add = price_drop_pct >= self.price_drop_pct
+        required_drop = self.price_drop_pct * (self.price_drop_multiplier ** max(current_layer - 1, 0))
+        should_add = price_drop_pct >= required_drop
 
         next_layer = current_layer + 1 if should_add else current_layer
         next_quantity = self.calculate_position_size(next_layer) if should_add else 0

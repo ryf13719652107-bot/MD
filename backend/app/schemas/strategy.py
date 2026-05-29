@@ -22,6 +22,7 @@ class StrategyCreate(BaseModel):
     rsi_entry_threshold: float = Field(default=30.0, ge=0, le=100)
     # Martingale
     price_drop_pct: float = Field(default=30.0, gt=0, le=100)
+    price_drop_multiplier: float = Field(default=1.0, ge=1.0, le=5.0, description="加仓跌幅倍数，每层递增")
     martingale_mult: float = Field(default=1.5, ge=1.0, le=10.0)
     max_layers: int = Field(default=8, ge=1, le=200)
     martingale_rsi_enabled: bool = False
@@ -69,6 +70,7 @@ class StrategyUpdate(BaseModel):
     base_qty_value: Optional[float] = Field(default=None, gt=0)
     rsi_entry_threshold: Optional[float] = Field(default=None, ge=0, le=100)
     price_drop_pct: Optional[float] = Field(default=None, gt=0, le=100)
+    price_drop_multiplier: Optional[float] = Field(default=None, ge=1.0, le=5.0)
     martingale_mult: Optional[float] = Field(default=None, ge=1.0, le=10.0)
     max_layers: Optional[int] = Field(default=None, ge=1, le=200)
     martingale_rsi_enabled: Optional[bool] = None
@@ -106,6 +108,7 @@ class StrategyResponse(BaseModel):
     base_qty_value: float
     rsi_entry_threshold: float
     price_drop_pct: float
+    price_drop_multiplier: float
     martingale_mult: float
     max_layers: int
     martingale_rsi_enabled: bool

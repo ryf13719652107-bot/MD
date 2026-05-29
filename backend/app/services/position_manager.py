@@ -217,6 +217,7 @@ class PositionManager:
                 base_quantity=contracts,
                 multiplier=strategy.martingale_mult,
                 max_layers=strategy.max_layers,
+                price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0),
                 take_profit_pct=strategy.take_profit_pct,
             )
             tp_price = eng.get_take_profit_price(entry_price, side)
@@ -520,7 +521,7 @@ class PositionManager:
 
         # Order succeeded on exchange — ensure DB record is written even if TP order fails
         try:
-            eng = MartingaleEngine(base_quantity=filled_qty, multiplier=strategy.martingale_mult, max_layers=strategy.max_layers, take_profit_pct=strategy.take_profit_pct)
+            eng = MartingaleEngine(base_quantity=filled_qty, multiplier=strategy.martingale_mult, max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
             tp_price = eng.get_take_profit_price(avg_price, position_side)
 
             pos = Position(
@@ -570,7 +571,7 @@ class PositionManager:
 
         positions_data = [{"quantity": p.quantity, "entry_price": p.entry_price} for p in open_positions]
         eng = MartingaleEngine(base_quantity=base_qty, multiplier=strategy.martingale_mult, max_layers=strategy.max_layers,
-                               price_drop_pct=strategy.price_drop_pct, take_profit_pct=strategy.take_profit_pct)
+                               price_drop_pct=strategy.price_drop_pct, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
         avg_entry, total_qty = eng.get_avg_entry_price(positions_data)
         current_layer = max(p.layer for p in open_positions)
 
@@ -652,7 +653,7 @@ class PositionManager:
                         continue
                     positions_data = [{"quantity": op.quantity, "entry_price": op.entry_price} for op in symbol_positions]
                     eng = MartingaleEngine(base_quantity=symbol_positions[0].quantity, multiplier=strategy.martingale_mult,
-                                           max_layers=strategy.max_layers, take_profit_pct=strategy.take_profit_pct)
+                                           max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
                     avg_entry, _ = eng.get_avg_entry_price(positions_data)
                     await self._close_positions(session, strategy, p.symbol, auth_binance, symbol_positions,
                                                 eng, avg_entry, p.side, "take_profit", current_price, pre_exit_price=avg_fill)

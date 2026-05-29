@@ -39,6 +39,7 @@ class Strategy(Base):
 
     # Martingale params
     price_drop_pct: Mapped[float] = mapped_column(Float, default=30.0)
+    price_drop_multiplier: Mapped[float] = mapped_column(Float, default=1.0)  # 加仓跌幅倍数：每层递增 price_drop_pct * multiplier^(layer-1)
     martingale_mult: Mapped[float] = mapped_column(Float, default=1.5)
     max_layers: Mapped[int] = mapped_column(Integer, default=8)
     martingale_rsi_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # Require RSI signal for adds
