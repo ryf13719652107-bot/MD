@@ -9,8 +9,12 @@ router = APIRouter(prefix="/api/coin-pool", tags=["coin_pool"])
 
 @router.get("", response_model=list[CoinPoolResponse])
 async def get_coin_pool(source: str | None = None):
+    from ..services.binance_service import get_public_binance
+    from ..services.coin_pool_presenter import coin_pool_responses_with_funding
+
     coins = await coin_pool_service.get_pool(source)
-    return [CoinPoolResponse.model_validate(c) for c in coins]
+    public = await get_public_binance()
+    return await coin_pool_responses_with_funding(public, coins)
 
 
 @router.post("/refresh")

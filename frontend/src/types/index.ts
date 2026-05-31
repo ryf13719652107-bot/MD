@@ -92,6 +92,8 @@ export interface CoinPoolEntry {
   source: 'gainers' | 'losers';
   added_at: string;
   last_updated: string;
+  /** 最近一次已结算资金费率(%)，正=多头付空头；结算周期因合约而异 */
+  funding_rate_pct?: number | null;
 }
 
 export interface KlineData {

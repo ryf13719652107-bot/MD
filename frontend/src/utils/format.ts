@@ -20,3 +20,17 @@ function trimTrailingZeros(n: number, decimals: number): string {
     .replace(/\.0+$/, '')
     .replace(/(\.\d)0$/, '$1');
 }
+
+/** 最近结算资金费率(%) 展示 */
+export function formatFundingRatePct(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(4)}%`;
+}
+
+export function fundingRateColorClass(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'text-gray-500';
+  if (value > 0) return 'text-orange-400';
+  if (value < 0) return 'text-cyan-400';
+  return 'text-gray-400';
+}

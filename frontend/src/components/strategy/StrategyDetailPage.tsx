@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { formatUsdtVolume } from '../../utils/format';
+import { formatUsdtVolume, formatFundingRatePct, fundingRateColorClass } from '../../utils/format';
 import { poolSourceBadgeClass, poolSourceLabel } from '../../utils/poolSource';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
@@ -210,6 +210,18 @@ export default function StrategyDetailPage() {
               </div>
             </div>
           )}
+          {strategy.use_coin_pool && (
+            <div>
+              <span className={labelClass}>资金费率过滤</span>
+              <div className={valClass}>
+                {strategy.exclude_funding
+                  ? (strategy.direction === 'long'
+                    ? `已开启：费率 > ${strategy.funding_rate_threshold_pct ?? 0}% 不开新仓`
+                    : `已开启：费率 < ${strategy.funding_rate_threshold_pct ?? 0}% 不开新仓`)
+                  : '未开启'}
+              </div>
+            </div>
+          )}
           <div>
             <span className={labelClass}>TradFi / 股票永续</span>
             <div className={valClass}>
@@ -267,6 +279,11 @@ export default function StrategyDetailPage() {
                 {strategy.exclude_tradefi ? ' + 已排除 TradFi' : ''}
                 {strategy.exclude_delisting !== false ? ' + 已排除14天内下架' : ''}
                 {strategy.exclude_mainstream !== false ? ' + 已排除主流币' : ''}
+                {strategy.exclude_funding ? (
+                  strategy.direction === 'long'
+                    ? ` + 费率>${strategy.funding_rate_threshold_pct ?? 0}%过滤`
+                    : ` + 费率<${strategy.funding_rate_threshold_pct ?? 0}%过滤`
+                ) : ''}
               </p>
             )}
             {displayPool.length === 0 ? (
@@ -281,6 +298,7 @@ export default function StrategyDetailPage() {
                       <th className="text-left py-1.5 px-2">排名</th>
                       <th className="text-left py-1.5 px-2">币种</th>
                       <th className="text-right py-1.5 px-2">涨跌幅</th>
+                      <th className="text-right py-1.5 px-2">最近结算费率</th>
                       <th className="text-right py-1.5 px-2">24h成交量</th>
                       <th className="text-right py-1.5 px-2">来源</th>
                       <th className="text-right py-1.5 px-2">入选时间</th>
@@ -293,6 +311,9 @@ export default function StrategyDetailPage() {
                         <td className="py-1.5 px-2 text-gray-200 font-mono">{e.symbol}</td>
                         <td className={`py-1.5 px-2 text-right font-mono ${e.price_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                           {e.price_change_pct >= 0 ? '+' : ''}{e.price_change_pct?.toFixed(2)}%
+                        </td>
+                        <td className={`py-1.5 px-2 text-right font-mono ${fundingRateColorClass(e.funding_rate_pct)}`}>
+                          {formatFundingRatePct(e.funding_rate_pct)}
                         </td>
                         <td className="py-1.5 px-2 text-right text-gray-400">{formatUsdtVolume(e.volume_24h)}</td>
                         <td className="py-1.5 px-2 text-right">

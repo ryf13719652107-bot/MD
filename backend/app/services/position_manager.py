@@ -304,7 +304,13 @@ class PositionManager:
         result = await session.execute(stmt)
         open_positions = list(result.scalars().all())
 
-        from ..services.strategy_flags import exclude_delisting_enabled, exclude_mainstream_enabled
+        from ..services.strategy_flags import (
+            exclude_delisting_enabled,
+            exclude_mainstream_enabled,
+            exclude_funding_enabled,
+            funding_rate_blocks_new_entry,
+            funding_rate_threshold_pct,
+        )
 
         mainstream_exclude = bool(
             strategy.use_coin_pool and exclude_mainstream_enabled(strategy)
@@ -323,6 +329,22 @@ class PositionManager:
                 exclude_mainstream=mainstream_exclude,
             )
             if excluded and _norm_sym(symbol) in excluded and not open_positions:
+                return
+
+        if (
+            strategy.use_coin_pool
+            and exclude_funding_enabled(strategy)
+            and not open_positions
+        ):
+            from ..services.binance_service import get_cached_last_funding_rates_pct
+
+            rates = await get_cached_last_funding_rates_pct(public_binance)
+            rate = rates.get(_norm_sym(symbol), 0.0)
+            if funding_rate_blocks_new_entry(
+                strategy.direction,
+                rate,
+                funding_rate_threshold_pct(strategy),
+            ):
                 return
 
         # --- Fetch klines via WebSocket stream (REST fallback inside manager) ---

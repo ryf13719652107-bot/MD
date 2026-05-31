@@ -9,7 +9,13 @@ from ..schemas.coin_pool import CoinPoolResponse
 from ..services.scheduler import strategy_scheduler
 from ..services.backup_service import backup_trade
 from ..services.coin_pool_service import coin_pool_service
-from ..services.strategy_flags import exclude_delisting_enabled, exclude_mainstream_enabled, normalize_coin_pool_source
+from ..services.strategy_flags import (
+    exclude_delisting_enabled,
+    exclude_mainstream_enabled,
+    exclude_funding_enabled,
+    funding_rate_threshold_pct,
+    normalize_coin_pool_source,
+)
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
@@ -59,7 +65,11 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
     if not strategy.use_coin_pool:
         return []
 
-    from ..services.binance_service import get_public_binance, get_strategy_pool_exclude_symbols
+    from ..services.binance_service import (
+        get_public_binance,
+        get_strategy_pool_exclude_symbols,
+        filter_pool_symbols_by_funding,
+    )
 
     public = await get_public_binance()
     exclude_norm = await get_strategy_pool_exclude_symbols(
@@ -75,7 +85,23 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
         min_volume_24h=float(strategy.coin_pool_min_volume_24h or 0),
         exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
     )
-    return [CoinPoolResponse.model_validate(c) for c in entries]
+    if exclude_funding_enabled(strategy):
+        rates_map = {
+            _panic_symbol_key(c.symbol): c
+            for c in entries
+        }
+        allowed = await filter_pool_symbols_by_funding(
+            public,
+            [c.symbol for c in entries],
+            direction=strategy.direction,
+            threshold_pct=funding_rate_threshold_pct(strategy),
+        )
+        allowed_norm = {_panic_symbol_key(s) for s in allowed}
+        entries = [rates_map[k] for k in allowed_norm if k in rates_map]
+
+    from ..services.coin_pool_presenter import coin_pool_responses_with_funding
+
+    return await coin_pool_responses_with_funding(public, entries)
 
 
 @router.put("/{strategy_id}", response_model=StrategyResponse)

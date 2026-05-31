@@ -9,15 +9,18 @@ logger = logging.getLogger(__name__)
 
 _TRADEFI_SYMBOLS_CACHE: tuple[float, frozenset[str]] | None = None
 _DELISTING_SOON_CACHE: tuple[float, frozenset[str]] | None = None
+_LAST_FUNDING_RATES_CACHE: tuple[float, dict[str, float]] | None = None
 _TRADEFI_CACHE_TTL = 3600.0
+_FUNDING_CACHE_TTL = 300.0
 DELIST_LOOKAHEAD_DAYS = 14
 DELIST_LOOKAHEAD_MS = DELIST_LOOKAHEAD_DAYS * 24 * 3600 * 1000
 
 
 def tradefi_cache_clear():
-    global _TRADEFI_SYMBOLS_CACHE, _DELISTING_SOON_CACHE
+    global _TRADEFI_SYMBOLS_CACHE, _DELISTING_SOON_CACHE, _LAST_FUNDING_RATES_CACHE
     _TRADEFI_SYMBOLS_CACHE = None
     _DELISTING_SOON_CACHE = None
+    _LAST_FUNDING_RATES_CACHE = None
 
 
 def _normalize_symbol_for_tradefi(s: str) -> str:
@@ -148,6 +151,42 @@ async def get_strategy_pool_exclude_symbols(
     return frozenset(merged) if merged else None
 
 
+async def get_cached_last_funding_rates_pct(binance: "BinanceService") -> dict[str, float]:
+    """最近一次已结算资金费率(%，normalized symbol → pct)，缓存 5min。"""
+    global _LAST_FUNDING_RATES_CACHE
+    now = time.time()
+    if (
+        _LAST_FUNDING_RATES_CACHE is not None
+        and now - _LAST_FUNDING_RATES_CACHE[0] < _FUNDING_CACHE_TTL
+    ):
+        return _LAST_FUNDING_RATES_CACHE[1]
+    raw = await binance.fetch_last_funding_rates_pct_raw()
+    _LAST_FUNDING_RATES_CACHE = (now, raw)
+    logger.info("Last funding rates cached: %d symbols", len(raw))
+    return raw
+
+
+async def filter_pool_symbols_by_funding(
+    binance: "BinanceService",
+    symbols: list[str],
+    *,
+    direction: str,
+    threshold_pct: float,
+) -> list[str]:
+    from .strategy_flags import funding_rate_blocks_new_entry
+
+    if not symbols:
+        return symbols
+    rates = await get_cached_last_funding_rates_pct(binance)
+    out: list[str] = []
+    for sym in symbols:
+        key = _normalize_symbol_for_tradefi(sym)
+        rate = rates.get(key, 0.0)
+        if not funding_rate_blocks_new_entry(direction, rate, threshold_pct):
+            out.append(sym)
+    return out
+
+
 async def get_cached_tradefi_symbols(binance: "BinanceService") -> frozenset[str]:
     """TRADIFI_PERPETUAL + 黄金白银原油等；normalized，缓存 1h。"""
     global _TRADEFI_SYMBOLS_CACHE
@@ -249,6 +288,27 @@ class BinanceService:
             sym = x.get("symbol")
             if sym and _symbol_delisting_soon(x, now_ms):
                 out.add(sym)
+        return out
+
+    async def fetch_last_funding_rates_pct_raw(self) -> dict[str, float]:
+        """premiumIndex lastFundingRate → normalized symbol → 最近结算费率(%)."""
+        try:
+            rows = await self.exchange.fapiPublicGetPremiumIndex()
+        except Exception as e:
+            logger.warning("fapiPublicGetPremiumIndex failed: %s", e)
+            return {}
+        if isinstance(rows, dict):
+            rows = [rows]
+        out: dict[str, float] = {}
+        for row in rows or []:
+            sym = row.get("symbol")
+            if not sym:
+                continue
+            try:
+                rate_pct = float(row.get("lastFundingRate") or 0) * 100.0
+            except (TypeError, ValueError):
+                rate_pct = 0.0
+            out[_normalize_symbol_for_tradefi(sym)] = rate_pct
         return out
 
     async def _safe_close(self, ex):

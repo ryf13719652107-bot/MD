@@ -173,6 +173,13 @@ export default function StrategyPage() {
               {s.use_coin_pool && (
                 <div>主流币过滤: <span className={s.exclude_mainstream !== false ? 'text-sky-400' : 'text-gray-500'}>{s.exclude_mainstream !== false ? '已排除20个主流币' : '未排除'}</span></div>
               )}
+              {s.use_coin_pool && s.exclude_funding && (
+                <div>资金费率: <span className="text-violet-400">
+                  {s.direction === 'long'
+                    ? `>${s.funding_rate_threshold_pct ?? 0}% 过滤`
+                    : `<${s.funding_rate_threshold_pct ?? 0}% 过滤`}
+                </span></div>
+              )}
               {s.last_rsi != null && (
                 <div className="col-span-2 mt-1 pt-1 border-t border-gray-800">
                   <span className="text-gray-500">最近信号: </span>

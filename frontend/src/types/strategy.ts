@@ -36,6 +36,8 @@ export interface Strategy {
   exclude_tradefi: boolean;
   exclude_delisting: boolean;
   exclude_mainstream: boolean;
+  exclude_funding: boolean;
+  funding_rate_threshold_pct: number;
   status: 'running' | 'stopped' | 'error';
   started_at: string | null;
   last_rsi: number | null;
@@ -81,4 +83,6 @@ export interface StrategyFormData {
   exclude_tradefi: boolean;
   exclude_delisting: boolean;
   exclude_mainstream: boolean;
+  exclude_funding: boolean;
+  funding_rate_threshold_pct: number;
 }

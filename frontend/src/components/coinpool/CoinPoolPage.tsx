@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { api } from '../../services/api';
 import type { CoinPoolEntry } from '../../types';
 import { RefreshCw, TrendingUp, TrendingDown, FlaskConical } from 'lucide-react';
-import { formatUsdtVolume } from '../../utils/format';
+import { formatUsdtVolume, formatFundingRatePct, fundingRateColorClass } from '../../utils/format';
 import { poolSourceBadgeClass, poolSourceLabel, poolSourceTextClass } from '../../utils/poolSource';
 
 export default function CoinPoolPage() {
@@ -156,6 +156,12 @@ export default function CoinPoolPage() {
           <button onClick={handleConfigUpdate} className="mt-4 px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded text-sm">保存配置</button>
         </div>
 
+        <p className="text-xs text-gray-600 mb-3">
+          资金费率为<strong className="text-gray-300">上一档已结算</strong>值（周期因合约而异，常见 8h）；
+          <span className="text-orange-400">橙色正数</span>表示多头付空头，
+          <span className="text-cyan-400">青色负数</span>表示空头付多头。
+        </p>
+
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -164,6 +170,7 @@ export default function CoinPoolPage() {
                 <th className="p-2">交易对</th>
                 <th className="p-2">来源</th>
                 <th className="p-2">涨跌幅</th>
+                <th className="p-2">最近结算费率</th>
                 <th className="p-2">24h成交量</th>
                 <th className="p-2">加入时间</th>
               </tr>
@@ -182,12 +189,15 @@ export default function CoinPoolPage() {
                   <td className={`p-2 ${c.price_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                     {c.price_change_pct >= 0 ? '+' : ''}{c.price_change_pct.toFixed(2)}%
                   </td>
+                  <td className={`p-2 font-mono text-xs ${fundingRateColorClass(c.funding_rate_pct)}`}>
+                    {formatFundingRatePct(c.funding_rate_pct)}
+                  </td>
                   <td className="p-2 text-gray-400">{formatUsdtVolume(c.volume_24h)}</td>
                   <td className="p-2 text-gray-500 text-xs">{new Date(c.added_at).toLocaleString()}</td>
                 </tr>
               ))}
               {coins.length === 0 && (
-                <tr><td colSpan={6} className="p-8 text-center text-gray-600">选币池为空，请点击刷新获取涨跌幅数据</td></tr>
+                <tr><td colSpan={7} className="p-8 text-center text-gray-600">选币池为空，请点击刷新获取涨跌幅数据</td></tr>
               )}
             </tbody>
           </table>

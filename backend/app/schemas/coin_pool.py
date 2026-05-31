@@ -18,5 +18,7 @@ class CoinPoolResponse(BaseModel):
     source: str
     added_at: datetime
     last_updated: datetime
+    # 最近一次已结算资金费率(%)；正=多头付空头；结算周期因合约而异(常见8h)
+    funding_rate_pct: Optional[float] = None
 
     model_config = {"from_attributes": True}

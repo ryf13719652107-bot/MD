@@ -17,8 +17,15 @@ from .binance_service import (
     get_binance_service,
     get_public_binance,
     get_strategy_pool_exclude_symbols,
+    filter_pool_symbols_by_funding,
 )
-from .strategy_flags import exclude_delisting_enabled, exclude_mainstream_enabled, normalize_coin_pool_source
+from .strategy_flags import (
+    exclude_delisting_enabled,
+    exclude_mainstream_enabled,
+    exclude_funding_enabled,
+    funding_rate_threshold_pct,
+    normalize_coin_pool_source,
+)
 from .encryption import decrypt
 from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
@@ -373,6 +380,13 @@ class StrategyScheduler:
                         min_volume_24h=min_vol,
                         exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
                     )
+                    if exclude_funding_enabled(strategy):
+                        pool_symbols = await filter_pool_symbols_by_funding(
+                            public_binance,
+                            pool_symbols,
+                            direction=strategy.direction,
+                            threshold_pct=funding_rate_threshold_pct(strategy),
+                        )
                     if min_vol > 0 and not pool_symbols:
                         logger.info(
                             "Strategy %d: coin pool empty after min_volume_24h=%.0f USDT",

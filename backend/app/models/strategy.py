@@ -72,6 +72,10 @@ class Strategy(Base):
     exclude_delisting: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     # True: 选币池模式下排除 BTC/ETH 等主流币（固定交易对不受限）
     exclude_mainstream: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # True: 选币池模式下按资金费率过滤新开仓（已有持仓仍管理）
+    exclude_funding: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # 最近结算资金费率阈值(%): 做多 rate>阈值 过滤；做空 rate<阈值 过滤；默认 0
+    funding_rate_threshold_pct: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
 
     # Runtime state
     status: Mapped[str] = mapped_column(String(20), default="stopped")  # 'running', 'stopped', 'error'

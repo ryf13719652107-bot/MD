@@ -53,6 +53,8 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN exclude_tradefi BOOLEAN DEFAULT 1",
             "ALTER TABLE strategies ADD COLUMN exclude_delisting BOOLEAN DEFAULT 1",
             "ALTER TABLE strategies ADD COLUMN exclude_mainstream BOOLEAN DEFAULT 1",
+            "ALTER TABLE strategies ADD COLUMN exclude_funding BOOLEAN DEFAULT 0",
+            "ALTER TABLE strategies ADD COLUMN funding_rate_threshold_pct FLOAT DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN coin_pool_min_volume_24h FLOAT DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN price_drop_multiplier FLOAT DEFAULT 1.0",
         ]

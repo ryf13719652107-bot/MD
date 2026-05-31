@@ -56,6 +56,16 @@ class StrategyCreate(BaseModel):
         default=True,
         description="选币池模式下排除 BTC/ETH 等主流币；固定交易对不受限",
     )
+    exclude_funding: bool = Field(
+        default=False,
+        description="选币池模式下按最近一次已结算资金费率过滤新开仓",
+    )
+    funding_rate_threshold_pct: float = Field(
+        default=0.0,
+        ge=-5.0,
+        le=5.0,
+        description="最近结算资金费率阈值(%): 做多>阈值、做空<阈值 时不开新仓",
+    )
 
 
 class StrategyUpdate(BaseModel):
@@ -93,6 +103,8 @@ class StrategyUpdate(BaseModel):
     exclude_tradefi: Optional[bool] = None
     exclude_delisting: Optional[bool] = None
     exclude_mainstream: Optional[bool] = None
+    exclude_funding: Optional[bool] = None
+    funding_rate_threshold_pct: Optional[float] = Field(default=None, ge=-5.0, le=5.0)
 
 
 class StrategyResponse(BaseModel):
@@ -132,6 +144,8 @@ class StrategyResponse(BaseModel):
     exclude_tradefi: bool
     exclude_delisting: bool
     exclude_mainstream: bool
+    exclude_funding: bool
+    funding_rate_threshold_pct: float
     status: str
     started_at: Optional[datetime] = None
     last_rsi: Optional[float] = None

@@ -45,6 +45,8 @@ const schema = z.object({
   exclude_tradefi: z.coerce.boolean(),
   exclude_delisting: z.coerce.boolean(),
   exclude_mainstream: z.coerce.boolean(),
+  exclude_funding: z.coerce.boolean(),
+  funding_rate_threshold_pct: z.number().min(-5).max(5),
 });
 
 const WAN = 1e4;
@@ -94,6 +96,8 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       exclude_tradefi: initialData.exclude_tradefi ?? true,
       exclude_delisting: initialData.exclude_delisting ?? true,
       exclude_mainstream: initialData.exclude_mainstream ?? true,
+      exclude_funding: initialData.exclude_funding ?? false,
+      funding_rate_threshold_pct: initialData.funding_rate_threshold_pct ?? 0,
     };
   }
   return {
@@ -132,6 +136,8 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     exclude_tradefi: true,
     exclude_delisting: true,
     exclude_mainstream: true,
+    exclude_funding: false,
+    funding_rate_threshold_pct: 0,
   };
 }
 
@@ -154,6 +160,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
   const signalSource = watch('signal_source', 'rsi');
   const useCoinPool = watch('use_coin_pool', true);
   const stopLossEnabled = watch('stop_loss_enabled', true);
+  const excludeFunding = watch('exclude_funding', false);
 
   // Auto-adjust RSI threshold on mount and when direction changes
   useEffect(() => {
@@ -317,6 +324,41 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <p className="text-xs text-gray-400 mt-1 leading-relaxed">
                 <strong className="text-gray-300">默认开启</strong>：选币池模式下排除 BTC、ETH、BNB、SOL 等主流币；固定交易对不受限；已有持仓仍会管理。
               </p>
+            </div>
+          </div>
+        )}
+
+        {useCoinPool && (
+          <div className="rounded-lg border border-violet-500/35 bg-violet-950/20 px-3 py-2.5 flex items-start gap-3">
+            <label className="relative inline-flex items-center cursor-pointer mt-0.5 shrink-0">
+              <input type="checkbox" {...register('exclude_funding')} className="sr-only peer" />
+              <div className="w-9 h-5 bg-gray-600 peer-checked:bg-violet-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
+            </label>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium text-violet-100/95">资金费率过滤（最近结算费率）</div>
+              <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                <strong className="text-gray-300">默认关闭</strong>：仅选币池模式生效；已有持仓仍会管理。
+                {direction === 'long'
+                  ? ' 做多：费率高于阈值时不开新仓（多头付钱一侧）。'
+                  : ' 做空：费率低于阈值时不开新仓（空头付钱一侧）。'}
+              </p>
+              {excludeFunding && (
+                <div className="mt-2 max-w-xs">
+                  <label className={labelClass}>
+                    {direction === 'long' ? '费率高于 (%) 不开新仓' : '费率低于 (%) 不开新仓'}
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    {...register('funding_rate_threshold_pct', { valueAsNumber: true })}
+                    className={inputClass}
+                    placeholder={direction === 'long' ? '0 表示 >0% 即过滤' : '0 表示 <0% 即过滤'}
+                  />
+                  <span className="text-xs text-gray-600">
+                    单位：上一档结算费率 %（周期因合约而异）；默认 0（做多过滤正费率，做空过滤负费率）
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
