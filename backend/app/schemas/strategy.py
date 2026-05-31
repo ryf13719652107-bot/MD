@@ -52,6 +52,10 @@ class StrategyCreate(BaseModel):
         default=True,
         description="排除 14 天内下架或非 TRADING 的 USDT 永续",
     )
+    exclude_mainstream: bool = Field(
+        default=True,
+        description="选币池模式下排除 BTC/ETH 等主流币；固定交易对不受限",
+    )
 
 
 class StrategyUpdate(BaseModel):
@@ -88,6 +92,7 @@ class StrategyUpdate(BaseModel):
     coin_pool_min_volume_24h: Optional[float] = Field(default=None, ge=0)
     exclude_tradefi: Optional[bool] = None
     exclude_delisting: Optional[bool] = None
+    exclude_mainstream: Optional[bool] = None
 
 
 class StrategyResponse(BaseModel):
@@ -126,6 +131,7 @@ class StrategyResponse(BaseModel):
     coin_pool_min_volume_24h: float
     exclude_tradefi: bool
     exclude_delisting: bool
+    exclude_mainstream: bool
     status: str
     started_at: Optional[datetime] = None
     last_rsi: Optional[float] = None

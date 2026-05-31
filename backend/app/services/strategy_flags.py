@@ -8,6 +8,13 @@ def exclude_delisting_enabled(strategy) -> bool:
     return bool(v)
 
 
+def exclude_mainstream_enabled(strategy) -> bool:
+    v = getattr(strategy, "exclude_mainstream", None)
+    if v is None:
+        return True
+    return bool(v)
+
+
 def normalize_coin_pool_source(source: str | None) -> str:
     if not source:
         return "gainers"

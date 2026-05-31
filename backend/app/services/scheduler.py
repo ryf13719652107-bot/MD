@@ -18,7 +18,7 @@ from .binance_service import (
     get_public_binance,
     get_strategy_pool_exclude_symbols,
 )
-from .strategy_flags import exclude_delisting_enabled, normalize_coin_pool_source
+from .strategy_flags import exclude_delisting_enabled, exclude_mainstream_enabled, normalize_coin_pool_source
 from .encryption import decrypt
 from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
@@ -365,6 +365,7 @@ class StrategyScheduler:
                         public_binance,
                         exclude_tradefi=bool(strategy.exclude_tradefi),
                         exclude_delisting=exclude_delisting_enabled(strategy),
+                        exclude_mainstream=exclude_mainstream_enabled(strategy),
                     )
                     pool_symbols = await coin_pool_service.get_pool_symbols(
                         normalize_coin_pool_source(strategy.coin_pool_source),

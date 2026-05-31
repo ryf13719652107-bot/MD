@@ -200,6 +200,16 @@ export default function StrategyDetailPage() {
               </div>
             </div>
           )}
+          {strategy.use_coin_pool && (
+            <div>
+              <span className={labelClass}>主流币过滤</span>
+              <div className={valClass}>
+                {(strategy.exclude_mainstream !== false)
+                  ? '已排除 BTC/ETH 等 20 个主流币'
+                  : '未排除'}
+              </div>
+            </div>
+          )}
           <div>
             <span className={labelClass}>TradFi / 股票永续</span>
             <div className={valClass}>
@@ -256,6 +266,7 @@ export default function StrategyDetailPage() {
                   : ' 不限制'}
                 {strategy.exclude_tradefi ? ' + 已排除 TradFi' : ''}
                 {strategy.exclude_delisting !== false ? ' + 已排除14天内下架' : ''}
+                {strategy.exclude_mainstream !== false ? ' + 已排除主流币' : ''}
               </p>
             )}
             {displayPool.length === 0 ? (

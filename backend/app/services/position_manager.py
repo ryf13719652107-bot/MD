@@ -304,10 +304,15 @@ class PositionManager:
         result = await session.execute(stmt)
         open_positions = list(result.scalars().all())
 
-        from ..services.strategy_flags import exclude_delisting_enabled
+        from ..services.strategy_flags import exclude_delisting_enabled, exclude_mainstream_enabled
 
-        if getattr(strategy, "exclude_tradefi", False) or exclude_delisting_enabled(
-            strategy
+        mainstream_exclude = bool(
+            strategy.use_coin_pool and exclude_mainstream_enabled(strategy)
+        )
+        if (
+            getattr(strategy, "exclude_tradefi", False)
+            or exclude_delisting_enabled(strategy)
+            or mainstream_exclude
         ):
             from ..services.binance_service import get_strategy_pool_exclude_symbols
 
@@ -315,6 +320,7 @@ class PositionManager:
                 public_binance,
                 exclude_tradefi=bool(getattr(strategy, "exclude_tradefi", False)),
                 exclude_delisting=exclude_delisting_enabled(strategy),
+                exclude_mainstream=mainstream_exclude,
             )
             if excluded and _norm_sym(symbol) in excluded and not open_positions:
                 return

@@ -44,6 +44,7 @@ const schema = z.object({
   coin_pool_min_volume_24h: z.number().min(0).max(99999999),
   exclude_tradefi: z.coerce.boolean(),
   exclude_delisting: z.coerce.boolean(),
+  exclude_mainstream: z.coerce.boolean(),
 });
 
 const WAN = 1e4;
@@ -92,6 +93,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       coin_pool_min_volume_24h: (initialData.coin_pool_min_volume_24h ?? 0) / WAN,
       exclude_tradefi: initialData.exclude_tradefi ?? true,
       exclude_delisting: initialData.exclude_delisting ?? true,
+      exclude_mainstream: initialData.exclude_mainstream ?? true,
     };
   }
   return {
@@ -129,6 +131,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     coin_pool_min_volume_24h: 0,
     exclude_tradefi: true,
     exclude_delisting: true,
+    exclude_mainstream: true,
   };
 }
 
@@ -302,6 +305,21 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             </p>
           </div>
         </div>
+
+        {useCoinPool && (
+          <div className="rounded-lg border border-sky-500/35 bg-sky-950/20 px-3 py-2.5 flex items-start gap-3">
+            <label className="relative inline-flex items-center cursor-pointer mt-0.5 shrink-0">
+              <input type="checkbox" {...register('exclude_mainstream')} className="sr-only peer" />
+              <div className="w-9 h-5 bg-gray-600 peer-checked:bg-sky-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
+            </label>
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-sky-100/95">排除主流币（BTC/ETH 等 20 个）</div>
+              <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                <strong className="text-gray-300">默认开启</strong>：选币池模式下排除 BTC、ETH、BNB、SOL 等主流币；固定交易对不受限；已有持仓仍会管理。
+              </p>
+            </div>
+          </div>
+        )}
 
         {!useCoinPool && (
           <div className="grid grid-cols-3 gap-3">

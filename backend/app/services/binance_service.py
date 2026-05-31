@@ -40,6 +40,31 @@ EXCLUDED_COMMODITY_SYMBOLS: frozenset[str] = frozenset({
     "COPPERUSDT",
 })
 
+# 主流加密货币（选币池模式排除；含 MATIC/POL 两种 ticker）
+EXCLUDED_MAINSTREAM_SYMBOLS: frozenset[str] = frozenset({
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "AVAXUSDT",
+    "LINKUSDT",
+    "DOTUSDT",
+    "MATICUSDT",
+    "POLUSDT",
+    "LTCUSDT",
+    "TRXUSDT",
+    "SHIBUSDT",
+    "BCHUSDT",
+    "UNIUSDT",
+    "ATOMUSDT",
+    "ETCUSDT",
+    "FILUSDT",
+    "NEARUSDT",
+})
+
 # 前缀匹配（base = 去掉 USDT 后），勿用 "GAS" 以免误伤加密货币 GASUSDT
 _NON_CRYPTO_BASE_PREFIXES: tuple[str, ...] = (
     "XAU",
@@ -110,6 +135,7 @@ async def get_strategy_pool_exclude_symbols(
     *,
     exclude_tradefi: bool = False,
     exclude_delisting: bool = True,
+    exclude_mainstream: bool = False,
 ) -> frozenset[str] | None:
     """策略选币/开仓用排除集合（normalized）。"""
     merged: set[str] = set()
@@ -117,6 +143,8 @@ async def get_strategy_pool_exclude_symbols(
         merged |= set(await get_cached_tradefi_symbols(binance))
     if exclude_delisting:
         merged |= set(await get_cached_delisting_soon_symbols(binance))
+    if exclude_mainstream:
+        merged |= set(EXCLUDED_MAINSTREAM_SYMBOLS)
     return frozenset(merged) if merged else None
 
 

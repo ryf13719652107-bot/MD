@@ -70,6 +70,8 @@ class Strategy(Base):
     exclude_tradefi: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     # True: 排除 14 天内下架或非 TRADING 的合约（无仓时不开新单）
     exclude_delisting: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # True: 选币池模式下排除 BTC/ETH 等主流币（固定交易对不受限）
+    exclude_mainstream: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
 
     # Runtime state
     status: Mapped[str] = mapped_column(String(20), default="stopped")  # 'running', 'stopped', 'error'

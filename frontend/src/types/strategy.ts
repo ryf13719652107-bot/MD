@@ -35,6 +35,7 @@ export interface Strategy {
   coin_pool_min_volume_24h: number;
   exclude_tradefi: boolean;
   exclude_delisting: boolean;
+  exclude_mainstream: boolean;
   status: 'running' | 'stopped' | 'error';
   started_at: string | null;
   last_rsi: number | null;
@@ -79,4 +80,5 @@ export interface StrategyFormData {
   coin_pool_min_volume_24h: number;
   exclude_tradefi: boolean;
   exclude_delisting: boolean;
+  exclude_mainstream: boolean;
 }

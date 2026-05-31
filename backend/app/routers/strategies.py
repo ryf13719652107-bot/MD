@@ -9,7 +9,7 @@ from ..schemas.coin_pool import CoinPoolResponse
 from ..services.scheduler import strategy_scheduler
 from ..services.backup_service import backup_trade
 from ..services.coin_pool_service import coin_pool_service
-from ..services.strategy_flags import exclude_delisting_enabled, normalize_coin_pool_source
+from ..services.strategy_flags import exclude_delisting_enabled, exclude_mainstream_enabled, normalize_coin_pool_source
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
@@ -66,6 +66,7 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
         public,
         exclude_tradefi=bool(strategy.exclude_tradefi),
         exclude_delisting=exclude_delisting_enabled(strategy),
+        exclude_mainstream=exclude_mainstream_enabled(strategy),
     )
 
     entries = await coin_pool_service.get_effective_pool_entries(
