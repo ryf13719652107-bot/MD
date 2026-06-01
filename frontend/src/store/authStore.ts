@@ -3,6 +3,7 @@ import { create } from 'zustand';
 export type UiRole = 'owner' | 'guest';
 
 const STORAGE_KEY = 'martin_ui_role';
+const WRITE_TOKEN_KEY = 'martin_write_token';
 
 function authDisabled(): boolean {
   return import.meta.env.VITE_UI_AUTH_DISABLED === 'true';
@@ -50,6 +51,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     if (ownerPwd !== '' && input === ownerPwd) {
       try {
         sessionStorage.setItem(STORAGE_KEY, 'owner');
+        sessionStorage.setItem(WRITE_TOKEN_KEY, input);
       } catch {
         /* ignore */
       }
@@ -59,6 +61,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     if (guestPwd !== '' && input === guestPwd) {
       try {
         sessionStorage.setItem(STORAGE_KEY, 'guest');
+        sessionStorage.removeItem(WRITE_TOKEN_KEY);
       } catch {
         /* ignore */
       }
@@ -72,6 +75,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     if (authDisabled()) return;
     try {
       sessionStorage.removeItem(STORAGE_KEY);
+      sessionStorage.removeItem(WRITE_TOKEN_KEY);
     } catch {
       /* ignore */
     }

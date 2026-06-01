@@ -3,10 +3,28 @@ import type { Strategy, StrategyFormData } from '../types/strategy';
 
 // Same-origin `/api`: Vite dev server proxies to backend; production is served by FastAPI with API on the same host (also works behind reverse proxy on 80/443).
 const BASE = '/api';
+const WRITE_TOKEN_KEY = 'martin_write_token';
+
+/** owner 登录密码 → X-Write-Token；与 backend API_WRITE_TOKEN（同 owner 密码）一致 */
+function getWriteToken(): string {
+  try {
+    const fromSession = sessionStorage.getItem(WRITE_TOKEN_KEY);
+    if (fromSession?.trim()) return fromSession.trim();
+    if (sessionStorage.getItem('martin_ui_role') === 'owner') {
+      return (import.meta.env.VITE_UI_OWNER_PASSWORD ?? '').trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  if (import.meta.env.VITE_UI_AUTH_DISABLED === 'true') {
+    return (import.meta.env.VITE_UI_OWNER_PASSWORD ?? '').trim();
+  }
+  return (import.meta.env.VITE_API_WRITE_TOKEN ?? '').trim();
+}
 
 function writeHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { 'Content-Type': 'application/json', ...extra };
-  const token = (import.meta.env.VITE_API_WRITE_TOKEN ?? '').trim();
+  const token = getWriteToken();
   if (token) h['X-Write-Token'] = token;
   return h;
 }
