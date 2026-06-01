@@ -1,6 +1,7 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+import re
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import select, delete as sqla_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db
 from ..models.account import Account
@@ -10,9 +11,33 @@ from ..services.encryption import encrypt, decrypt, mask_key
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
+_SPAM_NAME = re.compile(
+    r"^(race_|proto_test$|test$|.*\.php$)",
+    re.IGNORECASE,
+)
+
+
+def is_spam_account_name(name: str) -> bool:
+    return bool(_SPAM_NAME.search((name or "").strip()))
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host or "?"
+    return "?"
+
 
 @router.post("", response_model=AccountResponse)
-async def create_account(data: AccountCreate, db: AsyncSession = Depends(get_db)):
+async def create_account(data: AccountCreate, request: Request, db: AsyncSession = Depends(get_db)):
+    logger.info(
+        "创建账户 name=%s testnet=%s ip=%s",
+        data.name,
+        data.testnet,
+        _client_ip(request),
+    )
     try:
         encrypted_key = encrypt(data.api_key)
         encrypted_secret = encrypt(data.api_secret)
@@ -66,27 +91,23 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
     return resp
 
 
-@router.delete("/{account_id}", status_code=204)
-async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
-    account = await db.get(Account, account_id)
-    if not account:
-        raise HTTPException(status_code=404, detail="账户不存在")
-
+async def _delete_account_record(account_id: int, db: AsyncSession) -> None:
     from ..models.strategy import Strategy
     from ..services.scheduler import strategy_scheduler
     from ..services.log_service import strategy_log_service
-    from ..services.encryption import decrypt
+
+    account = await db.get(Account, account_id)
+    if not account:
+        return
 
     result = await db.execute(select(Strategy).where(Strategy.account_id == account_id))
     strategies = result.scalars().all()
 
-    # 1. Stop all scheduler jobs for running strategies
     for s in strategies:
         if s.status == "running":
             await strategy_scheduler.remove_strategy(s.id)
         strategy_log_service.clear(s.id)
 
-    # 2. Close all exchange positions for this account before wiping DB
     exchange_close_errors: list[str] = []
     try:
         from ..services.binance_service import get_binance_service
@@ -118,11 +139,9 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
             "账户 %d 删除时部分仓位未能平仓: %s", account_id, "; ".join(exchange_close_errors)
         )
 
-    # 3. Explicit cleanup — 逐表 DELETE，防御层；CASCADE 兜底
     from ..models.position import Position
     from ..models.trade import Trade
     from ..models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline
-    from sqlalchemy import delete as sqla_delete
 
     await db.execute(sqla_delete(AccountBalanceSnapshot).where(AccountBalanceSnapshot.account_id == account_id))
     await db.execute(sqla_delete(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
@@ -130,4 +149,35 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     await db.execute(sqla_delete(Trade).where(Trade.account_id == account_id))
     await db.execute(sqla_delete(Strategy).where(Strategy.account_id == account_id))
     await db.execute(sqla_delete(Account).where(Account.id == account_id))
+
+
+@router.post("/purge-spam")
+async def purge_spam_accounts(request: Request, db: AsyncSession = Depends(get_db)):
+    """批量删除名称匹配垃圾模式的账户（race_* / proto_test / test / *.php）。"""
+    result = await db.execute(select(Account))
+    accounts = list(result.scalars().all())
+    targets = [a for a in accounts if is_spam_account_name(a.name)]
+    deleted: list[dict] = []
+    for a in targets:
+        aid = a.id
+        name = a.name
+        await _delete_account_record(aid, db)
+        deleted.append({"id": aid, "name": name})
+    await db.commit()
+    logger.info(
+        "purge-spam deleted %d accounts ip=%s names=%s",
+        len(deleted),
+        _client_ip(request),
+        [d["name"] for d in deleted[:20]],
+    )
+    return {"deleted_count": len(deleted), "deleted": deleted}
+
+
+@router.delete("/{account_id}", status_code=204)
+async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
+    account = await db.get(Account, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账户不存在")
+
+    await _delete_account_record(account_id, db)
     await db.commit()

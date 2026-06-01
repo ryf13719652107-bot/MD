@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     binance_testnet: bool = True
     cors_origins: str = "http://8.211.153.248:8000"
     http_proxy: str = ""
+    # 非空时：所有 POST/PUT/DELETE/PATCH /api/* 须带请求头 X-Write-Token（与前端 VITE_API_WRITE_TOKEN 一致）
+    api_write_token: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

@@ -108,6 +108,12 @@ async def lifespan(app: FastAPI):
             logger.warning("Coin pool bootstrap refresh: %s", e)
 
     asyncio.create_task(_bootstrap_pool_refresh())
+    if not (settings.api_write_token or "").strip():
+        logger.warning(
+            "API_WRITE_TOKEN 未配置 — 所有写接口对公网开放，极易被刷账户！请在 backend/.env 设置 API_WRITE_TOKEN"
+        )
+    else:
+        logger.info("API write token enabled for mutating /api/* requests")
     logger.info("Backend ready")
     yield
     logger.info("Shutting down...")
@@ -123,7 +129,7 @@ async def lifespan(app: FastAPI):
 
 import os
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 app = FastAPI(
     title="Smart Hedge Martin",
@@ -139,6 +145,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_WRITE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+
+@app.middleware("http")
+async def enforce_api_write_token(request: Request, call_next):
+    """写操作须带 X-Write-Token，与 backend/.env API_WRITE_TOKEN 一致。"""
+    path = request.url.path
+    if path.startswith("/api/") and request.method in _WRITE_METHODS:
+        expected = (settings.api_write_token or "").strip()
+        if expected:
+            token = (request.headers.get("X-Write-Token") or "").strip()
+            if token != expected:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "未授权：缺少或无效的 X-Write-Token"},
+                )
+    return await call_next(request)
 
 
 @app.exception_handler(Exception)

@@ -4,9 +4,16 @@ import type { Strategy, StrategyFormData } from '../types/strategy';
 // Same-origin `/api`: Vite dev server proxies to backend; production is served by FastAPI with API on the same host (also works behind reverse proxy on 80/443).
 const BASE = '/api';
 
+function writeHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { 'Content-Type': 'application/json', ...extra };
+  const token = (import.meta.env.VITE_API_WRITE_TOKEN ?? '').trim();
+  if (token) h['X-Write-Token'] = token;
+  return h;
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${url}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers: writeHeaders(options?.headers as Record<string, string> | undefined),
     ...options,
   });
   if (!res.ok) {
@@ -32,6 +39,8 @@ export const api = {
     request<Account>('/accounts', { method: 'POST', body: JSON.stringify(data) }),
   listAccounts: (): Promise<Account[]> => request<Account[]>('/accounts'),
   deleteAccount: (id: number): Promise<void> => request<void>(`/accounts/${id}`, { method: 'DELETE' }),
+  purgeSpamAccounts: (): Promise<{ deleted_count: number; deleted: { id: number; name: string }[] }> =>
+    request('/accounts/purge-spam', { method: 'POST' }),
 
   // Strategies
   createStrategy: (data: StrategyFormData): Promise<Strategy> =>

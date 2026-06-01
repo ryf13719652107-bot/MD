@@ -52,6 +52,18 @@ export default function SettingsPage() {
     }
   };
 
+  const handlePurgeSpam = async () => {
+    if (!confirm('将批量删除名称形如 race_*、proto_test、test、*.php 的账户。\n\n你的实盘账户（1、似弥、贪婪者）不会匹配。\n\n确定继续？')) return;
+    setSaveError('');
+    try {
+      const r = await api.purgeSpamAccounts();
+      alert(`已清理 ${r.deleted_count} 个垃圾账户`);
+      await load();
+    } catch (e: any) {
+      setSaveError(`清理失败: ${e.message}`);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-2xl">
       <h2 className="text-xl font-bold">系统设置</h2>
@@ -92,6 +104,16 @@ export default function SettingsPage() {
 
         {!loading && accounts.length === 0 && !error && (
           <p className="text-gray-600 text-sm py-2">暂无账户，请添加币安API密钥</p>
+        )}
+
+        {!loading && accounts.some((a) => /^(race_|proto_test$|test$|.*\.php$)/i.test(a.name)) && (
+          <button
+            type="button"
+            onClick={handlePurgeSpam}
+            className="mt-3 px-3 py-1.5 bg-red-700 hover:bg-red-600 rounded text-sm text-white"
+          >
+            一键清理垃圾账户（race_* / 测试占位）
+          </button>
         )}
 
         {!showForm && (
