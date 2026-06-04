@@ -393,16 +393,49 @@ class BinanceService:
                 return out
             raise
 
-    async def fetch_leverage(self, symbol: str | None = None, use_coin_pool: bool = False) -> float:
-        """Fetch leverage for a symbol. Defaults to 20x if not set or if using coin pool."""
-        if not symbol or use_coin_pool:
-            return 20.0
+    def _binance_futures_symbol_id(self, symbol: str) -> str:
+        formatted = self._format_symbol(symbol)
+        return formatted.replace("/", "").replace(":USDT", "")
+
+    @staticmethod
+    def _leverage_already_set_error(exc: Exception) -> bool:
+        """Binance -4028 when target leverage already active — safe to proceed."""
+        msg = str(exc).lower()
+        return "already exist" in msg or ("-4028" in msg and "already" in msg)
+
+    async def fetch_leverage(self, symbol: str) -> float | None:
+        """Query exchange leverage for a symbol; None if unavailable."""
         try:
-            formatted = self._format_symbol(symbol)
-            response = await self.exchange.fapiPrivate_get_leverage({"symbol": formatted.replace("/", "").replace(":USDT", "")})
-            return float(response.get("leverage", 20))
+            bin_sym = self._binance_futures_symbol_id(symbol)
+            response = await self.exchange.fapiPrivate_get_leverage({"symbol": bin_sym})
+            return float(response.get("leverage", 0) or 0)
         except Exception:
-            return 20.0
+            return None
+
+    async def set_symbol_leverage(self, symbol: str, leverage: int) -> int:
+        """
+        Set USDT-M contract leverage on Binance for symbol (POST /fapi/v1/leverage).
+        Returns the leverage value applied (clamped 1–125). Raises on API failure.
+        """
+        lev = max(1, min(125, int(leverage)))
+        formatted = self._format_symbol(symbol)
+        bin_sym = self._binance_futures_symbol_id(symbol)
+        await self.exchange.load_markets()
+        try:
+            await self.exchange.set_leverage(lev, formatted)
+            return lev
+        except Exception as e1:
+            if self._leverage_already_set_error(e1):
+                logger.debug("leverage already %sx for %s", lev, bin_sym)
+                return lev
+            logger.debug("set_leverage ccxt path failed for %s: %s", bin_sym, e1)
+            try:
+                await self.exchange.fapiPrivatePostLeverage({"symbol": bin_sym, "leverage": lev})
+                return lev
+            except Exception as e2:
+                if self._leverage_already_set_error(e2):
+                    return lev
+                raise RuntimeError(f"设置杠杆失败 {bin_sym} {lev}x: {e2}") from e2
 
     # ---- Orders (Private) ----
 

@@ -533,6 +533,15 @@ class PositionManager:
         ps = "LONG" if signal == Signal.LONG else "SHORT"
         position_side = "long" if side == "buy" else "short"
 
+        lev_int = max(1, min(125, int(leverage or strategy.leverage or 10)))
+        try:
+            applied = await auth_binance.set_symbol_leverage(symbol, lev_int)
+            strategy_log_service.info(strategy_id, f"{symbol} 已设置交易所杠杆 {applied}x")
+        except Exception as e:
+            logger.error("Strategy %d: set leverage for %s failed: %s", strategy_id, symbol, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 设置杠杆失败，已取消开仓 — {e}")
+            return
+
         try:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,

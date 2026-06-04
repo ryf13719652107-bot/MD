@@ -86,7 +86,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       stop_loss_enabled: initialData.stop_loss_enabled ?? true,
       stop_loss_pct: initialData.stop_loss_pct,
       slippage_pct: initialData.slippage_pct ?? 0.5,
-      leverage: initialData.leverage ?? 20,
+      leverage: initialData.leverage ?? 10,
       use_coin_pool: initialData.use_coin_pool,
       coin_pool_source: initialData.coin_pool_source,
       coin_pool_refresh_seconds: initialData.coin_pool_refresh_seconds ?? 3600,
@@ -126,7 +126,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     stop_loss_enabled: false,
     stop_loss_pct: 5,
     slippage_pct: 0.5,
-    leverage: 20,
+    leverage: 10,
     use_coin_pool: true,
     coin_pool_source: 'gainers',
     coin_pool_refresh_seconds: 3600,
@@ -502,7 +502,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           <div>
             <label className={labelClass}>合约杠杆</label>
             <input type="number" {...register('leverage', { valueAsNumber: true })} className={inputClass} />
-            <span className="text-xs text-gray-600">如20表示20倍杠杆</span>
+            <span className="text-xs text-gray-600">默认10x；首单开仓前自动调用币安 set_leverage</span>
           </div>
         </div>
 

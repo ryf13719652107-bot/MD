@@ -176,7 +176,7 @@ export default function StrategyDetailPage() {
           </div>
           <div>
             <span className={labelClass}>杠杆 / 滑点</span>
-            <div className={valClass}>{strategy.leverage}x / {strategy.slippage_pct}%</div>
+            <div className={valClass}>{strategy.leverage}x（首单设交易所） / {strategy.slippage_pct}%</div>
           </div>
           <div>
             <span className={labelClass}>保证金阈值</span>

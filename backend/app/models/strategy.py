@@ -56,7 +56,7 @@ class Strategy(Base):
     slippage_pct: Mapped[float] = mapped_column(Float, default=0.5)  # Max slippage %, 0 = disabled
 
     # Leverage
-    leverage: Mapped[int] = mapped_column(Integer, default=20)  # Contract leverage
+    leverage: Mapped[int] = mapped_column(Integer, default=10)  # Contract leverage
 
     # Coin pool
     use_coin_pool: Mapped[bool] = mapped_column(Boolean, default=True)

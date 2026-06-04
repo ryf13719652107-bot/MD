@@ -35,7 +35,7 @@ class StrategyCreate(BaseModel):
     # Slippage protection
     slippage_pct: float = Field(default=0.5, ge=0, le=10)
     # Leverage
-    leverage: int = Field(default=20, ge=1, le=125)
+    leverage: int = Field(default=10, ge=1, le=125)
     # Coin pool
     use_coin_pool: bool = True
     coin_pool_source: Literal["gainers", "losers", "both"] = "gainers"

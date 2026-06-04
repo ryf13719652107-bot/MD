@@ -265,7 +265,7 @@ class StrategyScheduler:
 
             # Check margin threshold
             total_margin = 0.0
-            leverage = float(strategy.leverage) if strategy.leverage else 20.0
+            leverage = float(strategy.leverage) if strategy.leverage else 10.0
             if auth_binance:
                 try:
                     balance = await auth_binance.fetch_balance()
