@@ -111,7 +111,7 @@ export const api = {
     if (params?.symbol?.trim()) qs.set('symbol', params.symbol.trim());
     if (params?.side) qs.set('side', params.side);
     if (params?.account_id != null) qs.set('account_id', String(params.account_id));
-    if (params?.limit ?? 0) > 0) qs.set('limit', String(params!.limit));
+    if (params?.limit != null && params.limit > 0) qs.set('limit', String(params.limit));
     if (params?.offset != null && params.offset >= 0) qs.set('offset', String(params.offset));
     const q = qs.toString();
     return request(`/trades${q ? `?${q}` : ''}`);
