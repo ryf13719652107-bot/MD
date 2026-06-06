@@ -1,9 +1,11 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import { useAuthStore } from '../../store/authStore';
 import type { Trade } from '../../types';
-import { Download, Trash2, RotateCcw } from 'lucide-react';
+import { Download, Trash2, RotateCcw, Search, X } from 'lucide-react';
+
+type SideFilter = 'all' | 'long' | 'short';
 
 export default function TradesPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -14,18 +16,41 @@ export default function TradesPage() {
   const guest = useAuthStore((s) => s.role === 'guest');
   const loadRef = useRef<() => void>(() => {});
 
-  const load = async () => {
-    const data = await api.listTrades({ limit, offset: page * limit, account_id: selectedAccountId ?? undefined });
-    setTrades(data.trades);
-    setTotal(data.total);
-  };
+  const [symbolInput, setSymbolInput] = useState('');
+  const [appliedSymbol, setAppliedSymbol] = useState('');
+  const [sideFilter, setSideFilter] = useState<SideFilter>('all');
+
+  const hasFilter = appliedSymbol !== '' || sideFilter !== 'all';
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.listTrades({
+        limit,
+        offset: page * limit,
+        account_id: selectedAccountId ?? undefined,
+        symbol: appliedSymbol || undefined,
+        side: sideFilter === 'all' ? undefined : sideFilter,
+      });
+      setTrades(data.trades);
+      setTotal(data.total);
+    } catch {
+      setTrades([]);
+      setTotal(0);
+    }
+  }, [page, selectedAccountId, appliedSymbol, sideFilter]);
+
   loadRef.current = load;
 
   useEffect(() => {
     setPage(0);
+    setSymbolInput('');
+    setAppliedSymbol('');
+    setSideFilter('all');
   }, [selectedAccountId]);
 
-  useEffect(() => { load(); }, [page, selectedAccountId]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   useEffect(() => {
     const timer = setInterval(() => loadRef.current(), 30000);
@@ -35,7 +60,6 @@ export default function TradesPage() {
   const [backupCount, setBackupCount] = useState(0);
   const [restoring, setRestoring] = useState(false);
 
-  // 按当前选中账户统计备份条数（与其它列表一致）
   useEffect(() => {
     if (selectedAccountId == null) {
       setBackupCount(0);
@@ -43,6 +67,23 @@ export default function TradesPage() {
     }
     api.getBackupStats(selectedAccountId).then((s) => setBackupCount(s.count)).catch(() => setBackupCount(0));
   }, [selectedAccountId]);
+
+  const applySearch = () => {
+    setAppliedSymbol(symbolInput.trim());
+    setPage(0);
+  };
+
+  const clearFilters = () => {
+    setSymbolInput('');
+    setAppliedSymbol('');
+    setSideFilter('all');
+    setPage(0);
+  };
+
+  const handleSideChange = (v: SideFilter) => {
+    setSideFilter(v);
+    setPage(0);
+  };
 
   const handleDeleteOne = async (id: number) => {
     if (!confirm('确定要删除这条交易记录吗？')) return;
@@ -97,7 +138,7 @@ export default function TradesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-xl font-bold">交易历史</h2>
         <div className="flex items-center gap-2">
           <button
@@ -111,7 +152,7 @@ export default function TradesPage() {
             }
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm ${
               guest || selectedAccountId == null
-                ? 'bg-red-600/10 text-red-400/50 cursor-not-allowed'
+                ? 'bg-red-600/20 text-red-400/50 cursor-not-allowed'
                 : 'bg-red-600/20 hover:bg-red-600/40 text-red-400'
             }`}
           >
@@ -131,7 +172,7 @@ export default function TradesPage() {
             }
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm ${
               guest || selectedAccountId == null || backupCount === 0
-                ? 'bg-green-600/10 text-green-400/50 cursor-not-allowed'
+                ? 'bg-green-600/20 text-green-400/50 cursor-not-allowed'
                 : 'bg-green-600/20 hover:bg-green-600/40 text-green-400'
             }`}
           >
@@ -143,6 +184,53 @@ export default function TradesPage() {
             导出CSV
           </button>
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div className="flex-1 min-w-[140px] max-w-xs">
+          <label className="block text-xs text-gray-500 mb-1">交易对</label>
+          <input
+            type="text"
+            value={symbolInput}
+            onChange={(e) => setSymbolInput(e.target.value.toUpperCase())}
+            onKeyDown={(e) => e.key === 'Enter' && applySearch()}
+            placeholder="如 BTC 或 BTCUSDT"
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">方向</label>
+          <select
+            value={sideFilter}
+            onChange={(e) => handleSideChange(e.target.value as SideFilter)}
+            className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="all">全部</option>
+            <option value="long">做多</option>
+            <option value="short">做空</option>
+          </select>
+        </div>
+        <button
+          type="button"
+          onClick={applySearch}
+          className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg text-sm"
+        >
+          <Search size={16} />
+          搜索
+        </button>
+        {hasFilter && (
+          <button
+            type="button"
+            onClick={clearFilters}
+            className="flex items-center gap-1 text-gray-400 hover:text-gray-200 text-sm py-1.5"
+          >
+            <X size={14} />
+            重置
+          </button>
+        )}
+        <span className="text-xs text-gray-500 ml-auto pb-1.5">
+          {hasFilter ? `筛选结果 ${total} 条` : `共 ${total} 条`}
+        </span>
       </div>
 
       <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
@@ -213,7 +301,11 @@ export default function TradesPage() {
               </tr>
             ))}
             {trades.length === 0 && (
-              <tr><td colSpan={10} className="p-8 text-center text-gray-600">暂无交易记录</td></tr>
+              <tr>
+                <td colSpan={10} className="p-8 text-center text-gray-600">
+                  {hasFilter ? '没有符合条件的交易记录' : '暂无交易记录'}
+                </td>
+              </tr>
             )}
           </tbody>
         </table>

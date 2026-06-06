@@ -98,13 +98,21 @@ export const api = {
     request(`/positions/${id}/close`, { method: 'POST' }),
 
   // Trades
-  listTrades: (params?: { strategy_id?: number; symbol?: string; account_id?: number; limit?: number; offset?: number }): Promise<{ trades: Trade[]; total: number }> => {
+  listTrades: (params?: {
+    strategy_id?: number;
+    symbol?: string;
+    side?: 'long' | 'short';
+    account_id?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ trades: Trade[]; total: number }> => {
     const qs = new URLSearchParams();
     if (params?.strategy_id) qs.set('strategy_id', String(params.strategy_id));
-    if (params?.symbol) qs.set('symbol', params.symbol);
+    if (params?.symbol?.trim()) qs.set('symbol', params.symbol.trim());
+    if (params?.side) qs.set('side', params.side);
     if (params?.account_id != null) qs.set('account_id', String(params.account_id));
-    if (params?.limit) qs.set('limit', String(params.limit));
-    if (params?.offset) qs.set('offset', String(params.offset));
+    if (params?.limit ?? 0) > 0) qs.set('limit', String(params!.limit));
+    if (params?.offset != null && params.offset >= 0) qs.set('offset', String(params.offset));
     const q = qs.toString();
     return request(`/trades${q ? `?${q}` : ''}`);
   },

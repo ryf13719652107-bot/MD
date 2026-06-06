@@ -2,6 +2,7 @@ import csv
 import io
 import logging
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -49,9 +50,33 @@ def _restore_pk(val) -> int | None:
         return None
 
 
+def _normalize_symbol_query(raw: str | None) -> str:
+    return (raw or "").strip().upper().replace("/", "").replace(":USDT", "")
+
+
+def _like_pattern(raw: str) -> str:
+    """Escape SQL LIKE wildcards so user input is matched literally."""
+    escaped = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _apply_trade_filters(stmt, count_stmt, *, symbol: str | None, side: str | None):
+    sym_q = _normalize_symbol_query(symbol)
+    if sym_q:
+        pattern = _like_pattern(sym_q)
+        cond = Trade.symbol.ilike(pattern, escape="\\")
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
+    if side in ("long", "short"):
+        stmt = stmt.where(Trade.side == side)
+        count_stmt = count_stmt.where(Trade.side == side)
+    return stmt, count_stmt
+
+
 @router.get("", response_model=TradeListResponse)
 async def list_trades(
-    symbol: str | None = None,
+    symbol: str | None = Query(default=None, description="交易对模糊搜索，如 BTC 或 BTCUSDT"),
+    side: Literal["long", "short"] | None = Query(default=None, description="方向：long 做多 / short 做空"),
     strategy_id: int | None = None,
     account_id: int | None = None,
     limit: int = Query(default=50, le=500),
@@ -61,10 +86,6 @@ async def list_trades(
     stmt = select(Trade).order_by(Trade.exit_time.desc())
     count_stmt = select(func.count(Trade.id))
 
-    if symbol:
-        stmt = stmt.where(Trade.symbol == symbol)
-        count_stmt = count_stmt.where(Trade.symbol == symbol)
-
     if strategy_id is not None:
         stmt = stmt.where(Trade.strategy_id == strategy_id)
         count_stmt = count_stmt.where(Trade.strategy_id == strategy_id)
@@ -72,6 +93,8 @@ async def list_trades(
     if account_id is not None:
         stmt = stmt.where(Trade.account_id == account_id)
         count_stmt = count_stmt.where(Trade.account_id == account_id)
+
+    stmt, count_stmt = _apply_trade_filters(stmt, count_stmt, symbol=symbol, side=side)
 
     stmt = stmt.offset(offset).limit(limit)
     result = await db.execute(stmt)
