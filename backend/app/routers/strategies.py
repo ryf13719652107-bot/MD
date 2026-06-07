@@ -86,10 +86,6 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
         exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
     )
     if exclude_funding_enabled(strategy):
-        rates_map = {
-            _panic_symbol_key(c.symbol): c
-            for c in entries
-        }
         allowed = await filter_pool_symbols_by_funding(
             public,
             [c.symbol for c in entries],
@@ -97,7 +93,7 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
             threshold_pct=funding_rate_threshold_pct(strategy),
         )
         allowed_norm = {_panic_symbol_key(s) for s in allowed}
-        entries = [rates_map[k] for k in allowed_norm if k in rates_map]
+        entries = [c for c in entries if _panic_symbol_key(c.symbol) in allowed_norm]
 
     from ..services.coin_pool_presenter import coin_pool_responses_with_funding
 

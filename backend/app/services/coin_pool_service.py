@@ -12,6 +12,25 @@ from .position_manager import _norm_sym
 logger = logging.getLogger(__name__)
 
 
+def sort_coin_pool_by_price_change(coins: list[CoinPool], source: str | None = None) -> list[CoinPool]:
+    """按涨跌幅排序：涨幅榜降序，跌幅榜升序；both 时涨幅段在前。"""
+    if not coins:
+        return coins
+    src = (source or "").lower()
+    if src == "gainers":
+        return sorted(coins, key=lambda c: c.price_change_pct, reverse=True)
+    if src == "losers":
+        return sorted(coins, key=lambda c: c.price_change_pct)
+    gainers = sorted(
+        [c for c in coins if c.source == "gainers"],
+        key=lambda c: c.price_change_pct,
+        reverse=True,
+    )
+    losers = sorted([c for c in coins if c.source == "losers"], key=lambda c: c.price_change_pct)
+    other = [c for c in coins if c.source not in ("gainers", "losers")]
+    return gainers + losers + other
+
+
 class CoinPoolService:
     def __init__(self):
         self._refresh_task: asyncio.Task | None = None
@@ -192,7 +211,8 @@ class CoinPoolService:
             elif source:
                 stmt = stmt.where(CoinPool.source == source)
             result = await session.execute(stmt)
-            return list(result.scalars().all())
+            coins = list(result.scalars().all())
+            return sort_coin_pool_by_price_change(coins, source)
 
     async def get_effective_pool_entries(
         self,
@@ -210,7 +230,7 @@ class CoinPoolService:
             coins = [c for c in coins if (c.volume_24h or 0) >= min_volume_24h]
         if exclude_symbols_norm:
             coins = [c for c in coins if _norm_sym(c.symbol) not in exclude_symbols_norm]
-        return coins
+        return sort_coin_pool_by_price_change(coins, source)
 
     async def get_pool_symbols(
         self,
