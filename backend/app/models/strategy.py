@@ -19,7 +19,7 @@ class Strategy(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=True)  # NULL = use coin pool
 
     # Signal source
-    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' or 'wavetrend'
+    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' | 'wavetrend' | 'martingale_base'(不看指标，每根K线开盘开首单)
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)

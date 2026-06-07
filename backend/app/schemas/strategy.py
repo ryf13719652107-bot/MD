@@ -8,7 +8,7 @@ class StrategyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: Literal["long", "short"]
     symbol: Optional[str] = None  # None = use coin pool
-    signal_source: Literal["rsi", "wavetrend"] = "wavetrend"
+    signal_source: Literal["rsi", "wavetrend", "martingale_base"] = "wavetrend"
     rsi_period: int = Field(default=14, ge=5, le=50)
     timeframe: Literal["1m", "5m", "15m", "1h"] = "1m"
     margin_threshold: float = Field(default=0.0, ge=0)
@@ -72,7 +72,7 @@ class StrategyUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     direction: Optional[Literal["long", "short"]] = None
     symbol: Optional[str] = None
-    signal_source: Optional[Literal["rsi", "wavetrend"]] = None
+    signal_source: Optional[Literal["rsi", "wavetrend", "martingale_base"]] = None
     rsi_period: Optional[int] = Field(default=None, ge=5, le=50)
     timeframe: Optional[Literal["1m", "5m", "15m", "1h"]] = None
     margin_threshold: Optional[float] = Field(default=None, ge=0)

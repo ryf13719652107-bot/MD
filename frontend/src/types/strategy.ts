@@ -4,7 +4,7 @@ export interface Strategy {
   name: string;
   direction: 'long' | 'short';
   symbol: string | null;
-  signal_source: 'rsi' | 'wavetrend';
+  signal_source: 'rsi' | 'wavetrend' | 'martingale_base';
   rsi_period: number;
   timeframe: string;
   wt_channel_length: number;
@@ -52,7 +52,7 @@ export interface StrategyFormData {
   name: string;
   direction: 'long' | 'short';
   symbol?: string;
-  signal_source: 'rsi' | 'wavetrend';
+  signal_source: 'rsi' | 'wavetrend' | 'martingale_base';
   rsi_period: number;
   timeframe: string;
   wt_channel_length: number;
@@ -85,4 +85,32 @@ export interface StrategyFormData {
   exclude_mainstream: boolean;
   exclude_funding: boolean;
   funding_rate_threshold_pct: number;
+}
+
+export function formatSignalSourceLabel(
+  source: Strategy['signal_source'],
+  direction: Strategy['direction'],
+  rsiEntryThreshold?: number,
+): string {
+  if (source === 'wavetrend') return 'WaveTrend';
+  if (source === 'martingale_base') return '基础马丁';
+  return `RSI ${direction === 'long' ? '<' : '>'} ${rsiEntryThreshold ?? ''}`;
+}
+
+export function formatLastSignalText(
+  source: Strategy['signal_source'],
+  lastSignal: string | null | undefined,
+  lastRsi: number | null | undefined,
+): string {
+  const dir =
+    lastSignal === 'long'
+      ? '做多'
+      : lastSignal === 'short'
+        ? '做空'
+        : lastSignal === 'neutral'
+          ? '无信号'
+          : lastSignal ?? '无信号';
+  if (source === 'martingale_base') return `基础马丁 → ${dir}`;
+  const metric = source === 'wavetrend' ? 'WT1' : 'RSI';
+  return `${metric} ${lastRsi ?? '-'} → ${dir}`;
 }

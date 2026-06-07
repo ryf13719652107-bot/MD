@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { Strategy } from '../../types/strategy';
+import { formatLastSignalText, formatSignalSourceLabel } from '../../types/strategy';
 import type { Account } from '../../types';
 import StrategyForm from './StrategyForm';
 import { Play, Square, AlertTriangle, Edit, Trash2, Plus, Eye } from 'lucide-react';
@@ -152,10 +153,12 @@ export default function StrategyPage() {
               <div>K线周期: <span className="text-gray-200">{s.timeframe}</span></div>
               {s.signal_source === 'wavetrend' ? (
                 <div>WT参数: <span className="text-gray-200">通道{s.wt_channel_length} 均线{s.wt_average_length}</span></div>
+              ) : s.signal_source === 'martingale_base' ? (
+                <div>开仓方式: <span className="text-gray-200">每根K线开盘</span></div>
               ) : (
                 <div>RSI周期: <span className="text-gray-200">{s.rsi_period}</span></div>
               )}
-              <div>信号: <span className="text-gray-200">{s.signal_source === 'wavetrend' ? 'WaveTrend' : `RSI ${s.direction === 'long' ? '<' : '>'} ${s.rsi_entry_threshold}`}</span></div>
+              <div>信号: <span className="text-gray-200">{formatSignalSourceLabel(s.signal_source, s.direction, s.rsi_entry_threshold)}</span></div>
               <div>首单仓位: <span className="text-gray-200">{s.base_qty_type === 'margin_pct' ? `保证金${s.base_qty_value}%` : `${s.base_qty_value} USDT`}</span></div>
               <div>加仓倍数: <span className="text-gray-200">x{s.martingale_mult}</span></div>
               <div>最大层数: <span className="text-gray-200">{s.max_layers}</span></div>
@@ -180,11 +183,11 @@ export default function StrategyPage() {
                     : `<${s.funding_rate_threshold_pct ?? 0}% 过滤`}
                 </span></div>
               )}
-              {s.last_rsi != null && (
+              {(s.last_rsi != null || s.last_signal_at) && (
                 <div className="col-span-2 mt-1 pt-1 border-t border-gray-800">
                   <span className="text-gray-500">最近信号: </span>
                   <span className={s.last_signal === 'long' ? 'text-green-400' : s.last_signal === 'short' ? 'text-red-400' : 'text-gray-400'}>
-                    {s.signal_source === 'wavetrend' ? 'WT1' : 'RSI'} {s.last_rsi} → {s.last_signal === 'long' ? '做多' : s.last_signal === 'short' ? '做空' : '无信号'}
+                    {formatLastSignalText(s.signal_source, s.last_signal, s.last_rsi)}
                   </span>
                   {s.last_signal_at && (
                     <span className="text-gray-600 ml-2">{new Date(s.last_signal_at).toLocaleTimeString()}</span>

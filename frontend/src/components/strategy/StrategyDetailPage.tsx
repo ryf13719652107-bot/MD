@@ -4,6 +4,7 @@ import { poolSourceBadgeClass, poolSourceLabel } from '../../utils/poolSource';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import type { Strategy } from '../../types/strategy';
+import { formatLastSignalText } from '../../types/strategy';
 import type { CoinPoolEntry, Trade } from '../../types';
 import { ArrowLeft, Terminal } from 'lucide-react';
 
@@ -155,7 +156,7 @@ export default function StrategyDetailPage() {
           <div>
             <span className={labelClass}>信号源</span>
             <div className={valClass}>
-              {strategy.signal_source === 'wavetrend' ? `WaveTrend (通道${strategy.wt_channel_length} 均线${strategy.wt_average_length})` : `RSI (周期${strategy.rsi_period} ${strategy.direction === 'long' ? '<' : '>'}${strategy.rsi_entry_threshold})`}
+              {strategy.signal_source === 'wavetrend' ? `WaveTrend (通道${strategy.wt_channel_length} 均线${strategy.wt_average_length})` : strategy.signal_source === 'martingale_base' ? '基础马丁 (每根K线开盘开首单)' : `RSI (周期${strategy.rsi_period} ${strategy.direction === 'long' ? '<' : '>'}${strategy.rsi_entry_threshold})`}
             </div>
           </div>
           <div>
@@ -232,7 +233,7 @@ export default function StrategyDetailPage() {
             <div>
               <span className={labelClass}>最近信号</span>
               <div className={`text-sm ${strategy.last_signal === 'long' ? 'text-green-400' : strategy.last_signal === 'short' ? 'text-red-400' : 'text-gray-400'}`}>
-                {strategy.signal_source === 'wavetrend' ? 'WT1' : 'RSI'} {strategy.last_rsi} → {strategy.last_signal === 'long' ? '做多' : strategy.last_signal === 'short' ? '做空' : strategy.last_signal}
+                {formatLastSignalText(strategy.signal_source, strategy.last_signal, strategy.last_rsi)}
                 <span className="text-gray-600 ml-1">{strategy.last_signal_at ? new Date(strategy.last_signal_at).toLocaleTimeString() : ''}</span>
               </div>
             </div>

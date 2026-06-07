@@ -10,7 +10,7 @@ const schema = z.object({
   name: z.string().min(1, '请输入策略名称').max(100),
   direction: z.enum(['long', 'short']),
   symbol: z.string().optional().or(z.literal('')),
-  signal_source: z.enum(['rsi', 'wavetrend']),
+  signal_source: z.enum(['rsi', 'wavetrend', 'martingale_base']),
   rsi_period: z.number().min(5).max(50),
   timeframe: z.enum(['1m', '5m', '15m', '1h']),
   wt_channel_length: z.number().min(2).max(50),
@@ -210,6 +210,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <select {...register('signal_source')} className={inputClass}>
               <option value="rsi">RSI</option>
               <option value="wavetrend">WaveTrend</option>
+              <option value="martingale_base">基础马丁（每根K线开盘开首单）</option>
             </select>
           </div>
           <div>
@@ -260,6 +261,19 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <input type="number" step="1" {...register('wt_os_level', { valueAsNumber: true })} className={inputClass} />
               <span className="text-xs text-gray-600">金叉+WT1低于此值开多，默认-60</span>
             </div>
+          </div>
+        )}
+
+        {signalSource === 'martingale_base' && (
+          <div className="rounded-md border border-amber-700/50 bg-amber-900/20 px-3 py-2 text-xs text-amber-300 space-y-1">
+            <p>
+              基础马丁：不计算任何指标，每根K线开盘时对无持仓的币按「{direction === 'long' ? '做多' : '做空'}」方向直接开首单，之后由马丁加仓/止盈逻辑接管。
+            </p>
+            <p>
+              {useCoinPool
+                ? '可与选币池配合：对池内每个币独立开首单，TradFi/下架/主流/资金费率等过滤与 RSI、WaveTrend 相同。'
+                : '当前为固定交易对模式；开启选币池后将对池内每个币独立开首单。'}
+            </p>
           </div>
         )}
 

@@ -27,6 +27,13 @@ def _norm_sym(s: str) -> str:
     return (s or "").upper().replace("/", "").replace(":USDT", "")
 
 
+def _open_signal_log_suffix(signal_label: str, rsi: float) -> str:
+    """Format signal part of open logs; basic martingale has no indicator value."""
+    if signal_label == "基础马丁":
+        return "基础马丁"
+    return f"{signal_label}={round(rsi, 1)}"
+
+
 def _position_opened_at_from_exchange(ep: dict) -> Optional[datetime]:
     ts = ep.get("timestamp")
     dt = naive_beijing_from_ms_or_s(ts)
@@ -342,7 +349,19 @@ class PositionManager:
         klines_signal = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
         rsi = 0.0
         signal_label = "RSI"
-        if strategy.signal_source == "wavetrend":
+        if strategy.signal_source == "martingale_base":
+            # 基础马丁：不看任何指标，每根 K 线开盘按策略方向直接开首单。
+            signal = Signal.LONG if strategy.direction == "long" else Signal.SHORT
+            strategy.last_rsi = 0.0
+            strategy.last_signal = signal.value
+            strategy.last_signal_at = now_beijing()
+            rsi = 0.0
+            signal_label = "基础马丁"
+            strategy_log_service.info(
+                strategy_id,
+                f"{symbol} 基础马丁 → {signal.value}",
+            )
+        elif strategy.signal_source == "wavetrend":
             wt = calculate_wavetrend(
                 klines_signal, strategy.wt_channel_length, strategy.wt_average_length
             )
@@ -551,7 +570,7 @@ class PositionManager:
         strategy_log_service.success(
             strategy_id,
             f"{symbol} 市价开{position_side}已成交 qty={filled_qty:.4f} "
-            f"price={avg_price:.4f} {candidate.signal_label}={round(candidate.rsi, 1)}",
+            f"price={avg_price:.4f} {_open_signal_log_suffix(candidate.signal_label, candidate.rsi)}",
         )
 
         eng = MartingaleEngine(
@@ -648,19 +667,18 @@ class PositionManager:
             return
 
         logger.info(
-            "Strategy %d: opened %s %s qty=%.4f price=%.4f %s=%.1f",
+            "Strategy %d: opened %s %s qty=%.4f price=%.4f %s",
             strategy_id,
             result.side,
             symbol,
             result.base_qty,
             result.avg_price,
-            result.signal_label,
-            result.rsi,
+            _open_signal_log_suffix(result.signal_label, result.rsi),
         )
         strategy_log_service.success(
             strategy_id,
             f"{symbol} 开{result.position_side}成功 qty={result.base_qty:.4f} "
-            f"price={result.avg_price:.4f} {result.signal_label}={round(result.rsi, 1)}",
+            f"price={result.avg_price:.4f} {_open_signal_log_suffix(result.signal_label, result.rsi)}",
         )
 
     async def process_symbol(
@@ -1142,8 +1160,14 @@ class PositionManager:
         side = "buy" if pos_side == "long" else "sell"
         ps = "LONG" if pos_side == "long" else "SHORT"
 
-        # Signal re-check for martingale add (if enabled)
-        if strategy.martingale_rsi_enabled and klines is not None and public_binance is not None:
+        # Signal re-check for martingale add (if enabled).
+        # 基础马丁不看指标，加仓不做信号确认。
+        if (
+            strategy.martingale_rsi_enabled
+            and strategy.signal_source != "martingale_base"
+            and klines is not None
+            and public_binance is not None
+        ):
             klines_confirm = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
             if strategy.signal_source == "wavetrend":
                 wt = calculate_wavetrend(
