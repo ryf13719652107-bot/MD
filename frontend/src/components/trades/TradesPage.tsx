@@ -237,7 +237,7 @@ export default function TradesPage() {
         <table className="w-full text-sm">
           <thead>
             <tr className="text-gray-500 text-left border-b border-gray-800">
-              <th className="p-3">平仓时间</th>
+              <th className="p-3">开仓时间</th>
               <th className="p-3">交易对</th>
               <th className="p-3">方向</th>
               <th className="p-3">成本(USDT)</th>
@@ -246,13 +246,14 @@ export default function TradesPage() {
               <th className="p-3">盈亏</th>
               <th className="p-3">盈亏%</th>
               <th className="p-3">平仓原因</th>
+              <th className="p-3">平仓时间</th>
               <th className="p-3 w-10"></th>
             </tr>
           </thead>
           <tbody>
             {trades.map((t) => (
               <tr key={t.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                <td className="p-3 text-gray-400">{new Date(t.exit_time).toLocaleString()}</td>
+                <td className="p-3 text-gray-400">{new Date(t.entry_time).toLocaleString()}</td>
                 <td className="p-3 font-medium">{t.symbol}</td>
                 <td className={`p-3 ${t.side === 'long' ? 'text-green-400' : 'text-red-400'}`}>
                   {t.side === 'long' ? '做多' : '做空'}
@@ -283,6 +284,7 @@ export default function TradesPage() {
                      t.close_reason === 'manual' ? '手动平仓' : t.close_reason}
                   </span>
                 </td>
+                <td className="p-3 text-gray-400">{new Date(t.exit_time).toLocaleString()}</td>
                 <td className="p-3">
                   <button
                     type="button"
@@ -302,7 +304,7 @@ export default function TradesPage() {
             ))}
             {trades.length === 0 && (
               <tr>
-                <td colSpan={10} className="p-8 text-center text-gray-600">
+                <td colSpan={11} className="p-8 text-center text-gray-600">
                   {hasFilter ? '没有符合条件的交易记录' : '暂无交易记录'}
                 </td>
               </tr>
