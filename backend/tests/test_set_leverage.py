@@ -9,6 +9,7 @@ async def test_set_symbol_leverage_uses_ccxt():
     svc = BinanceService.__new__(BinanceService)
     svc.hedge_mode = True
     svc.exchange = MagicMock()
+    svc._leverage_cache = {}
     svc.exchange.load_markets = AsyncMock()
     svc.exchange.set_leverage = AsyncMock()
     svc.exchange.fapiPrivatePostLeverage = AsyncMock()
@@ -25,6 +26,7 @@ async def test_set_symbol_leverage_fallback_raw_api():
     svc = BinanceService.__new__(BinanceService)
     svc.hedge_mode = True
     svc.exchange = MagicMock()
+    svc._leverage_cache = {}
     svc.exchange.load_markets = AsyncMock()
     svc.exchange.set_leverage = AsyncMock(side_effect=Exception("ccxt fail"))
     svc.exchange.fapiPrivatePostLeverage = AsyncMock()
@@ -42,6 +44,7 @@ async def test_set_symbol_leverage_already_set_treated_ok():
     svc = BinanceService.__new__(BinanceService)
     svc.hedge_mode = True
     svc.exchange = MagicMock()
+    svc._leverage_cache = {}
     svc.exchange.load_markets = AsyncMock()
     svc.exchange.set_leverage = AsyncMock(
         side_effect=Exception('{"code":-4028,"msg":"Leverage 10 already exist with 10"}')
@@ -58,6 +61,7 @@ async def test_set_symbol_leverage_clamps():
     svc = BinanceService.__new__(BinanceService)
     svc.hedge_mode = False
     svc.exchange = MagicMock()
+    svc._leverage_cache = {}
     svc.exchange.load_markets = AsyncMock()
     svc.exchange.set_leverage = AsyncMock()
 

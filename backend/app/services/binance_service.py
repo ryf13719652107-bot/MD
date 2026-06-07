@@ -214,6 +214,8 @@ class BinanceService:
         self._ws_exchange: Optional[ccxtpro.binanceusdm] = None
         self._created_at: float = time.time()
         self._pinned: bool = False
+        self._markets_loaded: bool = False
+        self._leverage_cache: dict[str, int] = {}
 
     def _is_expired(self) -> bool:
         if self._pinned:
@@ -258,7 +260,18 @@ class BinanceService:
         self._exchange = self._create_exchange(False)
         self._ws_exchange = self._create_exchange(True)
         self._created_at = time.time()
+        self._markets_loaded = False
+        self._leverage_cache.clear()
         logger.info("BinanceService TTL expired, recreated exchange instances")
+
+    def begin_tick(self) -> None:
+        """Per-tick hook; leverage cache is kept so pool/strategy prewarm hits cache at open."""
+        pass
+
+    async def ensure_markets_loaded(self) -> None:
+        if not self._markets_loaded:
+            await self.exchange.load_markets()
+            self._markets_loaded = True
 
     async def fetch_exchange_info_symbols(self) -> list[dict]:
         try:
@@ -420,20 +433,26 @@ class BinanceService:
         lev = max(1, min(125, int(leverage)))
         formatted = self._format_symbol(symbol)
         bin_sym = self._binance_futures_symbol_id(symbol)
-        await self.exchange.load_markets()
+        cached = self._leverage_cache.get(bin_sym)
+        if cached == lev:
+            return lev
         try:
             await self.exchange.set_leverage(lev, formatted)
+            self._leverage_cache[bin_sym] = lev
             return lev
         except Exception as e1:
             if self._leverage_already_set_error(e1):
                 logger.debug("leverage already %sx for %s", lev, bin_sym)
+                self._leverage_cache[bin_sym] = lev
                 return lev
             logger.debug("set_leverage ccxt path failed for %s: %s", bin_sym, e1)
             try:
                 await self.exchange.fapiPrivatePostLeverage({"symbol": bin_sym, "leverage": lev})
+                self._leverage_cache[bin_sym] = lev
                 return lev
             except Exception as e2:
                 if self._leverage_already_set_error(e2):
+                    self._leverage_cache[bin_sym] = lev
                     return lev
                 raise RuntimeError(f"设置杠杆失败 {bin_sym} {lev}x: {e2}") from e2
 

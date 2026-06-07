@@ -18,6 +18,7 @@ from .binance_service import (
     get_public_binance,
     get_strategy_pool_exclude_symbols,
     filter_pool_symbols_by_funding,
+    get_cached_last_funding_rates_pct,
 )
 from .strategy_flags import (
     exclude_delisting_enabled,
@@ -31,6 +32,8 @@ from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
 from .sync_service import PositionSyncService
 from .position_manager import PositionManager, _norm_sym
+from .tick_context import TickContext, exchange_legs_from_positions
+from .account_concurrency import account_order_sem, account_sync_lock
 from .backup_service import backup_trade
 
 logger = logging.getLogger(__name__)
@@ -42,15 +45,7 @@ _STRATEGY_SEMAPHORE = asyncio.Semaphore(10)
 
 def _exchange_leg_map_from_positions(raw_positions: list) -> dict[tuple[str, str], float]:
     """Merge exchange position rows by (symbol, side) → contracts (same as panic close)."""
-    leg_map: dict[tuple[str, str], float] = {}
-    for ep in raw_positions:
-        contracts = float(ep.get("contracts", 0) or 0)
-        if contracts <= 0:
-            continue
-        sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
-        side = (ep.get("side") or "").lower()
-        leg_map[(sym, side)] = leg_map.get((sym, side), 0) + contracts
-    return leg_map
+    return exchange_legs_from_positions(raw_positions)
 
 
 def _merge_pool_and_open_symbols(pool_symbols: list[str], open_symbols: list[str]) -> list[str]:
@@ -93,6 +88,7 @@ class StrategyScheduler:
         self._syncer = PositionSyncService()
         self._position_mgr = PositionManager()
         self._strategy_locks: dict[int, asyncio.Lock] = {}
+        self._bg_sync_tasks: set[asyncio.Task] = set()
 
     @property
     def scheduler(self) -> AsyncIOScheduler:
@@ -174,6 +170,11 @@ class StrategyScheduler:
         await session.refresh(strategy)
         logger.info("Strategy %d (%s) started", strategy_id, strategy.name)
         strategy_log_service.success(strategy_id, f"策略启动 — {strategy.name}")
+        from .leverage_prewarm import prewarm_strategy_leverage_by_id
+
+        task = asyncio.create_task(prewarm_strategy_leverage_by_id(strategy_id))
+        self._bg_sync_tasks.add(task)
+        task.add_done_callback(self._bg_sync_tasks.discard)
         return True
 
     async def remove_strategy(self, strategy_id: int):
@@ -238,6 +239,14 @@ class StrategyScheduler:
                     await session.commit()
                 except Exception as e:
                     logger.error("Strategy %d TP check error: %s", strategy_id, e)
+
+    async def _sync_account_background(self, auth_binance: BinanceService, account_id: int):
+        lock = account_sync_lock(account_id)
+        async with lock:
+            try:
+                await self._syncer.sync(auth_binance, account_id, auth_binance)
+            except Exception as e:
+                logger.error("Background sync failed for account %d: %s", account_id, e)
 
     async def _execute_strategy_impl(self, strategy_id: int):
         async with async_session() as session:
@@ -442,28 +451,157 @@ class StrategyScheduler:
                     summ = f"未平仓 {n} 个: {head}"
                 strategy_log_service.info(strategy_id, summ)
 
-            # Process each symbol — commit after each symbol so one failure does not roll back the entire tick
+            # Tick-level context: filters + exchange snapshot (once per tick per account)
+            mainstream_exclude = bool(
+                strategy.use_coin_pool and exclude_mainstream_enabled(strategy)
+            )
+            exclude_norm: frozenset[str] = frozenset()
+            if (
+                getattr(strategy, "exclude_tradefi", False)
+                or exclude_delisting_enabled(strategy)
+                or mainstream_exclude
+            ):
+                excluded = await get_strategy_pool_exclude_symbols(
+                    public_binance,
+                    exclude_tradefi=bool(strategy.exclude_tradefi),
+                    exclude_delisting=exclude_delisting_enabled(strategy),
+                    exclude_mainstream=mainstream_exclude,
+                )
+                exclude_norm = frozenset(excluded) if excluded else frozenset()
+
+            funding_rates = None
+            funding_filter_enabled = False
+            if strategy.use_coin_pool and exclude_funding_enabled(strategy):
+                funding_filter_enabled = True
+                funding_rates = await get_cached_last_funding_rates_pct(public_binance)
+
+            auth_binance.begin_tick()
+            await auth_binance.ensure_markets_loaded()
+            raw_exchange_positions: list = []
+            exchange_legs: dict[tuple[str, str], float] = {}
+            try:
+                raw_exchange_positions = await auth_binance.fetch_positions()
+                exchange_legs = exchange_legs_from_positions(raw_exchange_positions)
+            except Exception as e:
+                logger.warning(
+                    "Strategy %d: tick fetch_positions failed: %s", strategy_id, e,
+                )
+
+            tick_ctx = TickContext(
+                exclude_norm=exclude_norm,
+                funding_rates=funding_rates,
+                funding_filter_enabled=funding_filter_enabled,
+                exchange_legs=exchange_legs,
+                raw_exchange_positions=raw_exchange_positions,
+                allow_new_norms=pool_entry_norms,
+            )
+
+            # Preload open positions per symbol (one query)
+            stmt_all_open = select(Position).where(
+                Position.strategy_id == strategy_id,
+                Position.closed_at.is_(None),
+            )
+            all_open = list((await session.execute(stmt_all_open)).scalars().all())
+            open_by_norm: dict[str, list[Position]] = {}
+            for p in all_open:
+                k = _norm_sym(p.symbol)
+                open_by_norm.setdefault(k, []).append(p)
+            for positions in open_by_norm.values():
+                positions.sort(key=lambda x: x.layer, reverse=True)
+
+            candidates = []
             for symbol in symbols:
-                allow_new = pool_entry_norms is None or _norm_sym(symbol) in pool_entry_norms
+                sym_key = _norm_sym(symbol)
+                allow_new = pool_entry_norms is None or sym_key in pool_entry_norms
+                open_positions = open_by_norm.get(sym_key, [])
                 try:
-                    await self._position_mgr.process_symbol(
-                        session, strategy, symbol, auth_binance, public_binance,
-                        total_margin, leverage,
-                        allow_new_position=allow_new,
-                    )
+                    if open_positions:
+                        await self._position_mgr.manage_symbol(
+                            session, strategy, symbol, auth_binance, public_binance,
+                            open_positions, total_margin, leverage, tick_ctx,
+                        )
+                        await session.commit()
+                    elif allow_new:
+                        c = await self._position_mgr.evaluate_signal(
+                            session, strategy, symbol, public_binance, total_margin, tick_ctx,
+                        )
+                        try:
+                            await session.commit()
+                        except Exception as e:
+                            logger.error(
+                                "Strategy %d: commit after evaluate %s failed: %s",
+                                strategy_id, symbol, e,
+                            )
+                            await session.rollback()
+                            continue
+                        if c:
+                            candidates.append(c)
                 except Exception as e:
                     logger.error("Strategy %d: error processing %s: %s", strategy_id, symbol, e)
                     await session.rollback()
                     continue
-                try:
-                    await session.commit()
-                except Exception as e:
-                    logger.error("Strategy %d: commit after %s failed: %s", strategy_id, symbol, e)
-                    await session.rollback()
 
-            # Sync after signal processing — TP detection runs first
+            # Phase 2: parallel open (API) + serial DB commit
+            open_batch = []
+            for cand in candidates:
+                side = cand.signal.value
+                leg_key = (_norm_sym(cand.symbol), side)
+                if tick_ctx.exchange_legs.get(leg_key, 0) > 0:
+                    try:
+                        await self._position_mgr._open_from_candidate(
+                            session, strategy, cand, auth_binance, public_binance,
+                            total_margin, leverage, tick_ctx,
+                        )
+                        await session.commit()
+                    except Exception as e:
+                        logger.error(
+                            "Strategy %d: reconcile/open precheck for %s failed: %s",
+                            strategy_id, cand.symbol, e,
+                        )
+                        await session.rollback()
+                else:
+                    open_batch.append(cand)
+
+            if open_batch and auth_binance:
+                sem = account_order_sem(sync_account_id)
+
+                async def _run_open_api(cand):
+                    async with sem:
+                        return await self._position_mgr.execute_open_api(
+                            cand, strategy, auth_binance, leverage,
+                        )
+
+                api_results = await asyncio.gather(
+                    *[_run_open_api(c) for c in open_batch],
+                    return_exceptions=True,
+                )
+                for cand, res in zip(open_batch, api_results):
+                    if isinstance(res, Exception):
+                        logger.error(
+                            "Strategy %d: parallel open API for %s failed: %s",
+                            strategy_id, cand.symbol, res,
+                        )
+                        continue
+                    if res is None:
+                        continue
+                    try:
+                        await self._position_mgr.execute_open_db(session, strategy, res)
+                        await session.commit()
+                    except Exception as e:
+                        logger.error(
+                            "Strategy %d: commit after open %s failed: %s",
+                            strategy_id, cand.symbol, e,
+                        )
+                        await session.rollback()
+
+            # Sync after signal processing — non-blocking background task.
+            # Keep a strong reference so the task is not GC'd mid-flight.
             if auth_binance:
-                await self._syncer.sync(auth_binance, sync_account_id, auth_binance)
+                task = asyncio.create_task(
+                    self._sync_account_background(auth_binance, sync_account_id)
+                )
+                self._bg_sync_tasks.add(task)
+                task.add_done_callback(self._bg_sync_tasks.discard)
 
 
 # Singleton

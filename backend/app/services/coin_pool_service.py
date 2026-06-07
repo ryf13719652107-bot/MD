@@ -34,6 +34,7 @@ def sort_coin_pool_by_price_change(coins: list[CoinPool], source: str | None = N
 class CoinPoolService:
     def __init__(self):
         self._refresh_task: asyncio.Task | None = None
+        self._bg_tasks: set[asyncio.Task] = set()
         self._config = {
             "refresh_interval_seconds": 3600,
             "pool_source": "both",
@@ -57,6 +58,11 @@ class CoinPoolService:
 
     def update_config(self, **kwargs):
         self._config.update(kwargs)
+
+    def _fire_background(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def sync_config_from_running_strategies(self) -> None:
         """按运行中策略汇总刷新周期与入库条数；仅一条策略时同步测试用 pool_source。"""
@@ -196,6 +202,9 @@ class CoinPoolService:
                 self._last_refresh_ok = False
                 self._last_error = str(e)[:200]
                 logger.error("Coin pool refresh error source=%s: %s", src, e)
+        from .leverage_prewarm import prewarm_running_strategies_leverage
+
+        self._fire_background(prewarm_running_strategies_leverage())
 
     async def get_pool(self, source: str | None = None) -> list[CoinPool]:
         """Get current coin pool from database.

@@ -2,7 +2,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.strategy import Strategy
@@ -16,6 +16,7 @@ from .risk_manager import RiskManager
 from .log_service import strategy_log_service
 from .kline_stream import kline_stream_manager, _timeframe_ms
 from .backup_service import backup_trade
+from .tick_context import TickContext, SignalCandidate, OpenApiResult, exchange_legs_from_positions
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,8 @@ class PositionManager:
         symbol: str,
         auth_binance: BinanceService,
         current_price: float,
+        *,
+        raw_exchange_positions: list[dict[str, Any]] | None = None,
     ) -> str:
         """Sync exchange net position into this strategy's DB row when missing.
 
@@ -163,11 +166,18 @@ class PositionManager:
         """
         strategy_id = strategy.id
         sym_target = _norm_sym(symbol)
-        try:
-            eps = await auth_binance.fetch_positions([symbol])
-        except Exception as e:
-            logger.warning("Strategy %d: fetch_positions for reconcile %s failed: %s", strategy_id, symbol, e)
-            return RECONCILE_NO_ORPHAN
+        if raw_exchange_positions is not None:
+            eps = [
+                ep
+                for ep in raw_exchange_positions
+                if _norm_sym(ep.get("symbol") or "") == sym_target
+            ]
+        else:
+            try:
+                eps = await auth_binance.fetch_positions([symbol])
+            except Exception as e:
+                logger.warning("Strategy %d: fetch_positions for reconcile %s failed: %s", strategy_id, symbol, e)
+                return RECONCILE_NO_ORPHAN
 
         conflict_stmt = (
             select(Position)
@@ -272,6 +282,376 @@ class PositionManager:
             return RECONCILE_SKIPPED_OTHER_STRATEGY
         return RECONCILE_NO_ORPHAN
 
+    def _open_positions_stmt(self, strategy_id: int, sym_key: str):
+        symbol_norm = func.replace(
+            func.replace(func.upper(Position.symbol), "/", ""),
+            ":USDT",
+            "",
+        )
+        return (
+            select(Position)
+            .where(
+                Position.strategy_id == strategy_id,
+                Position.closed_at.is_(None),
+                symbol_norm == sym_key,
+            )
+            .order_by(Position.layer.desc())
+        )
+
+    def _passes_new_entry_filters(self, symbol: str, strategy: Strategy, ctx: TickContext) -> bool:
+        sym_key = _norm_sym(symbol)
+        if ctx.allow_new_norms is not None and sym_key not in ctx.allow_new_norms:
+            return False
+        if sym_key in ctx.exclude_norm:
+            return False
+        if ctx.funding_filter_enabled and ctx.funding_rates is not None:
+            from ..services.strategy_flags import (
+                funding_rate_blocks_new_entry,
+                funding_rate_threshold_pct,
+            )
+
+            rate = ctx.funding_rates.get(sym_key, 0.0)
+            if funding_rate_blocks_new_entry(
+                strategy.direction,
+                rate,
+                funding_rate_threshold_pct(strategy),
+            ):
+                return False
+        return True
+
+    def _compute_base_qty(self, strategy: Strategy, total_margin: float, current_price: float) -> float | None:
+        base_qty = strategy.base_qty_value
+        if strategy.base_qty_type == "margin_pct":
+            if total_margin <= 0:
+                return None
+            base_qty = (total_margin * strategy.base_qty_value / 100) / current_price
+        elif strategy.base_qty_type == "usdt":
+            base_qty = strategy.base_qty_value / current_price
+        return base_qty
+
+    async def _fetch_klines_and_signal(
+        self,
+        strategy: Strategy,
+        symbol: str,
+        public_binance: BinanceService,
+    ) -> tuple[list, float, str, Signal] | None:
+        strategy_id = strategy.id
+        limit = 200 if strategy.signal_source == "wavetrend" else 100
+        klines = await kline_stream_manager.get(
+            public_binance, symbol, strategy.timeframe, min_bars=limit
+        )
+        if not klines:
+            try:
+                klines = await public_binance.fetch_klines(
+                    symbol, strategy.timeframe, limit=limit
+                )
+            except Exception as e:
+                logger.warning(
+                    "Strategy %d: %s kline fetch failed: %s",
+                    strategy_id, symbol, e,
+                )
+                return None
+
+        klines_signal = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
+        rsi = 0.0
+        signal_label = "RSI"
+        if strategy.signal_source == "wavetrend":
+            wt = calculate_wavetrend(
+                klines_signal, strategy.wt_channel_length, strategy.wt_average_length
+            )
+            if wt is None:
+                return None
+            signal = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
+            strategy.last_rsi = round(wt["wt1"], 2)
+            strategy.last_signal = signal.value
+            strategy.last_signal_at = now_beijing()
+            rsi = wt["wt1"]
+            signal_label = "WT1"
+            if signal != Signal.NEUTRAL:
+                strategy_log_service.info(
+                    strategy_id,
+                    f"{symbol} WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f} 信号={signal.value}",
+                )
+        else:
+            rsi = calculate_rsi(klines_signal, strategy.rsi_period)
+            if rsi is None:
+                return None
+            signal = generate_signal(rsi, strategy.direction, strategy.rsi_entry_threshold)
+            strategy.last_rsi = round(rsi, 1)
+            strategy.last_signal = signal.value
+            strategy.last_signal_at = now_beijing()
+            if signal != Signal.NEUTRAL:
+                strategy_log_service.info(
+                    strategy_id, f"{symbol} RSI={round(rsi, 1)} 信号={signal.value}"
+                )
+
+        try:
+            current_price = float(klines[-1][4])
+        except (TypeError, ValueError, IndexError):
+            logger.warning("Strategy %d: %s invalid kline data, skipping", strategy_id, symbol)
+            strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
+            return None
+
+        return klines, current_price, signal_label, signal
+
+    async def evaluate_signal(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        symbol: str,
+        public_binance: BinanceService,
+        total_margin: float,
+        ctx: TickContext,
+    ) -> SignalCandidate | None:
+        if not self._passes_new_entry_filters(symbol, strategy, ctx):
+            return None
+
+        fetched = await self._fetch_klines_and_signal(strategy, symbol, public_binance)
+        if not fetched:
+            return None
+        klines, current_price, signal_label, signal = fetched
+        if signal == Signal.NEUTRAL:
+            await session.flush()
+            return None
+
+        base_qty = self._compute_base_qty(strategy, total_margin, current_price)
+        if base_qty is None:
+            strategy_log_service.warning(
+                strategy.id,
+                f"{symbol} 无法开仓 — 余额为0(当前{total_margin:.1f})",
+            )
+            await session.flush()
+            return None
+
+        rsi = strategy.last_rsi or 0.0
+        return SignalCandidate(
+            symbol=symbol,
+            signal=signal,
+            klines=klines,
+            current_price=current_price,
+            rsi=float(rsi),
+            signal_label=signal_label,
+            base_qty=base_qty,
+        )
+
+    async def manage_symbol(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        symbol: str,
+        auth_binance: Optional[BinanceService],
+        public_binance: BinanceService,
+        open_positions: list[Position],
+        total_margin: float,
+        leverage: float,
+        ctx: TickContext,
+    ) -> None:
+        strategy_id = strategy.id
+        sym_key = _norm_sym(symbol)
+
+        fetched = await self._fetch_klines_and_signal(strategy, symbol, public_binance)
+        if not fetched:
+            return
+        klines, current_price, _signal_label, _signal = fetched
+
+        if auth_binance and not open_positions:
+            try:
+                outcome = await self._reconcile_orphan_from_exchange(
+                    session,
+                    strategy,
+                    symbol,
+                    auth_binance,
+                    current_price,
+                    raw_exchange_positions=ctx.raw_exchange_positions,
+                )
+                if outcome == RECONCILE_CREATED:
+                    result = await session.execute(self._open_positions_stmt(strategy_id, sym_key))
+                    open_positions = list(result.scalars().all())
+            except Exception as e:
+                logger.warning("Strategy %d: orphan reconcile for %s: %s", strategy_id, symbol, e)
+
+        base_qty = self._compute_base_qty(strategy, total_margin, current_price)
+        if base_qty is None:
+            strategy_log_service.warning(
+                strategy_id, f"{symbol} 无法管理 — 余额为0(当前{total_margin:.1f})"
+            )
+            await session.flush()
+            return
+
+        if not auth_binance:
+            await session.flush()
+            return
+
+        if open_positions:
+            await self._manage_positions(
+                session,
+                strategy,
+                symbol,
+                auth_binance,
+                public_binance,
+                open_positions,
+                base_qty,
+                current_price,
+                total_margin,
+                leverage,
+                klines,
+            )
+        else:
+            await session.flush()
+
+    async def execute_open_api(
+        self,
+        candidate: SignalCandidate,
+        strategy: Strategy,
+        auth_binance: BinanceService,
+        leverage: float,
+    ) -> OpenApiResult | None:
+        strategy_id = strategy.id
+        symbol = candidate.symbol
+        signal = candidate.signal
+        base_qty = candidate.base_qty
+        current_price = candidate.current_price
+
+        side = "buy" if signal == Signal.LONG else "sell"
+        ps = "LONG" if signal == Signal.LONG else "SHORT"
+        position_side = "long" if side == "buy" else "short"
+
+        lev_int = max(1, min(125, int(leverage or strategy.leverage or 10)))
+        try:
+            await auth_binance.ensure_markets_loaded()
+            applied = await auth_binance.set_symbol_leverage(symbol, lev_int)
+            strategy_log_service.info(strategy_id, f"{symbol} 已设置交易所杠杆 {applied}x")
+        except Exception as e:
+            logger.error("Strategy %d: set leverage for %s failed: %s", strategy_id, symbol, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 设置杠杆失败，已取消开仓 — {e}")
+            return None
+
+        try:
+            order = await auth_binance.create_market_order(
+                symbol, side, base_qty, position_side=ps,
+            )
+            avg_price = float(order.get("average") or order.get("price") or 0)
+            if avg_price <= 0:
+                avg_price = current_price
+                logger.warning(
+                    "Strategy %d: %s order filled but no average/price in response, using kline close",
+                    strategy_id, symbol,
+                )
+            filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
+        except Exception as e:
+            logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
+            return None
+
+        eng = MartingaleEngine(
+            base_quantity=filled_qty,
+            multiplier=strategy.martingale_mult,
+            max_layers=strategy.max_layers,
+            price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0),
+            take_profit_pct=strategy.take_profit_pct,
+        )
+        tp_price = eng.get_take_profit_price(avg_price, position_side)
+        tp_limit_order_id: str | None = None
+
+        if strategy.take_profit_limit_order and tp_price > 0:
+            close_side = "sell" if position_side == "long" else "buy"
+            tp_placed = False
+            for attempt in range(2):
+                try:
+                    tp_order = await auth_binance.create_limit_order(
+                        symbol, close_side, filled_qty, tp_price, reduce_only=False, position_side=ps
+                    )
+                    oid = tp_order.get("id", "")
+                    if oid:
+                        tp_limit_order_id = str(oid)
+                        strategy_log_service.info(
+                            strategy_id, f"{symbol} 挂止盈限价单 @{tp_price:.6f} id={tp_limit_order_id}"
+                        )
+                        tp_placed = True
+                        break
+                    strategy_log_service.warning(
+                        strategy_id, f"{symbol} 挂止盈单异常 — 返回无id: {tp_order}"
+                    )
+                except Exception as tp_err:
+                    logger.error(
+                        "Strategy %d: TP limit order failed for %s (attempt %d): %s",
+                        strategy_id, symbol, attempt + 1, tp_err,
+                    )
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+            if not tp_placed:
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 止盈挂单失败(已重试) — 下次tick将用市价止盈兜底"
+                )
+
+        return OpenApiResult(
+            symbol=symbol,
+            signal=signal,
+            base_qty=base_qty,
+            current_price=current_price,
+            rsi=candidate.rsi,
+            signal_label=candidate.signal_label,
+            side=side,
+            position_side=position_side,
+            ps=ps,
+            order=order,
+            avg_price=avg_price,
+            filled_qty=filled_qty,
+            tp_price=tp_price,
+            tp_limit_order_id=tp_limit_order_id,
+        )
+
+    async def execute_open_db(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        result: OpenApiResult,
+    ) -> None:
+        strategy_id = strategy.id
+        symbol = result.symbol
+        try:
+            pos = Position(
+                strategy_id=strategy_id,
+                account_id=strategy.account_id,
+                symbol=symbol,
+                side=result.position_side,
+                quantity=result.filled_qty,
+                entry_price=result.avg_price,
+                mark_price=result.current_price,
+                layer=0,
+                take_profit_price=result.tp_price,
+                exchange_order_id=result.order.get("id", ""),
+            )
+            if result.tp_limit_order_id:
+                pos.tp_limit_order_id = result.tp_limit_order_id
+            session.add(pos)
+            await session.flush()
+        except Exception as e:
+            logger.critical(
+                "Strategy %d: %s order filled on exchange but DB record failed: %s",
+                strategy_id, symbol, e,
+            )
+            strategy_log_service.error(
+                strategy_id, f"{symbol} 开仓已成交但DB记录失败 — 请手动检查交易所仓位!"
+            )
+            return
+
+        logger.info(
+            "Strategy %d: opened %s %s qty=%.4f price=%.4f %s=%.1f",
+            strategy_id,
+            result.side,
+            symbol,
+            result.base_qty,
+            result.avg_price,
+            result.signal_label,
+            result.rsi,
+        )
+        strategy_log_service.success(
+            strategy_id,
+            f"{symbol} 开{result.position_side}成功 qty={result.base_qty:.4f} "
+            f"price={result.avg_price:.4f} {result.signal_label}={round(result.rsi, 1)}",
+        )
+
     async def process_symbol(
         self,
         session: AsyncSession,
@@ -283,234 +663,174 @@ class PositionManager:
         leverage: float,
         *,
         allow_new_position: bool = True,
+        ctx: TickContext | None = None,
     ):
+        """Legacy single-symbol entry; scheduler uses evaluate/manage/execute_open directly."""
         strategy_id = strategy.id
-
         sym_key = _norm_sym(symbol)
-        symbol_norm = func.replace(
-            func.replace(func.upper(Position.symbol), "/", ""),
-            ":USDT",
-            "",
+        open_positions = list(
+            (await session.execute(self._open_positions_stmt(strategy_id, sym_key))).scalars().all()
         )
-        stmt = (
-            select(Position)
-            .where(
-                Position.strategy_id == strategy_id,
-                Position.closed_at.is_(None),
-                symbol_norm == sym_key,
-            )
-            .order_by(Position.layer.desc())
-        )
-        result = await session.execute(stmt)
-        open_positions = list(result.scalars().all())
+        if ctx is None:
+            ctx = await self._build_legacy_tick_context(strategy, public_binance, auth_binance)
 
+        if open_positions:
+            await self.manage_symbol(
+                session, strategy, symbol, auth_binance, public_binance,
+                open_positions, total_margin, leverage, ctx,
+            )
+            return
+
+        if not allow_new_position:
+            await session.flush()
+            return
+
+        candidate = await self.evaluate_signal(
+            session, strategy, symbol, public_binance, total_margin, ctx,
+        )
+        if not candidate or not auth_binance:
+            if not auth_binance and candidate:
+                strategy_log_service.warning(strategy_id, f"{symbol} 无法开仓 — API未认证")
+            return
+
+        await self._open_from_candidate(
+            session, strategy, candidate, auth_binance, public_binance,
+            total_margin, leverage, ctx,
+        )
+
+    async def _build_legacy_tick_context(
+        self,
+        strategy: Strategy,
+        public_binance: BinanceService,
+        auth_binance: Optional[BinanceService],
+    ) -> TickContext:
         from ..services.strategy_flags import (
             exclude_delisting_enabled,
             exclude_mainstream_enabled,
             exclude_funding_enabled,
-            funding_rate_blocks_new_entry,
-            funding_rate_threshold_pct,
+        )
+        from ..services.binance_service import (
+            get_strategy_pool_exclude_symbols,
+            get_cached_last_funding_rates_pct,
         )
 
         mainstream_exclude = bool(
             strategy.use_coin_pool and exclude_mainstream_enabled(strategy)
         )
+        exclude_norm: frozenset[str] = frozenset()
         if (
             getattr(strategy, "exclude_tradefi", False)
             or exclude_delisting_enabled(strategy)
             or mainstream_exclude
         ):
-            from ..services.binance_service import get_strategy_pool_exclude_symbols
-
             excluded = await get_strategy_pool_exclude_symbols(
                 public_binance,
                 exclude_tradefi=bool(getattr(strategy, "exclude_tradefi", False)),
                 exclude_delisting=exclude_delisting_enabled(strategy),
                 exclude_mainstream=mainstream_exclude,
             )
-            if excluded and _norm_sym(symbol) in excluded and not open_positions:
-                return
+            exclude_norm = frozenset(excluded) if excluded else frozenset()
 
-        if (
-            strategy.use_coin_pool
-            and exclude_funding_enabled(strategy)
-            and not open_positions
-        ):
-            from ..services.binance_service import get_cached_last_funding_rates_pct
+        funding_rates = None
+        funding_filter_enabled = False
+        if strategy.use_coin_pool and exclude_funding_enabled(strategy):
+            funding_filter_enabled = True
+            funding_rates = await get_cached_last_funding_rates_pct(public_binance)
 
-            rates = await get_cached_last_funding_rates_pct(public_binance)
-            rate = rates.get(_norm_sym(symbol), 0.0)
-            if funding_rate_blocks_new_entry(
-                strategy.direction,
-                rate,
-                funding_rate_threshold_pct(strategy),
-            ):
-                return
-
-        # --- Fetch klines via WebSocket stream (REST fallback inside manager) ---
-        # WT EMA chain (esa→d→ci→wt1→wt2) needs ~200 bars to converge; RSI Wilder ~100
-        limit = 200 if strategy.signal_source == "wavetrend" else 100
-        klines = await kline_stream_manager.get(
-            public_binance, symbol, strategy.timeframe, min_bars=limit
-        )
-        if not klines:
-            # 极端兜底：流和 REST 兜底都拿不到（例如刚启动时被限流），保留兼容路径
+        raw_positions: list = []
+        exchange_legs: dict[tuple[str, str], float] = {}
+        if auth_binance:
             try:
-                klines = await public_binance.fetch_klines(
-                    symbol, strategy.timeframe, limit=limit
-                )
+                raw_positions = await auth_binance.fetch_positions()
+                exchange_legs = exchange_legs_from_positions(raw_positions)
             except Exception as e:
-                logger.warning(
-                    "Strategy %d: %s kline fetch failed: %s",
-                    strategy_id, symbol, e,
-                )
-                return
+                logger.warning("Strategy %d: fetch_positions for legacy ctx failed: %s", strategy.id, e)
 
-        # --- Generate signal (TradingView 风格：仅用已收盘 K，不含当前正在走的 K) ---
-        klines_signal = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
-        rsi = 0.0  # always defined, used for logging
-        signal_label = "RSI"
-        if strategy.signal_source == "wavetrend":
-            wt = calculate_wavetrend(
-                klines_signal, strategy.wt_channel_length, strategy.wt_average_length
-            )
-            if wt is None:
-                return
-            signal = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
-            strategy.last_rsi = round(wt["wt1"], 2)
-            strategy.last_signal = signal.value
-            strategy.last_signal_at = now_beijing()
-            rsi = wt["wt1"]
-            signal_label = "WT1"
-            if signal != Signal.NEUTRAL:
-                strategy_log_service.info(strategy_id, f"{symbol} WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f} 信号={signal.value}")
-        else:
-            rsi = calculate_rsi(klines_signal, strategy.rsi_period)
-            if rsi is None:
-                return
-            signal = generate_signal(rsi, strategy.direction, strategy.rsi_entry_threshold)
-            strategy.last_rsi = round(rsi, 1)
-            strategy.last_signal = signal.value
-            strategy.last_signal_at = now_beijing()
-            if signal != Signal.NEUTRAL:
-                strategy_log_service.info(strategy_id, f"{symbol} RSI={round(rsi,1)} 信号={signal.value}")
+        return TickContext(
+            exclude_norm=exclude_norm,
+            funding_rates=funding_rates,
+            funding_filter_enabled=funding_filter_enabled,
+            exchange_legs=exchange_legs,
+            raw_exchange_positions=raw_positions,
+        )
 
-        # --- Current price ---
-        try:
-            current_price = float(klines[-1][4])
-        except (TypeError, ValueError, IndexError):
-            logger.warning("Strategy %d: %s invalid kline data, skipping", strategy_id, symbol)
-            strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
-            return
+    async def _open_from_candidate(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        candidate: SignalCandidate,
+        auth_binance: BinanceService,
+        public_binance: BinanceService,
+        total_margin: float,
+        leverage: float,
+        ctx: TickContext,
+    ) -> None:
+        strategy_id = strategy.id
+        symbol = candidate.symbol
+        sym_key = _norm_sym(symbol)
+        side = candidate.signal.value
 
-        # --- Reconcile: exchange has position but local DB missing (e.g. rolled-back multi-symbol transaction)
-        if auth_binance and not open_positions:
+        if ctx.exchange_legs.get((sym_key, side), 0) > 0:
             try:
                 outcome = await self._reconcile_orphan_from_exchange(
-                    session, strategy, symbol, auth_binance, current_price
+                    session,
+                    strategy,
+                    symbol,
+                    auth_binance,
+                    candidate.current_price,
+                    raw_exchange_positions=ctx.raw_exchange_positions,
                 )
                 if outcome == RECONCILE_CREATED:
-                    result = await session.execute(stmt)
-                    open_positions = list(result.scalars().all())
-            except Exception as e:
-                logger.warning("Strategy %d: orphan reconcile for %s: %s", strategy_id, symbol, e)
-
-        # --- Base quantity ---
-        base_qty = strategy.base_qty_value
-        if strategy.base_qty_type == "margin_pct":
-            if total_margin <= 0:
-                logger.warning("Strategy %d: cannot open %s — total_margin=%.2f", strategy_id, symbol, total_margin)
-                strategy_log_service.warning(strategy_id, f"{symbol} 无法开仓 — 余额为0(当前{total_margin:.1f})")
-                return
-            base_qty = (total_margin * strategy.base_qty_value / 100) / current_price
-        elif strategy.base_qty_type == "usdt":
-            base_qty = strategy.base_qty_value / current_price
-
-        if not auth_binance:
-            logger.warning("Strategy %d: cannot open %s — no API auth (account %d)", strategy_id, symbol, strategy.account_id)
-            strategy_log_service.warning(strategy_id, f"{symbol} 无法开仓 — API未认证")
-            await session.flush()
-            return
-
-        # --- Open new position (use_coin_pool + 仅池内币才允许首单；已有仓仅管理) ---
-        if signal != Signal.NEUTRAL and not open_positions:
-            if not allow_new_position:
-                await session.flush()
-                return
-            logger.info("Strategy %d: %s signal=%s, attempting to open...", strategy_id, symbol, signal.value)
-            try:
-                eps = await auth_binance.fetch_positions([symbol])
-                has_same_side = any(
-                    (ep.get("side") or "").lower() == signal.value
-                    and float(ep.get("contracts", 0) or 0) > 0
-                    for ep in eps
-                )
-                if has_same_side:
-                    outcome = await self._reconcile_orphan_from_exchange(
-                        session, strategy, symbol, auth_binance, current_price
+                    open_positions = list(
+                        (await session.execute(self._open_positions_stmt(strategy_id, sym_key))).scalars().all()
                     )
-                    if outcome == RECONCILE_CREATED:
-                        result = await session.execute(stmt)
-                        open_positions = list(result.scalars().all())
-                        if open_positions:
-                            strategy_log_service.info(
-                                strategy_id,
-                                f"{symbol} 交易所已有{signal.value}仓，已同步本地记录并进入管理",
-                            )
-                            await self._manage_positions(
-                                session,
-                                strategy,
-                                symbol,
-                                auth_binance,
-                                public_binance,
-                                open_positions,
-                                base_qty,
-                                current_price,
-                                total_margin,
-                                leverage,
-                                klines,
-                            )
-                            return
-                    if outcome == RECONCILE_SKIPPED_OTHER_STRATEGY:
+                    if open_positions:
                         strategy_log_service.info(
                             strategy_id,
-                            f"{symbol} 交易所有{signal.value}仓，但同账户下另一策略已在本地占用「同币种+同方向」持仓，"
-                            f"本策略不再重复记账/开仓（交易所该方向只有一条净仓）。"
-                            f"一多一空为反方向时不会冲突；若仍看到本条，请检查两策略是否同向、或是否共抢同一池子币。",
+                            f"{symbol} 交易所已有{side}仓，已同步本地记录并进入管理",
+                        )
+                        await self.manage_symbol(
+                            session, strategy, symbol, auth_binance, public_binance,
+                            open_positions, total_margin, leverage, ctx,
                         )
                         return
-                    if outcome == RECONCILE_DB_ERROR:
-                        strategy_log_service.error(
-                            strategy_id,
-                            f"{symbol} 写入持仓数据库失败 — 已阻止重复市价开仓，请查看 logs/bot.log 中的异常详情",
-                        )
-                        return
-                    strategy_log_service.warning(
+                if outcome == RECONCILE_SKIPPED_OTHER_STRATEGY:
+                    strategy_log_service.info(
                         strategy_id,
-                        f"{symbol} 交易所有{signal.value}仓但未能为本策略创建本地记录 — 已阻止重复市价开仓（若非双策略抢同一方向，请查看 bot.log reconcile 日志）",
+                        f"{symbol} 交易所有{side}仓，但同账户下另一策略已在本地占用「同币种+同方向」持仓，"
+                        f"本策略不再重复记账/开仓（交易所该方向只有一条净仓）。"
+                        f"一多一空为反方向时不会冲突；若仍看到本条，请检查两策略是否同向、或是否共抢同一池子币。",
                     )
                     return
-            except Exception:
-                pass
-            await self._open_position(
-                session,
-                strategy,
-                symbol,
-                auth_binance,
-                public_binance,
-                signal,
-                base_qty,
-                current_price,
-                total_margin,
-                leverage,
-                rsi,
-                signal_label,
-            )
+                if outcome == RECONCILE_DB_ERROR:
+                    strategy_log_service.error(
+                        strategy_id,
+                        f"{symbol} 写入持仓数据库失败 — 已阻止重复市价开仓，请查看 logs/bot.log 中的异常详情",
+                    )
+                    return
+                strategy_log_service.warning(
+                    strategy_id,
+                    f"{symbol} 交易所有{side}仓但未能为本策略创建本地记录 — 已阻止重复市价开仓（若非双策略抢同一方向，请查看 bot.log reconcile 日志）",
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "Strategy %d: reconcile before open for %s failed: %s",
+                    strategy_id, symbol, e,
+                )
+                strategy_log_service.error(
+                    strategy_id,
+                    f"{symbol} 对账异常，已阻止重复市价开仓 — {e}",
+                )
             return
 
-        # --- Manage existing positions ---
-        if open_positions:
-            await self._manage_positions(session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines)
+        logger.info(
+            "Strategy %d: %s signal=%s, attempting to open...",
+            strategy_id, symbol, candidate.signal.value,
+        )
+        api_result = await self.execute_open_api(candidate, strategy, auth_binance, leverage)
+        if api_result:
+            await self.execute_open_db(session, strategy, api_result)
 
     async def _open_position(
         self,
@@ -527,78 +847,18 @@ class PositionManager:
         rsi,
         signal_label: str,
     ):
-        strategy_id = strategy.id
-
-        side = "buy" if signal == Signal.LONG else "sell"
-        ps = "LONG" if signal == Signal.LONG else "SHORT"
-        position_side = "long" if side == "buy" else "short"
-
-        lev_int = max(1, min(125, int(leverage or strategy.leverage or 10)))
-        try:
-            applied = await auth_binance.set_symbol_leverage(symbol, lev_int)
-            strategy_log_service.info(strategy_id, f"{symbol} 已设置交易所杠杆 {applied}x")
-        except Exception as e:
-            logger.error("Strategy %d: set leverage for %s failed: %s", strategy_id, symbol, e)
-            strategy_log_service.error(strategy_id, f"{symbol} 设置杠杆失败，已取消开仓 — {e}")
-            return
-
-        try:
-            order = await auth_binance.create_market_order(
-                symbol, side, base_qty, position_side=ps,
-            )
-            avg_price = float(order.get("average") or order.get("price") or 0)
-            if avg_price <= 0:
-                avg_price = current_price
-                logger.warning("Strategy %d: %s order filled but no average/price in response, using kline close", strategy_id, symbol)
-            filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
-        except Exception as e:
-            logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
-            strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
-            return
-
-        # Order succeeded on exchange — ensure DB record is written even if TP order fails
-        try:
-            eng = MartingaleEngine(base_quantity=filled_qty, multiplier=strategy.martingale_mult, max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
-            tp_price = eng.get_take_profit_price(avg_price, position_side)
-
-            pos = Position(
-                strategy_id=strategy_id, account_id=strategy.account_id,
-                symbol=symbol, side=position_side, quantity=filled_qty,
-                entry_price=avg_price, mark_price=current_price, layer=0,
-                take_profit_price=tp_price, exchange_order_id=order.get("id", ""),
-            )
-            session.add(pos)
-            await session.flush()
-        except Exception as e:
-            logger.critical("Strategy %d: %s order filled on exchange but DB record failed: %s", strategy_id, symbol, e)
-            strategy_log_service.error(strategy_id, f"{symbol} 开仓已成交但DB记录失败 — 请手动检查交易所仓位!")
-            return
-
-        # Place limit TP order (best-effort, non-fatal)
-        if strategy.take_profit_limit_order and tp_price > 0:
-            tp_placed = False
-            close_side = "sell" if position_side == "long" else "buy"
-            for attempt in range(2):
-                try:
-                    tp_order = await auth_binance.create_limit_order(symbol, close_side, filled_qty, tp_price, reduce_only=False, position_side=ps)
-                    tp_order_id = tp_order.get("id", "")
-                    if tp_order_id:
-                        pos.tp_limit_order_id = tp_order_id
-                        await session.flush()
-                        strategy_log_service.info(strategy_id, f"{symbol} 挂止盈限价单 @{tp_price:.6f} id={tp_order_id}")
-                        tp_placed = True
-                        break
-                    else:
-                        strategy_log_service.warning(strategy_id, f"{symbol} 挂止盈单异常 — 返回无id: {tp_order}")
-                except Exception as tp_err:
-                    logger.error("Strategy %d: TP limit order failed for %s (attempt %d): %s", strategy_id, symbol, attempt + 1, tp_err)
-                    if attempt == 0:
-                        await asyncio.sleep(0.5)
-            if not tp_placed:
-                strategy_log_service.warning(strategy_id, f"{symbol} 止盈挂单失败(已重试) — 下次tick将用市价止盈兜底")
-
-        logger.info("Strategy %d: opened %s %s qty=%.4f price=%.4f %s=%.1f", strategy_id, side, symbol, base_qty, avg_price, signal_label, rsi)
-        strategy_log_service.success(strategy_id, f"{symbol} 开{position_side}成功 qty={base_qty:.4f} price={avg_price:.4f} {signal_label}={round(rsi,1)}")
+        candidate = SignalCandidate(
+            symbol=symbol,
+            signal=signal,
+            klines=[],
+            current_price=current_price,
+            rsi=rsi,
+            signal_label=signal_label,
+            base_qty=base_qty,
+        )
+        api_result = await self.execute_open_api(candidate, strategy, auth_binance, leverage)
+        if api_result:
+            await self.execute_open_db(session, strategy, api_result)
 
     async def _manage_positions(
         self, session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines=None

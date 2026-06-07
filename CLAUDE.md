@@ -72,26 +72,29 @@ API Key 使用 Fernet 加密存储。密钥解析顺序：`settings.encryption_k
 
 ### 调度时序（两个独立任务）
 每个策略在 APScheduler 中有两个任务：
-- **00秒（K线收盘）**：执行交易 — 拉 K 线、生成信号、开仓/加仓/止损/止盈检查
+- **00秒（K线收盘）**：两阶段 tick — 构建 `TickContext` → 有仓币串行 `manage_symbol` → 无仓币 `evaluate_signal` 扫信号 → 有信号币 **账户级并行开仓**（`Semaphore(3)`/账户，API 并行 + DB 串行 commit）
 - **30秒（K线中段）**：止盈检测 — 查询限价止盈单是否已成交，不执行任何交易
 - 最大 10 策略并发（`_STRATEGY_SEMAPHORE`，控制同一时刻 tick 并行数，非策略总数上限）
+- tick 开头每账户一次：`ensure_markets_loaded()` → `fetch_positions()` 写入 `TickContext.exchange_legs`（杠杆缓存在预热后跨 tick 保留，开仓命中 ≈0ms）
+- **杠杆预热**：策略启动 + 选币池刷新后，`leverage_prewarm.py` 对池内/持仓 symbol 批量 `set_symbol_leverage`（同 tick 开仓走缓存 ≈0ms）
+- tick 末尾对账：`asyncio.create_task(_sync_account_background)` 不阻塞；同账户 `account_sync_lock` 防并发写库
 
 ### 信号 → 交易 流程
 1. 调度器在 K 线收盘边界触发
 2. 选币池过滤：若启用 `exclude_tradefi`，从 pool 列表中筛掉 TradFi 永续
-3. PositionManager 逐币种处理：拉取 K 线（WS 流缓冲优先，REST 兜底，详见 `kline_stream.py`）、生成信号、检查已有持仓
-4. **TradFi 过滤**：`process_symbol()` 入口先查 `exclude_tradefi`，若币种在 TradFi 集合且无已有持仓则直接跳过（不查 K 线不生成信号）
-5. **对账恢复**：DB 无持仓但交易所有仓位时，`_reconcile_orphan_from_exchange()` 从交易所恢复记录。按策略方向认领，防多策略冲突
-6. 信号引擎（`strategy_engine.py`）：WaveTrend（LazyBear v5 实现）或 RSI
-7. 马丁引擎（`martingale_engine.py`）：计算止盈价、均价、加仓条件
-8. 开仓前实时 `fetch_positions` 查交易所防重复；若交易所已有仓位则触发对账恢复而非开新仓
+3. **阶段 1a**：有本地持仓的币串行 `manage_symbol()` — 拉 K 线、算信号、马丁/止盈/止损
+4. **阶段 1b**：无持仓且允许新开仓的币 `evaluate_signal()` — 仅用 `TickContext` 做 TradFi/下架/主流/费率过滤（无重复 API），拉 K 线算 WT/RSI，**不下单**
+5. **对账恢复**：DB 无持仓但 tick 快照 `exchange_legs` 有同向仓时，`_reconcile_orphan_from_exchange()` 用 `raw_exchange_positions` 恢复
+6. 信号引擎（`strategy_engine.py`）：WaveTrend（LazyBear v5 实现）或 RSI；仍用 `_klines_for_confirmed_signal_only` 收盘 K 确认
+7. **阶段 2**：`execute_open_api()` 并行（账户 `Semaphore(3)`）→ `execute_open_db()` 串行 commit
+8. 马丁引擎（`martingale_engine.py`）：计算止盈价、均价、加仓条件
 9. 马丁加仓顺序：先下单 → 写 DB → 取消旧止盈单 → 挂新止盈单
-10. **逐币种提交**：每个 symbol 处理完单独 commit，一个失败回滚该币不影响其他币
+10. **逐币种提交**：manage/evaluate 阶段每币 commit；开仓 DB 阶段每单 commit
 
 ### 核心服务
 - **`binance_service.py`**：ccxt 封装，TTL 缓存（30min）。`hedge_mode` 决定是否发送 `positionSide`/`reduceOnly`。`_format_symbol()` 将 `BTCUSDT` 转为 `BTC/USDT:USDT`。`get_public_binance()` 始终主网。TradFi 列表缓存（1h TTL）：`get_cached_tradefi_symbols()` → `fetch_tradefi_perpetual_symbols_raw()` 调 `fapiPublicGetExchangeInfo` 筛 `contractType == "TRADIFI_PERPETUAL"`。
-- **`position_manager.py`**：核心交易逻辑。`process_symbol()` 总入口，含 TradFi 过滤、对账恢复、信号生成、开仓、持仓管理、马丁加仓、TP 检测。模块级工具：`_norm_sym()`、`_position_opened_at_from_exchange()`（从 `timestamp`/`updateTime`/`entryTime` 解析开仓时间）。
-- **`scheduler.py`**：策略生命周期、保证金阈值、5 并发信号量。`lifespan` 启动时 `resume_running_strategies()` 为 DB 中 `status=running` 的策略重新挂载定时任务（`stopped` 不动）；每 tick 拉 pool symbols → TradFi 过滤 → 逐币种 `process_symbol()` → commit。`_execute_tp_check()` 负责 mid-candle 止盈检测。
+- **`position_manager.py`**：核心交易逻辑。调度器调用 `manage_symbol()` / `evaluate_signal()` / `execute_open_api()` + `execute_open_db()`；`process_symbol()` 为兼容薄封装。`TickContext` 在 tick 级共享 exclude/费率/交易所快照。模块级工具：`_norm_sym()`、`_position_opened_at_from_exchange()`。
+- **`scheduler.py`**：策略生命周期、保证金阈值、10 策略 tick 并发 + 账户级下单 `Semaphore(3)`。每 tick：构建 `TickContext` → 两阶段信号/开仓 → 后台 `create_task` sync。`_execute_tp_check()` 负责 mid-candle 止盈检测。
 - **`sync_service.py`**：每 60 秒对账 DB ↔ 交易所。按 `(symbol, side)` 分组（`by_leg`），多层马丁共用一次 TP 订单查询。`_exit_price_from_tp_orders()` 查止盈单成交价，`_order_filled()` 宽松判定（`closed`/`filled` 或有 `filled>0` 且非活跃状态）。
 - **`strategy_engine.py`**：`calculate_wavetrend()` — 纯 Pine Script v5 LazyBear 实现。`generate_wt_signal()` 检查金叉/死叉 + 超买超卖区。`calculate_rsi()` 使用 Wilder 平滑。
 - **`martingale_engine.py`**：马丁仓位计算 — `base × multiplier^layer`，止盈价/均价/加仓触发条件。
@@ -176,7 +179,7 @@ API Key 使用 Fernet 加密存储。密钥解析顺序：`settings.encryption_k
 - **限价止盈成交检测**：mid-candle 任务（+30s）+ Sync 两套机制。`check_tp_fills()` 2s 超时查 `fetch_order`，Sync 按 leg 分组共享查询。成交价优先用 `average`，fallback 到 `info.avgPrice`/`averagePrice`/`price`。
 - **成交量**：开仓和加仓用 `order.get("filled")` 实际成交量。
 - **符号标准化**：比较时统一去 `/`、`:USDT`、大写。函数：`_norm_sym()`（position_manager）、`_norm_leg_symbol()`（sync_service）、`_panic_symbol_key()`（strategies）。
-- **TradFi 过滤**：`exclude_tradefi` 策略级开关，默认开启。两层过滤 — 选币池在调度器筛 + 逐币种在 `process_symbol` 入口筛。已有持仓的 TradFi 币不会被抛弃。
+- **TradFi 过滤**：`exclude_tradefi` 策略级开关，默认开启。两层过滤 — 选币池在调度器筛 + `TickContext.exclude_norm` 在 `evaluate_signal` 筛。已有持仓的 TradFi 币不会被抛弃。
 - **下架过滤**：`exclude_delisting` 策略级开关，默认开启。筛掉 14 天内即将下架的合约。
 - **新增数据库列**：同步添加 model + schema + 前端 types + `init_db()` 迁移 + NULL 兜底。
 - **历史备份与库表**：页面「清空」只删 SQLite `trades` 中当前账户；JSONL 仍追加保留，需删文件才能在备份侧移除记录。
