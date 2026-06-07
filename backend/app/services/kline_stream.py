@@ -86,6 +86,7 @@ class KlineStreamManager:
         self._max_bars = max_bars
         self._buffers: dict[tuple[str, str], list[list]] = {}
         self._tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._seed_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._ready: dict[tuple[str, str], asyncio.Event] = {}
         self._last_access: dict[tuple[str, str], float] = {}
         self._lock = asyncio.Lock()
@@ -155,16 +156,24 @@ class KlineStreamManager:
     async def _ensure_started(self, public_binance, symbol: str, timeframe: str, min_bars: int) -> None:
         key = self._key(symbol, timeframe)
         seed_limit = max(min_bars, self._max_bars)
-        need_start = False
+        seed_task: asyncio.Task | None = None
         async with self._lock:
             self._last_access[key] = time.time()
             task = self._tasks.get(key)
             if task is None or task.done():
-                need_start = True
                 self._ready[key] = asyncio.Event()
-        if need_start:
-            await self._seed_via_rest(public_binance, symbol, timeframe, seed_limit)
+                seed_task = self._seed_tasks.get(key)
+                if seed_task is None or seed_task.done():
+                    seed_task = asyncio.create_task(
+                        self._seed_via_rest(public_binance, symbol, timeframe, seed_limit),
+                        name=f"kline_seed:{key[0]}:{key[1]}",
+                    )
+                    self._seed_tasks[key] = seed_task
+        if seed_task is not None:
+            await seed_task
             async with self._lock:
+                if self._seed_tasks.get(key) is seed_task:
+                    self._seed_tasks.pop(key, None)
                 task2 = self._tasks.get(key)
                 if task2 is None or task2.done():
                     self._tasks[key] = asyncio.create_task(

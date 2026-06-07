@@ -202,9 +202,11 @@ class CoinPoolService:
                 self._last_refresh_ok = False
                 self._last_error = str(e)[:200]
                 logger.error("Coin pool refresh error source=%s: %s", src, e)
+        from .kline_prewarm import prewarm_running_strategies_klines
         from .leverage_prewarm import prewarm_running_strategies_leverage
 
         self._fire_background(prewarm_running_strategies_leverage())
+        self._fire_background(prewarm_running_strategies_klines())
 
     async def get_pool(self, source: str | None = None) -> list[CoinPool]:
         """Get current coin pool from database.

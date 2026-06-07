@@ -203,7 +203,7 @@ async def get_cached_tradefi_symbols(binance: "BinanceService") -> frozenset[str
 class BinanceService:
     """Wrapper around ccxt binanceusdm (USD-M Futures) with TTL cache."""
 
-    _TTL_SECONDS = 1800  # 30 minutes
+    _TTL_SECONDS = 7200  # 2 hours; avoid frequent market/leverage/K-line cold starts
 
     def __init__(self, api_key: str = "", secret: str = "", testnet: bool = True, hedge_mode: bool = True):
         self.api_key = api_key
@@ -425,35 +425,35 @@ class BinanceService:
         except Exception:
             return None
 
-    async def set_symbol_leverage(self, symbol: str, leverage: int) -> int:
+    async def set_symbol_leverage(self, symbol: str, leverage: int) -> tuple[int, bool]:
         """
         Set USDT-M contract leverage on Binance for symbol (POST /fapi/v1/leverage).
-        Returns the leverage value applied (clamped 1–125). Raises on API failure.
+        Returns (applied_leverage, cache_hit). Raises on API failure.
         """
         lev = max(1, min(125, int(leverage)))
         formatted = self._format_symbol(symbol)
         bin_sym = self._binance_futures_symbol_id(symbol)
         cached = self._leverage_cache.get(bin_sym)
         if cached == lev:
-            return lev
+            return lev, True
         try:
             await self.exchange.set_leverage(lev, formatted)
             self._leverage_cache[bin_sym] = lev
-            return lev
+            return lev, False
         except Exception as e1:
             if self._leverage_already_set_error(e1):
                 logger.debug("leverage already %sx for %s", lev, bin_sym)
                 self._leverage_cache[bin_sym] = lev
-                return lev
+                return lev, False
             logger.debug("set_leverage ccxt path failed for %s: %s", bin_sym, e1)
             try:
                 await self.exchange.fapiPrivatePostLeverage({"symbol": bin_sym, "leverage": lev})
                 self._leverage_cache[bin_sym] = lev
-                return lev
+                return lev, False
             except Exception as e2:
                 if self._leverage_already_set_error(e2):
                     self._leverage_cache[bin_sym] = lev
-                    return lev
+                    return lev, False
                 raise RuntimeError(f"设置杠杆失败 {bin_sym} {lev}x: {e2}") from e2
 
     # ---- Orders (Private) ----
@@ -782,7 +782,7 @@ class BinanceService:
 _private_instances: dict[str, tuple[float, BinanceService]] = {}
 _public_instance: Optional[BinanceService] = None
 _public_created_at: float = 0.0
-_INSTANCE_TTL = 600  # 10 minutes before forcing recreation
+_INSTANCE_TTL = 7200  # 2 hours before forcing recreation
 
 
 async def get_binance_service(api_key: str, secret: str, testnet: bool = True, hedge_mode: bool = True) -> BinanceService:

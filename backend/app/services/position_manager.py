@@ -521,8 +521,11 @@ class PositionManager:
         lev_int = max(1, min(125, int(leverage or strategy.leverage or 10)))
         try:
             await auth_binance.ensure_markets_loaded()
-            applied = await auth_binance.set_symbol_leverage(symbol, lev_int)
-            strategy_log_service.info(strategy_id, f"{symbol} 已设置交易所杠杆 {applied}x")
+            applied, leverage_cache_hit = await auth_binance.set_symbol_leverage(symbol, lev_int)
+            if leverage_cache_hit:
+                strategy_log_service.info(strategy_id, f"{symbol} 杠杆缓存命中 {applied}x")
+            else:
+                strategy_log_service.info(strategy_id, f"{symbol} 已设置交易所杠杆 {applied}x")
         except Exception as e:
             logger.error("Strategy %d: set leverage for %s failed: %s", strategy_id, symbol, e)
             strategy_log_service.error(strategy_id, f"{symbol} 设置杠杆失败，已取消开仓 — {e}")
@@ -544,6 +547,12 @@ class PositionManager:
             logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
             strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
             return None
+
+        strategy_log_service.success(
+            strategy_id,
+            f"{symbol} 市价开{position_side}已成交 qty={filled_qty:.4f} "
+            f"price={avg_price:.4f} {candidate.signal_label}={round(candidate.rsi, 1)}",
+        )
 
         eng = MartingaleEngine(
             base_quantity=filled_qty,

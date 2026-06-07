@@ -32,7 +32,7 @@ from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
 from .sync_service import PositionSyncService
 from .position_manager import PositionManager, _norm_sym
-from .tick_context import TickContext, exchange_legs_from_positions
+from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem, account_sync_lock
 from .backup_service import backup_trade
 from .order_times import exit_time_from_order
@@ -43,7 +43,7 @@ TIMEFRAME_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
 # 并发跑「收盘整轮」的策略数；≥ running 策略数可避免整点排队。多账户分散 API，可适当提高（单账户一堆策略时勿过大以防 429）。
 _STRATEGY_SEMAPHORE = asyncio.Semaphore(10)
 # 单策略内并发评估池内币信号的上限（拉 K 线/算信号，多为 WS 缓存命中）。
-_SIGNAL_EVAL_CONCURRENCY = 8
+_SIGNAL_EVAL_CONCURRENCY = 20
 
 
 def _exchange_leg_map_from_positions(raw_positions: list) -> dict[tuple[str, str], float]:
@@ -115,7 +115,7 @@ class StrategyScheduler:
             )
 
     def _register_strategy_jobs(self, strategy_id: int, timeframe: str) -> None:
-        """注册主周期任务 + 中段止盈任务；不写数据库。"""
+        """注册主周期任务（:00 扫信号/开仓）+ 中段任务（:30 止盈检测/加仓）；不写数据库。"""
         interval_seconds = TIMEFRAME_SECONDS.get(timeframe, 60)
         next_run = _next_candle_close(timeframe)
 
@@ -174,10 +174,15 @@ class StrategyScheduler:
         logger.info("Strategy %d (%s) started", strategy_id, strategy.name)
         strategy_log_service.success(strategy_id, f"策略启动 — {strategy.name}")
         from .leverage_prewarm import prewarm_strategy_leverage_by_id
+        from .kline_prewarm import prewarm_strategy_klines_by_id
 
-        task = asyncio.create_task(prewarm_strategy_leverage_by_id(strategy_id))
-        self._bg_sync_tasks.add(task)
-        task.add_done_callback(self._bg_sync_tasks.discard)
+        for coro in (
+            prewarm_strategy_leverage_by_id(strategy_id),
+            prewarm_strategy_klines_by_id(strategy_id),
+        ):
+            task = asyncio.create_task(coro)
+            self._bg_sync_tasks.add(task)
+            task.add_done_callback(self._bg_sync_tasks.discard)
         return True
 
     async def remove_strategy(self, strategy_id: int):
@@ -225,23 +230,14 @@ class StrategyScheduler:
                 await self._execute_strategy_impl(strategy_id)
 
     async def _execute_tp_check(self, strategy_id: int):
-        """Mid-candle TP fill check — no trading, just detect filled limit orders."""
+        """Mid-candle (+30s): TP fill check + manage only (martingale/SL); no new opens."""
         lock = self._get_strategy_lock(strategy_id)
         if lock.locked():
+            logger.info("Strategy %d: skipping mid-candle — previous tick still running", strategy_id)
             return
         async with lock:
-            async with async_session() as session:
-                strategy = await session.get(Strategy, strategy_id)
-                if not strategy or strategy.status != "running":
-                    return
-                auth_binance = await self._get_binance_for_strategy(strategy)
-                if not auth_binance:
-                    return
-                try:
-                    await self._position_mgr.check_tp_fills(session, strategy, auth_binance, 0)
-                    await session.commit()
-                except Exception as e:
-                    logger.error("Strategy %d TP check error: %s", strategy_id, e)
+            async with _STRATEGY_SEMAPHORE:
+                await self._execute_strategy_impl(strategy_id, mid_candle=True)
 
     async def _sync_account_background(self, auth_binance: BinanceService, account_id: int):
         lock = account_sync_lock(account_id)
@@ -251,7 +247,7 @@ class StrategyScheduler:
             except Exception as e:
                 logger.error("Background sync failed for account %d: %s", account_id, e)
 
-    async def _execute_strategy_impl(self, strategy_id: int):
+    async def _execute_strategy_impl(self, strategy_id: int, *, mid_candle: bool = False):
         async with async_session() as session:
             # Master switch
             switch_result = await session.execute(select(BotConfig).where(BotConfig.key == "master_switch"))
@@ -265,7 +261,10 @@ class StrategyScheduler:
 
             sync_account_id = strategy.account_id
 
-            strategy_log_service.info(strategy_id, "执行周期开始")
+            strategy_log_service.info(
+                strategy_id,
+                "中段执行开始" if mid_candle else "执行周期开始",
+            )
 
             auth_binance = await self._get_binance_for_strategy(strategy)
             public_binance = await get_public_binance()
@@ -392,46 +391,9 @@ class StrategyScheduler:
 
             # Get symbols: coin pool or fixed (for new entries), ∪ DB open positions (manage always)
             pool_symbols: list[str] = []
-            if strategy.use_coin_pool:
-                try:
-                    min_vol = float(getattr(strategy, "coin_pool_min_volume_24h", 0) or 0)
-                    exclude_norm = await get_strategy_pool_exclude_symbols(
-                        public_binance,
-                        exclude_tradefi=bool(strategy.exclude_tradefi),
-                        exclude_delisting=exclude_delisting_enabled(strategy),
-                        exclude_mainstream=exclude_mainstream_enabled(strategy),
-                    )
-                    pool_symbols = await coin_pool_service.get_pool_symbols(
-                        normalize_coin_pool_source(strategy.coin_pool_source),
-                        strategy.coin_pool_top_n,
-                        min_volume_24h=min_vol,
-                        exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
-                    )
-                    if exclude_funding_enabled(strategy):
-                        pool_symbols = await filter_pool_symbols_by_funding(
-                            public_binance,
-                            pool_symbols,
-                            direction=strategy.direction,
-                            threshold_pct=funding_rate_threshold_pct(strategy),
-                        )
-                    if min_vol > 0 and not pool_symbols:
-                        logger.info(
-                            "Strategy %d: coin pool empty after min_volume_24h=%.0f USDT",
-                            strategy_id,
-                            min_vol,
-                        )
-                    if not pool_symbols:
-                        pool_count = await coin_pool_service.get_pool_count()
-                        pool_status = coin_pool_service.status
-                        logger.warning(
-                            "Strategy %d: coin pool returned 0 symbols (total=%d, ok=%s)",
-                            strategy_id, pool_count, pool_status["last_refresh_ok"],
-                        )
-                except Exception as e:
-                    logger.error("Strategy %d: coin pool query failed: %s", strategy_id, e)
-                    pool_symbols = []
-            elif strategy.symbol:
-                pool_symbols = [strategy.symbol]
+            pool_entry_norms: set[str] | None = None
+            pool_exclude_norm: frozenset[str] = frozenset()
+            pool_exclude_loaded = False
 
             stmt_open_syms = (
                 select(Position.symbol)
@@ -441,24 +403,71 @@ class StrategyScheduler:
             open_sym_rows = (await session.execute(stmt_open_syms)).scalars().all()
             open_syms = [s for s in open_sym_rows if s]
 
-            symbols = _merge_pool_and_open_symbols(pool_symbols, open_syms)
-
-            if strategy.use_coin_pool:
-                pool_entry_norms = {_norm_sym(s) for s in pool_symbols if s}
+            if mid_candle:
+                # Mid-candle: manage open legs only — no pool scan, no new entries.
+                if not open_syms:
+                    return
+                symbols = open_syms
             else:
-                pool_entry_norms = None
-
-            if not symbols:
                 if strategy.use_coin_pool:
-                    strategy.last_signal = "no_pool"
-                    strategy.last_signal_at = now_beijing()
-                    await session.commit()
-                    strategy_log_service.warning(strategy_id, "选币池为空且无未平持仓，无法交易")
-                else:
-                    strategy_log_service.warning(strategy_id, "未设置交易对")
-                return
+                    try:
+                        min_vol = float(getattr(strategy, "coin_pool_min_volume_24h", 0) or 0)
+                        excluded = await get_strategy_pool_exclude_symbols(
+                            public_binance,
+                            exclude_tradefi=bool(strategy.exclude_tradefi),
+                            exclude_delisting=exclude_delisting_enabled(strategy),
+                            exclude_mainstream=exclude_mainstream_enabled(strategy),
+                        )
+                        pool_exclude_norm = frozenset(excluded) if excluded else frozenset()
+                        pool_exclude_loaded = True
+                        pool_symbols = await coin_pool_service.get_pool_symbols(
+                            normalize_coin_pool_source(strategy.coin_pool_source),
+                            strategy.coin_pool_top_n,
+                            min_volume_24h=min_vol,
+                            exclude_symbols_norm=set(pool_exclude_norm) if pool_exclude_norm else None,
+                        )
+                        if exclude_funding_enabled(strategy):
+                            pool_symbols = await filter_pool_symbols_by_funding(
+                                public_binance,
+                                pool_symbols,
+                                direction=strategy.direction,
+                                threshold_pct=funding_rate_threshold_pct(strategy),
+                            )
+                        if min_vol > 0 and not pool_symbols:
+                            logger.info(
+                                "Strategy %d: coin pool empty after min_volume_24h=%.0f USDT",
+                                strategy_id,
+                                min_vol,
+                            )
+                        if not pool_symbols:
+                            pool_count = await coin_pool_service.get_pool_count()
+                            pool_status = coin_pool_service.status
+                            logger.warning(
+                                "Strategy %d: coin pool returned 0 symbols (total=%d, ok=%s)",
+                                strategy_id, pool_count, pool_status["last_refresh_ok"],
+                            )
+                    except Exception as e:
+                        logger.error("Strategy %d: coin pool query failed: %s", strategy_id, e)
+                        pool_symbols = []
+                elif strategy.symbol:
+                    pool_symbols = [strategy.symbol]
 
-            if open_syms:
+                symbols = _merge_pool_and_open_symbols(pool_symbols, open_syms)
+
+                if strategy.use_coin_pool:
+                    pool_entry_norms = {_norm_sym(s) for s in pool_symbols if s}
+
+                if not symbols:
+                    if strategy.use_coin_pool:
+                        strategy.last_signal = "no_pool"
+                        strategy.last_signal_at = now_beijing()
+                        await session.commit()
+                        strategy_log_service.warning(strategy_id, "选币池为空且无未平持仓，无法交易")
+                    else:
+                        strategy_log_service.warning(strategy_id, "未设置交易对")
+                    return
+
+            if open_syms and not mid_candle:
                 uniq_norm = sorted({_norm_sym(s) for s in open_syms if s})
                 n = len(uniq_norm)
                 max_show = 25
@@ -470,28 +479,29 @@ class StrategyScheduler:
                 strategy_log_service.info(strategy_id, summ)
 
             # Tick-level context: filters + exchange snapshot (once per tick per account)
-            mainstream_exclude = bool(
-                strategy.use_coin_pool and exclude_mainstream_enabled(strategy)
-            )
-            exclude_norm: frozenset[str] = frozenset()
-            if (
-                getattr(strategy, "exclude_tradefi", False)
-                or exclude_delisting_enabled(strategy)
-                or mainstream_exclude
-            ):
-                excluded = await get_strategy_pool_exclude_symbols(
-                    public_binance,
-                    exclude_tradefi=bool(strategy.exclude_tradefi),
-                    exclude_delisting=exclude_delisting_enabled(strategy),
-                    exclude_mainstream=mainstream_exclude,
-                )
-                exclude_norm = frozenset(excluded) if excluded else frozenset()
-
+            exclude_norm: frozenset[str] = pool_exclude_norm
             funding_rates = None
             funding_filter_enabled = False
-            if strategy.use_coin_pool and exclude_funding_enabled(strategy):
-                funding_filter_enabled = True
-                funding_rates = await get_cached_last_funding_rates_pct(public_binance)
+            if not mid_candle:
+                mainstream_exclude = bool(
+                    strategy.use_coin_pool and exclude_mainstream_enabled(strategy)
+                )
+                if (
+                    getattr(strategy, "exclude_tradefi", False)
+                    or exclude_delisting_enabled(strategy)
+                    or mainstream_exclude
+                ) and not pool_exclude_loaded:
+                    excluded = await get_strategy_pool_exclude_symbols(
+                        public_binance,
+                        exclude_tradefi=bool(strategy.exclude_tradefi),
+                        exclude_delisting=exclude_delisting_enabled(strategy),
+                        exclude_mainstream=mainstream_exclude,
+                    )
+                    exclude_norm = frozenset(excluded) if excluded else frozenset()
+
+                if strategy.use_coin_pool and exclude_funding_enabled(strategy):
+                    funding_filter_enabled = True
+                    funding_rates = await get_cached_last_funding_rates_pct(public_binance)
 
             # Reuse positions prefetched at tick start (concurrent with balance above).
             raw_exchange_positions: list = []
@@ -519,111 +529,146 @@ class StrategyScheduler:
                 Position.strategy_id == strategy_id,
                 Position.closed_at.is_(None),
             )
-            all_open = list((await session.execute(stmt_all_open)).scalars().all())
-            open_by_norm: dict[str, list[Position]] = {}
-            for p in all_open:
-                k = _norm_sym(p.symbol)
-                open_by_norm.setdefault(k, []).append(p)
-            for positions in open_by_norm.values():
-                positions.sort(key=lambda x: x.layer, reverse=True)
 
-            # Phase 1b FIRST (latency-critical): scan no-position symbols for signals.
-            # Opening new positions must NOT wait for serial manage of existing legs.
-            manage_symbols: list[tuple[str, list[Position]]] = []
-            eval_symbols: list[str] = []
-            for symbol in symbols:
-                sym_key = _norm_sym(symbol)
-                open_positions = open_by_norm.get(sym_key, [])
-                if open_positions:
-                    manage_symbols.append((symbol, open_positions))
-                    continue
-                allow_new = pool_entry_norms is None or sym_key in pool_entry_norms
-                if allow_new:
-                    eval_symbols.append(symbol)
+            async def _load_open_by_norm() -> dict[str, list[Position]]:
+                rows = list((await session.execute(stmt_all_open)).scalars().all())
+                by_norm: dict[str, list[Position]] = {}
+                for p in rows:
+                    k = _norm_sym(p.symbol)
+                    by_norm.setdefault(k, []).append(p)
+                for positions in by_norm.values():
+                    positions.sort(key=lambda x: x.layer, reverse=True)
+                return by_norm
 
-            # Concurrent signal scan (kline fetch + compute, no DB writes).
-            candidates = []
-            if eval_symbols:
-                eval_sem = asyncio.Semaphore(_SIGNAL_EVAL_CONCURRENCY)
+            open_by_norm = await _load_open_by_norm()
 
-                async def _eval_one(sym: str):
-                    async with eval_sem:
-                        return await self._position_mgr.evaluate_signal_nodb(
-                            strategy, sym, public_binance, total_margin, tick_ctx,
-                        )
-
-                eval_results = await asyncio.gather(
-                    *[_eval_one(s) for s in eval_symbols],
-                    return_exceptions=True,
-                )
-                for sym, res in zip(eval_symbols, eval_results):
-                    if isinstance(res, Exception):
-                        logger.error("Strategy %d: evaluate %s failed: %s", strategy_id, sym, res)
-                        continue
-                    if res:
-                        candidates.append(res)
-                # Persist strategy.last_signal/last_rsi updated during the scan.
+            if mid_candle and auth_binance:
                 try:
+                    await self._position_mgr.check_tp_fills(session, strategy, auth_binance, 0)
                     await session.commit()
+                    open_by_norm = await _load_open_by_norm()
                 except Exception as e:
-                    logger.error("Strategy %d: commit after signal scan failed: %s", strategy_id, e)
+                    logger.error("Strategy %d mid-candle TP check error: %s", strategy_id, e)
                     await session.rollback()
 
-            # Phase 2: parallel open (API) + serial DB commit — runs BEFORE manage.
-            open_batch = []
-            for cand in candidates:
-                side = cand.signal.value
-                leg_key = (_norm_sym(cand.symbol), side)
-                if tick_ctx.exchange_legs.get(leg_key, 0) > 0:
-                    try:
-                        await self._position_mgr._open_from_candidate(
-                            session, strategy, cand, auth_binance, public_binance,
-                            total_margin, leverage, tick_ctx,
+            # Phase 1b + 2: signal scan and new opens — K-line close (:00) only.
+            manage_symbols: list[tuple[str, list[Position]]] = []
+            if mid_candle:
+                seen_manage: set[str] = set()
+                for symbol in symbols:
+                    sym_key = _norm_sym(symbol)
+                    if sym_key in seen_manage:
+                        continue
+                    open_positions = open_by_norm.get(sym_key, [])
+                    if open_positions:
+                        seen_manage.add(sym_key)
+                        manage_symbols.append((symbol, open_positions))
+            else:
+                eval_symbols: list[str] = []
+                for symbol in symbols:
+                    sym_key = _norm_sym(symbol)
+                    open_positions = open_by_norm.get(sym_key, [])
+                    if open_positions:
+                        manage_symbols.append((symbol, open_positions))
+                        continue
+                    allow_new = pool_entry_norms is None or sym_key in pool_entry_norms
+                    if allow_new:
+                        eval_symbols.append(symbol)
+
+                # Concurrent signal scan (kline fetch + compute, no DB writes).
+                # Start open API as soon as each symbol produces a signal; do not
+                # wait for slower symbols in the pool to finish evaluating.
+                if eval_symbols:
+                    eval_sem = asyncio.Semaphore(_SIGNAL_EVAL_CONCURRENCY)
+                    order_sem = account_order_sem(sync_account_id)
+
+                    async def _eval_one(sym: str):
+                        async with eval_sem:
+                            try:
+                                res = await self._position_mgr.evaluate_signal_nodb(
+                                    strategy, sym, public_binance, total_margin, tick_ctx,
+                                )
+                                return sym, res, None
+                            except Exception as e:
+                                return sym, None, e
+
+                    async def _run_open_api(cand):
+                        async with order_sem:
+                            return await self._position_mgr.execute_open_api(
+                                cand, strategy, auth_binance, leverage,
+                            )
+
+                    pending_eval = {asyncio.create_task(_eval_one(s)) for s in eval_symbols}
+                    pending_open: dict[asyncio.Task, SignalCandidate] = {}
+
+                    while pending_eval or pending_open:
+                        done_tasks, _ = await asyncio.wait(
+                            set(pending_eval) | set(pending_open),
+                            return_when=asyncio.FIRST_COMPLETED,
                         )
+                        for done in done_tasks:
+                            if done in pending_eval:
+                                pending_eval.remove(done)
+                                sym, cand, err = await done
+                                if err is not None:
+                                    logger.error(
+                                        "Strategy %d: evaluate %s failed: %s",
+                                        strategy_id, sym, err,
+                                    )
+                                    continue
+                                if cand is None:
+                                    continue
+
+                                side = cand.signal.value
+                                leg_key = (_norm_sym(cand.symbol), side)
+                                if tick_ctx.exchange_legs.get(leg_key, 0) > 0:
+                                    try:
+                                        await self._position_mgr._open_from_candidate(
+                                            session, strategy, cand, auth_binance, public_binance,
+                                            total_margin, leverage, tick_ctx,
+                                        )
+                                        await session.commit()
+                                    except Exception as e:
+                                        logger.error(
+                                            "Strategy %d: reconcile/open precheck for %s failed: %s",
+                                            strategy_id, cand.symbol, e,
+                                        )
+                                        await session.rollback()
+                                elif auth_binance:
+                                    task = asyncio.create_task(_run_open_api(cand))
+                                    pending_open[task] = cand
+                                continue
+
+                            cand = pending_open.pop(done)
+                            try:
+                                res = await done
+                            except Exception as e:
+                                logger.error(
+                                    "Strategy %d: parallel open API for %s failed: %s",
+                                    strategy_id, cand.symbol, e,
+                                )
+                                continue
+                            if res is None:
+                                continue
+                            try:
+                                await self._position_mgr.execute_open_db(session, strategy, res)
+                                await session.commit()
+                            except Exception as e:
+                                logger.error(
+                                    "Strategy %d: commit after open %s failed: %s",
+                                    strategy_id, cand.symbol, e,
+                                )
+                                await session.rollback()
+
+                    # Persist strategy.last_signal/last_rsi if no open DB commit happened last.
+                    try:
                         await session.commit()
                     except Exception as e:
-                        logger.error(
-                            "Strategy %d: reconcile/open precheck for %s failed: %s",
-                            strategy_id, cand.symbol, e,
-                        )
-                        await session.rollback()
-                else:
-                    open_batch.append(cand)
-
-            if open_batch and auth_binance:
-                sem = account_order_sem(sync_account_id)
-
-                async def _run_open_api(cand):
-                    async with sem:
-                        return await self._position_mgr.execute_open_api(
-                            cand, strategy, auth_binance, leverage,
-                        )
-
-                api_results = await asyncio.gather(
-                    *[_run_open_api(c) for c in open_batch],
-                    return_exceptions=True,
-                )
-                for cand, res in zip(open_batch, api_results):
-                    if isinstance(res, Exception):
-                        logger.error(
-                            "Strategy %d: parallel open API for %s failed: %s",
-                            strategy_id, cand.symbol, res,
-                        )
-                        continue
-                    if res is None:
-                        continue
-                    try:
-                        await self._position_mgr.execute_open_db(session, strategy, res)
-                        await session.commit()
-                    except Exception as e:
-                        logger.error(
-                            "Strategy %d: commit after open %s failed: %s",
-                            strategy_id, cand.symbol, e,
-                        )
+                        logger.error("Strategy %d: commit after signal scan failed: %s", strategy_id, e)
                         await session.rollback()
 
-            # Phase 1a LAST: manage existing positions (TP/martingale/SL).
-            # Mid-candle +30s task also catches TP fills, so this is latency-tolerant.
+            # Phase 1a: manage existing positions (TP/martingale/SL).
+            # :00 runs after opens; :30 runs manage only (after TP fill check above).
             for symbol, open_positions in manage_symbols:
                 try:
                     await self._position_mgr.manage_symbol(
