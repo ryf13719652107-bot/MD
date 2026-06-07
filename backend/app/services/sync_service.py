@@ -1,6 +1,7 @@
 """Position synchronization between local DB and exchange."""
 import time
 import logging
+from datetime import datetime
 from collections import defaultdict
 from sqlalchemy import select
 from ..database import async_session
@@ -9,6 +10,7 @@ from ..models.trade import Trade
 from ..config import now_beijing
 from ..services.binance_service import BinanceService
 from ..services.backup_service import backup_trade
+from ..services.order_times import exit_time_from_order
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +47,10 @@ def _parse_order_exit_price(oi: dict) -> float:
     return float(oi.get("price", 0) or 0)
 
 
-async def _exit_price_from_tp_orders(
+async def _exit_from_tp_orders(
     binance_service: BinanceService, symbol: str, order_ids: list[str]
-) -> tuple[float | None, str]:
-    """Return exit price and close_reason if any TP order id is a filled reduce-only/limit close."""
+) -> tuple[float | None, str, datetime | None]:
+    """Return (exit_price, close_reason, exit_time|None) from filled TP orders."""
     formatted = binance_service._format_symbol(symbol)
     for oid in order_ids:
         if not oid:
@@ -59,11 +61,19 @@ async def _exit_price_from_tp_orders(
                 continue
             px = _parse_order_exit_price(oi)
             if px > 0:
+                exit_time = exit_time_from_order(oi, fallback=None)
                 logger.info("Sync: TP order %s filled @%.8f (from exchange)", oid, px)
-                return px, "take_profit"
+                return px, "take_profit", exit_time
         except Exception as e:
             logger.debug("Sync: fetch_order %s for %s: %s", oid, symbol, e)
-    return None, "sync"
+    return None, "sync", None
+
+
+async def _exit_price_from_tp_orders(
+    binance_service: BinanceService, symbol: str, order_ids: list[str]
+) -> tuple[float | None, str]:
+    px, reason, _ = await _exit_from_tp_orders(binance_service, symbol, order_ids)
+    return px, reason
 
 
 class PositionSyncService:
@@ -117,11 +127,14 @@ class PositionSyncService:
 
                     exit_price: float | None = None
                     close_reason = "sync"
+                    exit_time = sync_now
                     ref = legs[0]
                     if order_ids and binance_service:
-                        exit_price, close_reason = await _exit_price_from_tp_orders(
+                        exit_price, close_reason, order_exit_time = await _exit_from_tp_orders(
                             binance_service, ref.symbol, order_ids
                         )
+                        if order_exit_time is not None:
+                            exit_time = order_exit_time
                         if exit_price is None or exit_price <= 0:
                             close_reason = "sync"
                     if exit_price is None or exit_price <= 0:
@@ -152,13 +165,13 @@ class PositionSyncService:
                             realized_pnl=exit_pnl,
                             pnl_pct=round(exit_pnl_pct, 2),
                             entry_time=lp.opened_at or sync_now,
-                            exit_time=sync_now,
+                            exit_time=exit_time,
                             layer=lp.layer,
                             close_reason=close_reason,
                         )
                         session.add(trade)
                         trades_to_backup.append(trade)
-                        lp.closed_at = sync_now
+                        lp.closed_at = exit_time
                     logger.warning(
                         "Sync: leg %s %s (%d DB rows) missing on exchange — closed with %s exit=%.8f",
                         sym_key,

@@ -230,8 +230,10 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
             logging.error("Panic close: empty response %s %s", sym_key, side)
             continue
         exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
-        results.append({"symbol": sym_key, "side": side, "status": "ok", "exit_price": exit_price})
+        results.append({"symbol": sym_key, "side": side, "status": "ok", "exit_price": exit_price, "order": order})
         logging.info("Panic close: closed %s %s", sym_key, side)
+
+    from ..services.order_times import exit_time_from_order
 
     trades_to_backup: list[Trade] = []
     for r in results:
@@ -240,6 +242,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         sym_key = r["symbol"]
         side = r["side"]
         exit_price = r.get("exit_price", 0) or 0
+        exit_time = exit_time_from_order(r.get("order"), fallback=now)
         positions = legs_to_close.get((sym_key, side), [])
         for p in positions:
             ep = exit_price if exit_price > 0 else (p.mark_price or p.entry_price)
@@ -255,14 +258,14 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                 exit_price=ep,
                 realized_pnl=pnl,
                 pnl_pct=round(pct, 2),
-                entry_time=p.opened_at or now,
-                exit_time=now,
+                entry_time=p.opened_at or exit_time,
+                exit_time=exit_time,
                 layer=p.layer,
                 close_reason="panic_close",
             )
             db.add(trade)
             trades_to_backup.append(trade)
-            p.closed_at = now
+            p.closed_at = exit_time
 
     await db.commit()
     for t in trades_to_backup:

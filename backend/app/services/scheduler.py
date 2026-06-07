@@ -35,12 +35,15 @@ from .position_manager import PositionManager, _norm_sym
 from .tick_context import TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem, account_sync_lock
 from .backup_service import backup_trade
+from .order_times import exit_time_from_order
 
 logger = logging.getLogger(__name__)
 
 TIMEFRAME_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
 # 并发跑「收盘整轮」的策略数；≥ running 策略数可避免整点排队。多账户分散 API，可适当提高（单账户一堆策略时勿过大以防 429）。
 _STRATEGY_SEMAPHORE = asyncio.Semaphore(10)
+# 单策略内并发评估池内币信号的上限（拉 K 线/算信号，多为 WS 缓存命中）。
+_SIGNAL_EVAL_CONCURRENCY = 8
 
 
 def _exchange_leg_map_from_positions(raw_positions: list) -> dict[tuple[str, str], float]:
@@ -272,12 +275,26 @@ class StrategyScheduler:
                 strategy_log_service.warning(strategy_id, "无法获取API连接 — 请检查账户配置")
                 return
 
+            # Prefetch balance + positions concurrently (saves ~1 round-trip at tick start).
+            auth_binance.begin_tick()
+            try:
+                await auth_binance.ensure_markets_loaded()
+            except Exception as e:
+                logger.warning("Strategy %d: ensure_markets_loaded failed: %s", strategy_id, e)
+            _prefetch_balance, _prefetch_positions = await asyncio.gather(
+                auth_binance.fetch_balance(),
+                auth_binance.fetch_positions(),
+                return_exceptions=True,
+            )
+
             # Check margin threshold
             total_margin = 0.0
             leverage = float(strategy.leverage) if strategy.leverage else 10.0
             if auth_binance:
                 try:
-                    balance = await auth_binance.fetch_balance()
+                    if isinstance(_prefetch_balance, Exception):
+                        raise _prefetch_balance
+                    balance = _prefetch_balance
                     total_margin = float(balance.get("total", {}).get("USDT", 0) or 0)
                     logger.info("Strategy %d: balance fetched — total=%.2f USDT", strategy_id, total_margin)
                     if strategy.margin_threshold > 0 and total_margin < strategy.margin_threshold:
@@ -326,6 +343,7 @@ class StrategyScheduler:
                                         )
                                         continue
                                     exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
+                                    exit_time = exit_time_from_order(order)
                                     sk = _norm_sym(sym)
                                     sd = side.lower()
                                     for lp2 in pos_batch:
@@ -341,12 +359,12 @@ class StrategyScheduler:
                                             symbol=lp2.symbol, side=lp2.side, quantity=lp2.quantity,
                                             entry_price=lp2.entry_price, exit_price=ep_val,
                                             realized_pnl=pnl, pnl_pct=round(pct, 2),
-                                            entry_time=lp2.opened_at or now_beijing(), exit_time=now_beijing(),
+                                            entry_time=lp2.opened_at or exit_time, exit_time=exit_time,
                                             layer=lp2.layer, close_reason="margin_stop",
                                         )
                                         session.add(trade)
                                         margin_trades_to_backup.append(trade)
-                                        lp2.closed_at = now_beijing()
+                                        lp2.closed_at = exit_time
                                     logger.info("Margin stop: closed %s %s (contracts=%s)", sym, side, contracts)
 
                             eps_final = await auth_binance.fetch_positions()
@@ -475,17 +493,17 @@ class StrategyScheduler:
                 funding_filter_enabled = True
                 funding_rates = await get_cached_last_funding_rates_pct(public_binance)
 
-            auth_binance.begin_tick()
-            await auth_binance.ensure_markets_loaded()
+            # Reuse positions prefetched at tick start (concurrent with balance above).
             raw_exchange_positions: list = []
             exchange_legs: dict[tuple[str, str], float] = {}
-            try:
-                raw_exchange_positions = await auth_binance.fetch_positions()
-                exchange_legs = exchange_legs_from_positions(raw_exchange_positions)
-            except Exception as e:
+            if isinstance(_prefetch_positions, Exception):
                 logger.warning(
-                    "Strategy %d: tick fetch_positions failed: %s", strategy_id, e,
+                    "Strategy %d: tick fetch_positions failed: %s",
+                    strategy_id, _prefetch_positions,
                 )
+            else:
+                raw_exchange_positions = _prefetch_positions or []
+                exchange_legs = exchange_legs_from_positions(raw_exchange_positions)
 
             tick_ctx = TickContext(
                 exclude_norm=exclude_norm,
@@ -509,39 +527,49 @@ class StrategyScheduler:
             for positions in open_by_norm.values():
                 positions.sort(key=lambda x: x.layer, reverse=True)
 
-            candidates = []
+            # Phase 1b FIRST (latency-critical): scan no-position symbols for signals.
+            # Opening new positions must NOT wait for serial manage of existing legs.
+            manage_symbols: list[tuple[str, list[Position]]] = []
+            eval_symbols: list[str] = []
             for symbol in symbols:
                 sym_key = _norm_sym(symbol)
-                allow_new = pool_entry_norms is None or sym_key in pool_entry_norms
                 open_positions = open_by_norm.get(sym_key, [])
-                try:
-                    if open_positions:
-                        await self._position_mgr.manage_symbol(
-                            session, strategy, symbol, auth_binance, public_binance,
-                            open_positions, total_margin, leverage, tick_ctx,
-                        )
-                        await session.commit()
-                    elif allow_new:
-                        c = await self._position_mgr.evaluate_signal(
-                            session, strategy, symbol, public_binance, total_margin, tick_ctx,
-                        )
-                        try:
-                            await session.commit()
-                        except Exception as e:
-                            logger.error(
-                                "Strategy %d: commit after evaluate %s failed: %s",
-                                strategy_id, symbol, e,
-                            )
-                            await session.rollback()
-                            continue
-                        if c:
-                            candidates.append(c)
-                except Exception as e:
-                    logger.error("Strategy %d: error processing %s: %s", strategy_id, symbol, e)
-                    await session.rollback()
+                if open_positions:
+                    manage_symbols.append((symbol, open_positions))
                     continue
+                allow_new = pool_entry_norms is None or sym_key in pool_entry_norms
+                if allow_new:
+                    eval_symbols.append(symbol)
 
-            # Phase 2: parallel open (API) + serial DB commit
+            # Concurrent signal scan (kline fetch + compute, no DB writes).
+            candidates = []
+            if eval_symbols:
+                eval_sem = asyncio.Semaphore(_SIGNAL_EVAL_CONCURRENCY)
+
+                async def _eval_one(sym: str):
+                    async with eval_sem:
+                        return await self._position_mgr.evaluate_signal_nodb(
+                            strategy, sym, public_binance, total_margin, tick_ctx,
+                        )
+
+                eval_results = await asyncio.gather(
+                    *[_eval_one(s) for s in eval_symbols],
+                    return_exceptions=True,
+                )
+                for sym, res in zip(eval_symbols, eval_results):
+                    if isinstance(res, Exception):
+                        logger.error("Strategy %d: evaluate %s failed: %s", strategy_id, sym, res)
+                        continue
+                    if res:
+                        candidates.append(res)
+                # Persist strategy.last_signal/last_rsi updated during the scan.
+                try:
+                    await session.commit()
+                except Exception as e:
+                    logger.error("Strategy %d: commit after signal scan failed: %s", strategy_id, e)
+                    await session.rollback()
+
+            # Phase 2: parallel open (API) + serial DB commit — runs BEFORE manage.
             open_batch = []
             for cand in candidates:
                 side = cand.signal.value
@@ -593,6 +621,20 @@ class StrategyScheduler:
                             strategy_id, cand.symbol, e,
                         )
                         await session.rollback()
+
+            # Phase 1a LAST: manage existing positions (TP/martingale/SL).
+            # Mid-candle +30s task also catches TP fills, so this is latency-tolerant.
+            for symbol, open_positions in manage_symbols:
+                try:
+                    await self._position_mgr.manage_symbol(
+                        session, strategy, symbol, auth_binance, public_binance,
+                        open_positions, total_margin, leverage, tick_ctx,
+                    )
+                    await session.commit()
+                except Exception as e:
+                    logger.error("Strategy %d: manage %s failed: %s", strategy_id, symbol, e)
+                    await session.rollback()
+                    continue
 
             # Sync after signal processing — non-blocking background task.
             # Keep a strong reference so the task is not GC'd mid-flight.

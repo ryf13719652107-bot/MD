@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.strategy import Strategy
 from ..models.position import Position
 from ..models.trade import Trade
-from ..config import now_beijing, BEIJING_TZ
+from ..config import now_beijing
 from .binance_service import BinanceService
 from .strategy_engine import calculate_rsi, generate_signal, Signal, calculate_wavetrend, generate_wt_signal
 from .martingale_engine import MartingaleEngine
@@ -16,6 +16,7 @@ from .risk_manager import RiskManager
 from .log_service import strategy_log_service
 from .kline_stream import kline_stream_manager, _timeframe_ms
 from .backup_service import backup_trade
+from .order_times import exit_time_from_order, naive_beijing_from_ms_or_s
 from .tick_context import TickContext, SignalCandidate, OpenApiResult, exchange_legs_from_positions
 
 logger = logging.getLogger(__name__)
@@ -26,30 +27,16 @@ def _norm_sym(s: str) -> str:
     return (s or "").upper().replace("/", "").replace(":USDT", "")
 
 
-def _naive_beijing_from_ms_or_s(ts) -> Optional[datetime]:
-    if ts is None:
-        return None
-    try:
-        t = float(ts)
-        if t > 1e12:
-            t = t / 1000.0
-        from datetime import datetime
-
-        return datetime.fromtimestamp(t, BEIJING_TZ).replace(tzinfo=None)
-    except (TypeError, ValueError, OSError):
-        return None
-
-
 def _position_opened_at_from_exchange(ep: dict) -> Optional[datetime]:
     ts = ep.get("timestamp")
-    dt = _naive_beijing_from_ms_or_s(ts)
+    dt = naive_beijing_from_ms_or_s(ts)
     if dt:
         return dt
     info = ep.get("info") or {}
     if isinstance(info, dict):
         for k in ("updateTime", "entryTime", "createdTime"):
             v = info.get(k)
-            dt = _naive_beijing_from_ms_or_s(v)
+            dt = naive_beijing_from_ms_or_s(v)
             if dt:
                 return dt
     return None
@@ -334,7 +321,7 @@ class PositionManager:
         strategy: Strategy,
         symbol: str,
         public_binance: BinanceService,
-    ) -> tuple[list, float, str, Signal] | None:
+    ) -> tuple[list, float, str, Signal, float] | None:
         strategy_id = strategy.id
         limit = 200 if strategy.signal_source == "wavetrend" else 100
         klines = await kline_stream_manager.get(
@@ -392,7 +379,7 @@ class PositionManager:
             strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
             return None
 
-        return klines, current_price, signal_label, signal
+        return klines, current_price, signal_label, signal, float(rsi or 0.0)
 
     async def evaluate_signal(
         self,
@@ -403,15 +390,32 @@ class PositionManager:
         total_margin: float,
         ctx: TickContext,
     ) -> SignalCandidate | None:
+        candidate = await self.evaluate_signal_nodb(
+            strategy, symbol, public_binance, total_margin, ctx
+        )
+        await session.flush()
+        return candidate
+
+    async def evaluate_signal_nodb(
+        self,
+        strategy: Strategy,
+        symbol: str,
+        public_binance: BinanceService,
+        total_margin: float,
+        ctx: TickContext,
+    ) -> SignalCandidate | None:
+        """Session-free signal scan — safe to run concurrently via asyncio.gather.
+
+        Only touches network (kline_stream) + in-memory strategy fields; no DB I/O.
+        """
         if not self._passes_new_entry_filters(symbol, strategy, ctx):
             return None
 
         fetched = await self._fetch_klines_and_signal(strategy, symbol, public_binance)
         if not fetched:
             return None
-        klines, current_price, signal_label, signal = fetched
+        klines, current_price, signal_label, signal, rsi = fetched
         if signal == Signal.NEUTRAL:
-            await session.flush()
             return None
 
         base_qty = self._compute_base_qty(strategy, total_margin, current_price)
@@ -420,16 +424,14 @@ class PositionManager:
                 strategy.id,
                 f"{symbol} 无法开仓 — 余额为0(当前{total_margin:.1f})",
             )
-            await session.flush()
             return None
 
-        rsi = strategy.last_rsi or 0.0
         return SignalCandidate(
             symbol=symbol,
             signal=signal,
             klines=klines,
             current_price=current_price,
-            rsi=float(rsi),
+            rsi=rsi,
             signal_label=signal_label,
             base_qty=base_qty,
         )
@@ -452,7 +454,7 @@ class PositionManager:
         fetched = await self._fetch_klines_and_signal(strategy, symbol, public_binance)
         if not fetched:
             return
-        klines, current_price, _signal_label, _signal = fetched
+        klines, current_price, _signal_label, _signal, _rsi = fetched
 
         if auth_binance and not open_positions:
             try:
@@ -902,7 +904,11 @@ class PositionManager:
                         status = order_info.get("status", "")
                         avg_fill = float(order_info.get("average", 0) or 0)
                         if status in ("closed", "filled") and avg_fill > 0:
-                            await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, "take_profit", current_price, pre_exit_price=avg_fill)
+                            await self._close_positions(
+                                session, strategy, symbol, auth_binance, open_positions, eng,
+                                avg_entry, pos_side, "take_profit", current_price,
+                                pre_exit_price=avg_fill, fill_order=order_info,
+                            )
                             tp_filled = True
                             break
                     except (Exception, asyncio.TimeoutError):
@@ -952,20 +958,50 @@ class PositionManager:
                     eng = MartingaleEngine(base_quantity=symbol_positions[0].quantity, multiplier=strategy.martingale_mult,
                                            max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
                     avg_entry, _ = eng.get_avg_entry_price(positions_data)
-                    await self._close_positions(session, strategy, p.symbol, auth_binance, symbol_positions,
-                                                eng, avg_entry, p.side, "take_profit", current_price, pre_exit_price=avg_fill)
+                    await self._close_positions(
+                        session, strategy, p.symbol, auth_binance, symbol_positions,
+                        eng, avg_entry, p.side, "take_profit", current_price,
+                        pre_exit_price=avg_fill, fill_order=order_info,
+                    )
                     logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, p.symbol, avg_fill)
                     processed_symbols.add(symbol_side_key)
             except (Exception, asyncio.TimeoutError):
                 logger.warning("Strategy %d: TP order check failed for %s %s, retrying next cycle", strategy_id, p.symbol, p.side)
 
-    async def _close_positions(self, session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, current_price, pre_exit_price: float = 0.0):
+    async def _close_positions(
+        self,
+        session,
+        strategy,
+        symbol,
+        auth_binance,
+        open_positions,
+        eng,
+        avg_entry,
+        pos_side,
+        close_reason,
+        current_price,
+        pre_exit_price: float = 0.0,
+        fill_order: dict | None = None,
+    ):
         strategy_id = strategy.id
 
         exit_price = 0.0
 
         if pre_exit_price > 0:
             exit_price = pre_exit_price
+            if fill_order is None:
+                for p in open_positions:
+                    if p.tp_limit_order_id:
+                        try:
+                            fill_order = await asyncio.wait_for(
+                                auth_binance.exchange.fetch_order(
+                                    p.tp_limit_order_id, auth_binance._format_symbol(symbol)
+                                ),
+                                timeout=3.0,
+                            )
+                        except (Exception, asyncio.TimeoutError):
+                            pass
+                        break
             strategy_log_service.success(strategy_id, f"{symbol} 止盈平仓 — 限价单已成交 @{exit_price:.4f}")
             logger.info("Strategy %d: TP limit filled for %s @%.4f", strategy_id, symbol, exit_price)
         elif close_reason == "take_profit" and strategy.take_profit_limit_order:
@@ -991,6 +1027,7 @@ class PositionManager:
                         avg_fill = float(order_info.get("average", 0) or 0)
                         if order_status in ("closed", "filled") and avg_fill > 0:
                             exit_price = avg_fill
+                            fill_order = order_info
                             strategy_log_service.success(strategy_id, f"{symbol} 止盈限价单已成交 @{exit_price:.4f}")
                             logger.info("Strategy %d: TP limit already filled for %s @%.4f", strategy_id, symbol, exit_price)
                         elif order_status in ("canceled", "cancelled", "expired"):
@@ -1018,6 +1055,7 @@ class PositionManager:
                 try:
                     result = await auth_binance.close_position(symbol, pos_side)
                     if result and result.get("id"):
+                        fill_order = result
                         exit_price = float(result.get("average", 0) or result.get("price", 0) or current_price)
                         close_reason = "take_profit"
                         strategy_log_service.success(strategy_id, f"{symbol} 兜底市价止盈 @{exit_price:.4f}")
@@ -1042,6 +1080,7 @@ class PositionManager:
                         avg_fill = float(order_info.get("average", 0) or 0)
                         if order_status in ("closed", "filled") and avg_fill > 0:
                             exit_price = avg_fill
+                            fill_order = order_info
                             strategy_log_service.success(strategy_id, f"{symbol} 止盈限价单已成交 @{exit_price:.4f}（止损检查时发现）")
                             logger.info("Strategy %d: TP limit already filled during SL check for %s @%.4f", strategy_id, symbol, exit_price)
                             close_reason = "take_profit"
@@ -1058,6 +1097,7 @@ class PositionManager:
                 try:
                     result = await auth_binance.close_position(symbol, pos_side)
                     if result and result.get("id"):
+                        fill_order = result
                         exit_price = float(result.get("average", 0) or result.get("price", 0) or current_price)
                     else:
                         strategy_log_service.warning(strategy_id, f"{symbol} 平仓失败 — 未找到交易所仓位")
@@ -1069,17 +1109,18 @@ class PositionManager:
 
         # Common: create Trade records and mark positions closed
         logger.info("Strategy %d: closed %s due to %s", strategy_id, symbol, close_reason)
-        now = now_beijing()
+        detected_at = now_beijing()
+        exit_time = exit_time_from_order(fill_order, fallback=detected_at)
         trades_to_backup: list[Trade] = []
         for p in open_positions:
-            p.closed_at = now
+            p.closed_at = exit_time
             exit_pnl = (exit_price - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - exit_price) * p.quantity
             exit_pnl_pct = (exit_price - p.entry_price) / p.entry_price * 100 if p.side == "long" else (p.entry_price - exit_price) / p.entry_price * 100
             trade = Trade(
                 strategy_id=strategy_id, account_id=strategy.account_id, symbol=symbol,
                 side=p.side, quantity=p.quantity, entry_price=p.entry_price, exit_price=exit_price,
                 realized_pnl=exit_pnl, pnl_pct=exit_pnl_pct,
-                entry_time=p.opened_at or now, exit_time=now, layer=p.layer, close_reason=close_reason,
+                entry_time=p.opened_at or exit_time, exit_time=exit_time, layer=p.layer, close_reason=close_reason,
             )
             session.add(trade)
             trades_to_backup.append(trade)

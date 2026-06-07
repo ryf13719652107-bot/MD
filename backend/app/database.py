@@ -22,6 +22,12 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    # WAL + busy_timeout: background sync now runs detached from the tick and may
+    # overlap the next tick's writes on a separate connection. WAL lets readers and
+    # one writer coexist; busy_timeout makes a competing writer wait instead of
+    # immediately raising "database is locked".
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 

@@ -73,6 +73,9 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
         exit_price = position.mark_price or position.entry_price
 
     from ..models.trade import Trade
+    from ..services.order_times import exit_time_from_order
+
+    exit_time = exit_time_from_order(result)
     trade = Trade(
         strategy_id=position.strategy_id,
         account_id=position.account_id,
@@ -83,13 +86,13 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
         exit_price=exit_price,
         realized_pnl=(exit_price - position.entry_price) * position.quantity if position.side == "long" else (position.entry_price - exit_price) * position.quantity,
         pnl_pct=round(((exit_price - position.entry_price) / position.entry_price * 100) if position.side == "long" else ((position.entry_price - exit_price) / position.entry_price * 100), 2),
-        entry_time=position.opened_at or now_beijing(),
-        exit_time=now_beijing(),
+        entry_time=position.opened_at or exit_time,
+        exit_time=exit_time,
         layer=position.layer,
         close_reason="manual",
     )
     db.add(trade)
-    position.closed_at = now_beijing()
+    position.closed_at = exit_time
     await db.commit()
     backup_trade(trade)
 
