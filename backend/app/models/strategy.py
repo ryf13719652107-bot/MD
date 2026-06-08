@@ -62,7 +62,7 @@ class Strategy(Base):
     use_coin_pool: Mapped[bool] = mapped_column(Boolean, default=True)
     coin_pool_source: Mapped[str] = mapped_column(String(20), default="gainers")  # gainers, losers, both
     coin_pool_refresh_seconds: Mapped[int] = mapped_column(Integer, default=3600)  # how often to refresh coin pool
-    coin_pool_fetch_mode: Mapped[str] = mapped_column(String(20), default="interval")  # 'interval' or 'scheduled'
+    coin_pool_fetch_mode: Mapped[str] = mapped_column(String(20), default="interval")  # 'immediate' | 'interval' | 'scheduled'
     coin_pool_anchor_hour: Mapped[int] = mapped_column(Integer, default=8, server_default="8")  # 北京时间整点，scheduled 模式首次开选
     coin_pool_top_n: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
     # 最低 24h 成交额（USDT quoteVolume）；0 = 不限制。仅本策略过滤选币池新开仓列表

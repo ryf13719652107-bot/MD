@@ -29,7 +29,7 @@ export interface Strategy {
   use_coin_pool: boolean;
   coin_pool_source: 'gainers' | 'losers' | 'both';
   coin_pool_refresh_seconds: number;
-  coin_pool_fetch_mode: 'interval' | 'scheduled';
+  coin_pool_fetch_mode: 'immediate' | 'interval' | 'scheduled';
   coin_pool_anchor_hour: number;
   coin_pool_top_n: number;
   /** 最低 24h 成交额(USDT)，0=不限制 */
@@ -78,7 +78,7 @@ export interface StrategyFormData {
   use_coin_pool: boolean;
   coin_pool_source: 'gainers' | 'losers' | 'both';
   coin_pool_refresh_hours: number;
-  coin_pool_fetch_mode: 'interval' | 'scheduled';
+  coin_pool_fetch_mode: 'immediate' | 'interval' | 'scheduled';
   coin_pool_anchor_hour: number;
   coin_pool_top_n: number;
   coin_pool_min_volume_24h: number;
@@ -115,6 +115,7 @@ export function formatCoinPoolFetchMode(
   if (mode === 'scheduled') {
     return `指定时间开选（${String(anchorHour ?? 0).padStart(2, '0')}:00 起）`;
   }
+  if (mode === 'immediate') return '启动时立即抓取';
   return '按间隔开选';
 }
 

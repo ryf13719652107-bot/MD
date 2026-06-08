@@ -40,7 +40,7 @@ class StrategyCreate(BaseModel):
     use_coin_pool: bool = True
     coin_pool_source: Literal["gainers", "losers", "both"] = "gainers"
     coin_pool_refresh_seconds: int = Field(default=3600, ge=3600, le=86400)
-    coin_pool_fetch_mode: Literal["interval", "scheduled"] = "interval"
+    coin_pool_fetch_mode: Literal["immediate", "interval", "scheduled"] = "interval"
     coin_pool_anchor_hour: int = Field(default=8, ge=0, le=23, description="北京时间整点，scheduled 模式首次开选")
     coin_pool_top_n: int = Field(default=20, ge=1, le=50)
     coin_pool_min_volume_24h: float = Field(
@@ -98,7 +98,7 @@ class StrategyUpdate(BaseModel):
     use_coin_pool: Optional[bool] = None
     coin_pool_source: Optional[Literal["gainers", "losers", "both"]] = None
     coin_pool_refresh_seconds: Optional[int] = Field(default=None, ge=3600, le=86400)
-    coin_pool_fetch_mode: Optional[Literal["interval", "scheduled"]] = None
+    coin_pool_fetch_mode: Optional[Literal["immediate", "interval", "scheduled"]] = None
     coin_pool_anchor_hour: Optional[int] = Field(default=None, ge=0, le=23)
     coin_pool_top_n: Optional[int] = Field(default=None, ge=1, le=50)
     coin_pool_min_volume_24h: Optional[float] = Field(default=None, ge=0)

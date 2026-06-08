@@ -38,7 +38,7 @@ const schema = z.object({
   use_coin_pool: z.coerce.boolean(),
   coin_pool_source: z.enum(['gainers', 'losers', 'both']),
   coin_pool_refresh_hours: z.number().min(1).max(24),
-  coin_pool_fetch_mode: z.enum(['interval', 'scheduled']),
+  coin_pool_fetch_mode: z.enum(['immediate', 'interval', 'scheduled']),
   coin_pool_anchor_hour: z.number().min(0).max(23),
   coin_pool_top_n: z.number().min(1).max(50),
   /** 表单内以「万 USDT」录入，提交时 ×1e4 转为 USDT */
@@ -91,7 +91,10 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       use_coin_pool: initialData.use_coin_pool,
       coin_pool_source: initialData.coin_pool_source,
       coin_pool_refresh_hours: Math.max(1, Math.round((initialData.coin_pool_refresh_seconds ?? 3600) / 3600)),
-      coin_pool_fetch_mode: initialData.coin_pool_fetch_mode === 'scheduled' ? 'scheduled' : 'interval',
+      coin_pool_fetch_mode:
+        initialData.coin_pool_fetch_mode === 'scheduled' || initialData.coin_pool_fetch_mode === 'immediate'
+          ? initialData.coin_pool_fetch_mode
+          : 'interval',
       coin_pool_anchor_hour: initialData.coin_pool_anchor_hour ?? 8,
       coin_pool_top_n: initialData.coin_pool_top_n ?? 20,
       coin_pool_min_volume_24h: (initialData.coin_pool_min_volume_24h ?? 0) / WAN,
@@ -410,10 +413,11 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <div>
               <label className={labelClass}>开选方式</label>
               <select {...register('coin_pool_fetch_mode')} className={inputClass}>
+                <option value="immediate">启动时立即抓取</option>
                 <option value="interval">按间隔开选</option>
                 <option value="scheduled">指定时间开选</option>
               </select>
-              <span className="text-xs text-gray-600">不会在启动或改参时立即重选</span>
+              <span className="text-xs text-gray-600">立即抓取仅在手点「启动」时生效；重启/改参不重选</span>
             </div>
             {fetchMode === 'scheduled' && (
               <div>
