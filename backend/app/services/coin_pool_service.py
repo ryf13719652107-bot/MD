@@ -237,6 +237,40 @@ class CoinPoolService:
             coins = list(result.scalars().all())
             return sort_coin_pool_by_price_change(coins, source)
 
+    def _is_scheduled_refresh_time(
+        self,
+        dt: datetime,
+        anchor_hour: int,
+        interval: float,
+        tolerance: float = 300.0,
+    ) -> bool:
+        """Return True when a refresh timestamp belongs to the scheduled grid.
+
+        Only accept refreshes after a scheduled slot. A pool written shortly before
+        the slot (for example 02:56 for a 03:00 schedule) is still an old pool.
+        """
+        anchor_today = dt.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
+        base = anchor_today if anchor_today <= dt else anchor_today - timedelta(days=1)
+        elapsed = (dt - base).total_seconds()
+        remainder = elapsed % interval
+        return remainder <= tolerance
+
+    def _coin_pool_valid_for_strategy(self, strategy: Strategy, coins: list[CoinPool]) -> bool:
+        """Scheduled mode only accepts pools refreshed after the schedule was configured."""
+        if getattr(strategy, "coin_pool_fetch_mode", "interval") != "scheduled":
+            return True
+        if not coins:
+            return False
+        last_dt = max((c.last_updated for c in coins if c.last_updated), default=None)
+        if last_dt is None:
+            return False
+        started_at = getattr(strategy, "coin_pool_schedule_started_at", None)
+        if started_at is not None and last_dt < started_at:
+            return False
+        anchor = int(getattr(strategy, "coin_pool_anchor_hour", 8) or 8)
+        interval = float(strategy.coin_pool_refresh_seconds or self._config["refresh_interval_seconds"])
+        return self._is_scheduled_refresh_time(last_dt, anchor, interval)
+
     async def get_effective_pool_entries(
         self,
         *,
@@ -244,9 +278,12 @@ class CoinPoolService:
         limit: int = 0,
         min_volume_24h: float = 0,
         exclude_symbols_norm: set[str] | None = None,
+        strategy: Strategy | None = None,
     ) -> list[CoinPool]:
         """Strategy-facing pool: leaderboard top N → volume floor → optional symbol exclude."""
         coins = await self.get_pool(source)
+        if strategy is not None and not self._coin_pool_valid_for_strategy(strategy, coins):
+            return []
         if limit > 0:
             coins = coins[:limit]
         if min_volume_24h > 0:
@@ -261,6 +298,7 @@ class CoinPoolService:
         limit: int = 0,
         min_volume_24h: float = 0,
         exclude_symbols_norm: set[str] | None = None,
+        strategy: Strategy | None = None,
     ) -> list[str]:
         """Symbol list for scheduler — same rules as get_effective_pool_entries."""
         coins = await self.get_effective_pool_entries(
@@ -268,6 +306,7 @@ class CoinPoolService:
             limit=limit,
             min_volume_24h=min_volume_24h,
             exclude_symbols_norm=exclude_symbols_norm,
+            strategy=strategy,
         )
         return [c.symbol for c in coins]
 

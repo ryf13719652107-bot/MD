@@ -425,6 +425,7 @@ class StrategyScheduler:
                             strategy.coin_pool_top_n,
                             min_volume_24h=min_vol,
                             exclude_symbols_norm=set(pool_exclude_norm) if pool_exclude_norm else None,
+                            strategy=strategy,
                         )
                         if exclude_funding_enabled(strategy):
                             pool_symbols = await filter_pool_symbols_by_funding(

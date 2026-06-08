@@ -3,6 +3,8 @@ from datetime import datetime
 
 import pytest
 
+from app.models.coin_pool import CoinPool
+from app.models.strategy import Strategy
 from app.services.coin_pool_service import CoinPoolService
 
 
@@ -46,3 +48,48 @@ def test_interval_aligns_from_last_refresh(monkeypatch):
     last = _dt(2026, 6, 8, 10, 0)
     delay = svc._seconds_until_next_refresh(last)
     assert delay == pytest.approx(30 * 60, rel=0.01)
+
+
+def test_scheduled_pool_rejects_old_pool_before_configured_start():
+    svc = CoinPoolService()
+    strategy = Strategy(
+        use_coin_pool=True,
+        coin_pool_fetch_mode="scheduled",
+        coin_pool_anchor_hour=3,
+        coin_pool_refresh_seconds=24 * 3600,
+        coin_pool_schedule_started_at=_dt(2026, 6, 9, 2, 10),
+    )
+    old_pool = [
+        CoinPool(symbol="OLDUSDT", rank=1, price_change_pct=1, source="gainers", last_updated=_dt(2026, 6, 9, 2, 3))
+    ]
+    assert not svc._coin_pool_valid_for_strategy(strategy, old_pool)
+
+
+def test_scheduled_pool_rejects_pool_written_before_slot():
+    svc = CoinPoolService()
+    strategy = Strategy(
+        use_coin_pool=True,
+        coin_pool_fetch_mode="scheduled",
+        coin_pool_anchor_hour=3,
+        coin_pool_refresh_seconds=24 * 3600,
+        coin_pool_schedule_started_at=_dt(2026, 6, 9, 2, 10),
+    )
+    early_pool = [
+        CoinPool(symbol="EARLYUSDT", rank=1, price_change_pct=1, source="gainers", last_updated=_dt(2026, 6, 9, 2, 56))
+    ]
+    assert not svc._coin_pool_valid_for_strategy(strategy, early_pool)
+
+
+def test_scheduled_pool_accepts_pool_from_scheduled_start():
+    svc = CoinPoolService()
+    strategy = Strategy(
+        use_coin_pool=True,
+        coin_pool_fetch_mode="scheduled",
+        coin_pool_anchor_hour=3,
+        coin_pool_refresh_seconds=24 * 3600,
+        coin_pool_schedule_started_at=_dt(2026, 6, 9, 2, 10),
+    )
+    scheduled_pool = [
+        CoinPool(symbol="NEWUSDT", rank=1, price_change_pct=1, source="gainers", last_updated=_dt(2026, 6, 9, 3, 1))
+    ]
+    assert svc._coin_pool_valid_for_strategy(strategy, scheduled_pool)

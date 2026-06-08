@@ -6,6 +6,7 @@ from ..models.strategy import Strategy
 from ..models.position import Position
 from ..schemas.strategy import StrategyCreate, StrategyUpdate, StrategyResponse
 from ..schemas.coin_pool import CoinPoolResponse
+from ..config import now_beijing
 from ..services.scheduler import strategy_scheduler
 from ..services.backup_service import backup_trade
 from ..services.coin_pool_service import coin_pool_service
@@ -31,6 +32,8 @@ async def create_strategy(data: StrategyCreate, db: AsyncSession = Depends(get_d
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
     strategy = Strategy(**data.model_dump())
+    if strategy.use_coin_pool and strategy.coin_pool_fetch_mode == "scheduled":
+        strategy.coin_pool_schedule_started_at = now_beijing()
     db.add(strategy)
     await db.commit()
     await db.refresh(strategy)
@@ -84,6 +87,7 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
         limit=strategy.coin_pool_top_n,
         min_volume_24h=float(strategy.coin_pool_min_volume_24h or 0),
         exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
+        strategy=strategy,
     )
     if exclude_funding_enabled(strategy):
         allowed = await filter_pool_symbols_by_funding(
@@ -112,8 +116,22 @@ async def update_strategy(
     if was_running:
         await strategy_scheduler.remove_strategy(strategy_id)
 
-    for key, val in data.model_dump(exclude_unset=True).items():
+    patch = data.model_dump(exclude_unset=True)
+    schedule_keys = {
+        "coin_pool_fetch_mode",
+        "coin_pool_anchor_hour",
+        "coin_pool_refresh_seconds",
+        "coin_pool_source",
+        "use_coin_pool",
+    }
+    for key, val in patch.items():
         setattr(strategy, key, val)
+    if (
+        strategy.use_coin_pool
+        and strategy.coin_pool_fetch_mode == "scheduled"
+        and schedule_keys.intersection(patch.keys())
+    ):
+        strategy.coin_pool_schedule_started_at = now_beijing()
     await db.commit()
     await db.refresh(strategy)
 
