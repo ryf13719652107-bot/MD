@@ -118,6 +118,9 @@ async def update_strategy(
     await db.refresh(strategy)
 
     if was_running:
+        from ..services.coin_pool_service import coin_pool_service
+
+        await coin_pool_service.sync_config_from_running_strategies()
         strategy_scheduler.start()
         await strategy_scheduler.add_strategy(strategy_id, session=db)
 
@@ -142,20 +145,8 @@ async def start_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Strategy not found")
 
     from ..services.coin_pool_service import coin_pool_service
-    from ..services.binance_service import get_public_binance
 
     await coin_pool_service.sync_config_from_running_strategies()
-
-    if strategy.use_coin_pool and strategy.coin_pool_fetch_mode == "immediate":
-        try:
-            public_binance = await get_public_binance()
-            await coin_pool_service.refresh_pool(
-                public_binance,
-                source=normalize_coin_pool_source(strategy.coin_pool_source),
-                limit=strategy.coin_pool_top_n,
-            )
-        except Exception:
-            pass
 
     await strategy_scheduler.add_strategy(strategy_id, session=db)
     return {"status": "running", "id": strategy_id}

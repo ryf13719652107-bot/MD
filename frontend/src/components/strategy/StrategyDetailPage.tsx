@@ -4,7 +4,11 @@ import { poolSourceBadgeClass, poolSourceLabel } from '../../utils/poolSource';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import type { Strategy } from '../../types/strategy';
-import { formatLastSignalText } from '../../types/strategy';
+import {
+  formatCoinPoolFetchMode,
+  formatCoinPoolRefreshHours,
+  formatLastSignalText,
+} from '../../types/strategy';
 import type { CoinPoolEntry, Trade } from '../../types';
 import { ArrowLeft, Terminal } from 'lucide-react';
 
@@ -187,7 +191,7 @@ export default function StrategyDetailPage() {
             <span className={labelClass}>选币池</span>
             <div className={valClass}>
               {strategy.use_coin_pool
-                ? `${poolSourceLabel(strategy.coin_pool_source)} / ${Math.round(strategy.coin_pool_refresh_seconds / 60)}分钟 / ${strategy.coin_pool_fetch_mode === 'immediate' ? '立即抓取' : '间隔抓取'}`
+                ? `${poolSourceLabel(strategy.coin_pool_source)} / ${formatCoinPoolRefreshHours(strategy.coin_pool_refresh_seconds)} / ${formatCoinPoolFetchMode(strategy.coin_pool_fetch_mode, strategy.coin_pool_anchor_hour)}`
                 : '固定交易对'}
             </div>
           </div>

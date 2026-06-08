@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import select, delete, func
 from ..database import async_session
 from ..models.coin_pool import CoinPool
@@ -39,6 +39,8 @@ class CoinPoolService:
             "refresh_interval_seconds": 3600,
             "pool_source": "both",
             "max_symbols": 30,
+            "fetch_mode": "interval",
+            "anchor_hour": 8,
         }
         self._last_refresh_ok: bool = False
         self._last_refresh_time: float = 0.0
@@ -78,10 +80,20 @@ class CoinPoolService:
             return
         max_top = max(s.coin_pool_top_n for s in strategies)
         min_refresh = min(s.coin_pool_refresh_seconds for s in strategies)
+        scheduled = [
+            s for s in strategies
+            if getattr(s, "coin_pool_fetch_mode", "interval") == "scheduled"
+        ]
         patch: dict = {
             "max_symbols": max(max_top, self._config.get("max_symbols", 30)),
             "refresh_interval_seconds": min_refresh,
         }
+        if scheduled:
+            anchor_src = min(scheduled, key=lambda s: s.coin_pool_refresh_seconds)
+            patch["fetch_mode"] = "scheduled"
+            patch["anchor_hour"] = int(getattr(anchor_src, "coin_pool_anchor_hour", 8) or 8)
+        else:
+            patch["fetch_mode"] = "interval"
         if len(strategies) == 1:
             from .strategy_flags import normalize_coin_pool_source
 
@@ -271,29 +283,72 @@ class CoinPoolService:
             r = await session.execute(select(func.max(CoinPool.last_updated)))
             return r.scalar()
 
+    def _next_anchor_slot_after(
+        self, after: datetime, anchor_hour: int, interval: float,
+    ) -> datetime:
+        """锚点时刻起每隔 interval 秒的下一次开选时刻（严格晚于 after）。
+
+        网格跨日连续：凌晨未到当日锚点时，仍从昨日锚点推算（如 8:00/4h → …20:00/0:00/4:00/8:00）。
+        """
+        anchor_today = after.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
+        base = anchor_today if anchor_today <= after else anchor_today - timedelta(days=1)
+        elapsed = (after - base).total_seconds()
+        n = int(elapsed // interval) + 1
+        return base + timedelta(seconds=n * interval)
+
     def _seconds_until_next_refresh(self, last_dt: datetime | None) -> float:
-        """距下一次「按计划」刷新应等待的秒数；无记录或已过期则 0（应尽快刷新）。"""
+        """距下一次按计划刷新应等待的秒数；有历史记录时与上次选币时间对齐，重启不立即重选。"""
         interval = float(self._config["refresh_interval_seconds"])
+        now = now_beijing()
+        mode = self._config.get("fetch_mode", "interval")
+
         if last_dt is None:
+            if mode == "scheduled":
+                anchor = int(self._config.get("anchor_hour", 8))
+                next_slot = self._next_anchor_slot_after(
+                    now - timedelta(seconds=1), anchor, interval,
+                )
+                return max(0.0, (next_slot - now).total_seconds())
             return 0.0
-        elapsed = (now_beijing() - last_dt).total_seconds()
-        return max(0.0, interval - elapsed)
+
+        if mode == "interval":
+            elapsed = (now - last_dt).total_seconds()
+            return max(0.0, interval - elapsed)
+
+        anchor = int(self._config.get("anchor_hour", 8))
+        elapsed = (now - last_dt).total_seconds()
+        min_wait = max(0.0, interval - elapsed)
+        earliest = now + timedelta(seconds=min_wait)
+        next_slot = self._next_anchor_slot_after(
+            earliest - timedelta(seconds=1), anchor, interval,
+        )
+        return max(0.0, (next_slot - now).total_seconds())
 
     async def start_auto_refresh(self, binance_service: BinanceService):
-        """按计划间隔循环刷新；重启后根据库内上次刷新时间补齐等待，避免整点相位被重置。"""
+        """按计划间隔循环刷新；重启/改参后根据库内上次选币时间补齐等待，不立即重选。"""
 
         async def _loop():
             while True:
+                await self.sync_config_from_running_strategies()
                 last_dt = await self._last_refresh_datetime_from_db()
                 delay = self._seconds_until_next_refresh(last_dt)
                 if delay > 0:
                     if last_dt is not None:
                         self._last_refresh_time = last_dt.timestamp()
-                    logger.info(
-                        "选币池将在 %.0f 秒后刷新（与重启前间隔对齐，周期=%ds）",
-                        delay,
-                        int(self._config["refresh_interval_seconds"]),
-                    )
+                    mode = self._config.get("fetch_mode", "interval")
+                    if mode == "scheduled":
+                        logger.info(
+                            "选币池将在 %.0f 秒后刷新（scheduled 锚点=%02d:00 周期=%ds）",
+                            delay,
+                            int(self._config.get("anchor_hour", 8)),
+                            int(self._config["refresh_interval_seconds"]),
+                        )
+                    else:
+                        logger.info(
+                            "选币池将在 %.0f 秒后刷新（与上次选币对齐，周期=%ds）",
+                            delay,
+                            int(self._config["refresh_interval_seconds"]),
+                        )
                     await asyncio.sleep(delay)
                 try:
                     await self.refresh_pool_sources(binance_service)
@@ -301,7 +356,6 @@ class CoinPoolService:
                     self._last_refresh_ok = False
                     self._last_error = str(e)[:200]
                     logger.error("Coin pool refresh error: %s", e)
-                await asyncio.sleep(self._config["refresh_interval_seconds"])
 
         if self._refresh_task is None or self._refresh_task.done():
             self._refresh_task = asyncio.create_task(_loop())

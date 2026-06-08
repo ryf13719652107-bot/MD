@@ -29,7 +29,8 @@ export interface Strategy {
   use_coin_pool: boolean;
   coin_pool_source: 'gainers' | 'losers' | 'both';
   coin_pool_refresh_seconds: number;
-  coin_pool_fetch_mode: 'immediate' | 'interval';
+  coin_pool_fetch_mode: 'interval' | 'scheduled';
+  coin_pool_anchor_hour: number;
   coin_pool_top_n: number;
   /** 最低 24h 成交额(USDT)，0=不限制 */
   coin_pool_min_volume_24h: number;
@@ -76,8 +77,9 @@ export interface StrategyFormData {
   leverage: number;
   use_coin_pool: boolean;
   coin_pool_source: 'gainers' | 'losers' | 'both';
-  coin_pool_refresh_seconds: number;
-  coin_pool_fetch_mode: 'immediate' | 'interval';
+  coin_pool_refresh_hours: number;
+  coin_pool_fetch_mode: 'interval' | 'scheduled';
+  coin_pool_anchor_hour: number;
   coin_pool_top_n: number;
   coin_pool_min_volume_24h: number;
   exclude_tradefi: boolean;
@@ -87,6 +89,10 @@ export interface StrategyFormData {
   funding_rate_threshold_pct: number;
 }
 
+export type StrategyApiPayload = Omit<StrategyFormData, 'coin_pool_refresh_hours'> & {
+  coin_pool_refresh_seconds: number;
+};
+
 export function formatSignalSourceLabel(
   source: Strategy['signal_source'],
   direction: Strategy['direction'],
@@ -95,6 +101,21 @@ export function formatSignalSourceLabel(
   if (source === 'wavetrend') return 'WaveTrend';
   if (source === 'martingale_base') return '基础马丁';
   return `RSI ${direction === 'long' ? '<' : '>'} ${rsiEntryThreshold ?? ''}`;
+}
+
+export function formatCoinPoolRefreshHours(seconds: number): string {
+  const hours = seconds / 3600;
+  return Number.isInteger(hours) ? `${hours}小时` : `${hours.toFixed(1)}小时`;
+}
+
+export function formatCoinPoolFetchMode(
+  mode: Strategy['coin_pool_fetch_mode'],
+  anchorHour?: number,
+): string {
+  if (mode === 'scheduled') {
+    return `指定时间开选（${String(anchorHour ?? 0).padStart(2, '0')}:00 起）`;
+  }
+  return '按间隔开选';
 }
 
 export function formatLastSignalText(

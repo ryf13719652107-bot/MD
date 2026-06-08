@@ -98,16 +98,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Step 6/6: start_auto_refresh...")
     await coin_pool_service.start_auto_refresh(public_binance)
-    logger.info("Coin pool auto-refresh started")
-
-    async def _bootstrap_pool_refresh():
-        await asyncio.sleep(3)
-        try:
-            await coin_pool_service.refresh_pool_sources(public_binance)
-        except Exception as e:
-            logger.warning("Coin pool bootstrap refresh: %s", e)
-
-    asyncio.create_task(_bootstrap_pool_refresh())
+    logger.info("Coin pool auto-refresh started (aligned to last pool refresh, no bootstrap)")
     if not (settings.api_write_token or "").strip():
         logger.warning(
             "API_WRITE_TOKEN 未配置 — 所有写接口对公网开放，极易被刷账户！请在 backend/.env 设置 API_WRITE_TOKEN"

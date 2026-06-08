@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import type { Strategy, StrategyFormData } from '../../types/strategy';
+import type { Strategy, StrategyApiPayload, StrategyFormData } from '../../types/strategy';
 import type { Account } from '../../types';
 
 const schema = z.object({
@@ -37,8 +37,9 @@ const schema = z.object({
   leverage: z.number().min(1).max(125),
   use_coin_pool: z.coerce.boolean(),
   coin_pool_source: z.enum(['gainers', 'losers', 'both']),
-  coin_pool_refresh_seconds: z.number().min(30).max(86400),
-  coin_pool_fetch_mode: z.enum(['immediate', 'interval']),
+  coin_pool_refresh_hours: z.number().min(1).max(24),
+  coin_pool_fetch_mode: z.enum(['interval', 'scheduled']),
+  coin_pool_anchor_hour: z.number().min(0).max(23),
   coin_pool_top_n: z.number().min(1).max(50),
   /** 表单内以「万 USDT」录入，提交时 ×1e4 转为 USDT */
   coin_pool_min_volume_24h: z.number().min(0).max(99999999),
@@ -54,7 +55,7 @@ const WAN = 1e4;
 interface Props {
   accounts: Account[];
   initialData: Strategy | null;
-  onSubmit: (data: StrategyFormData) => void;
+  onSubmit: (data: StrategyApiPayload) => void;
   onCancel: () => void;
 }
 
@@ -89,8 +90,9 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       leverage: initialData.leverage ?? 10,
       use_coin_pool: initialData.use_coin_pool,
       coin_pool_source: initialData.coin_pool_source,
-      coin_pool_refresh_seconds: initialData.coin_pool_refresh_seconds ?? 3600,
-      coin_pool_fetch_mode: initialData.coin_pool_fetch_mode ?? 'interval',
+      coin_pool_refresh_hours: Math.max(1, Math.round((initialData.coin_pool_refresh_seconds ?? 3600) / 3600)),
+      coin_pool_fetch_mode: initialData.coin_pool_fetch_mode === 'scheduled' ? 'scheduled' : 'interval',
+      coin_pool_anchor_hour: initialData.coin_pool_anchor_hour ?? 8,
       coin_pool_top_n: initialData.coin_pool_top_n ?? 20,
       coin_pool_min_volume_24h: (initialData.coin_pool_min_volume_24h ?? 0) / WAN,
       exclude_tradefi: initialData.exclude_tradefi ?? true,
@@ -129,8 +131,9 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     leverage: 10,
     use_coin_pool: true,
     coin_pool_source: 'gainers',
-    coin_pool_refresh_seconds: 3600,
+    coin_pool_refresh_hours: 1,
     coin_pool_fetch_mode: 'interval',
+    coin_pool_anchor_hour: 8,
     coin_pool_top_n: 20,
     coin_pool_min_volume_24h: 0,
     exclude_tradefi: true,
@@ -141,9 +144,11 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
   };
 }
 
-function toApiPayload(data: StrategyFormData): StrategyFormData {
+function toApiPayload(data: StrategyFormData): StrategyApiPayload {
+  const { coin_pool_refresh_hours, ...rest } = data;
   return {
-    ...data,
+    ...rest,
+    coin_pool_refresh_seconds: Math.round(coin_pool_refresh_hours * 3600),
     coin_pool_min_volume_24h: (data.coin_pool_min_volume_24h || 0) * WAN,
   };
 }
@@ -159,6 +164,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
   const direction = watch('direction', 'long');
   const signalSource = watch('signal_source', 'rsi');
   const useCoinPool = watch('use_coin_pool', true);
+  const fetchMode = watch('coin_pool_fetch_mode', 'interval');
   const stopLossEnabled = watch('stop_loss_enabled', true);
   const excludeFunding = watch('exclude_funding', false);
 
@@ -397,18 +403,29 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               </select>
             </div>
             <div>
-              <label className={labelClass}>选币池刷新间隔(秒)</label>
-              <input type="number" {...register('coin_pool_refresh_seconds', { valueAsNumber: true })} className={inputClass} />
-              <span className="text-xs text-gray-600">默认1小时(3600秒)</span>
+              <label className={labelClass}>选币间隔(小时)</label>
+              <input type="number" min={1} max={24} step={1} {...register('coin_pool_refresh_hours', { valueAsNumber: true })} className={inputClass} />
+              <span className="text-xs text-gray-600">默认1小时；重启/改参后按上次选币时间继续</span>
             </div>
             <div>
-              <label className={labelClass}>排行榜抓取模式</label>
+              <label className={labelClass}>开选方式</label>
               <select {...register('coin_pool_fetch_mode')} className={inputClass}>
-                <option value="immediate">启动时立即抓取</option>
-                <option value="interval">按间隔抓取</option>
+                <option value="interval">按间隔开选</option>
+                <option value="scheduled">指定时间开选</option>
               </select>
-              <span className="text-xs text-gray-600">策略启动时是否立即刷新选币池</span>
+              <span className="text-xs text-gray-600">不会在启动或改参时立即重选</span>
             </div>
+            {fetchMode === 'scheduled' && (
+              <div>
+                <label className={labelClass}>首次开选时间(北京时间)</label>
+                <select {...register('coin_pool_anchor_hour', { valueAsNumber: true })} className={inputClass}>
+                  {Array.from({ length: 24 }, (_, h) => (
+                    <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>
+                  ))}
+                </select>
+                <span className="text-xs text-gray-600">之后每隔上方间隔重复开选</span>
+              </div>
+            )}
             <div>
               <label className={labelClass}>抓取前几名</label>
               <input type="number" min={1} max={50} {...register('coin_pool_top_n', { valueAsNumber: true })} className={inputClass} />

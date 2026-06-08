@@ -3,7 +3,12 @@ import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { Strategy } from '../../types/strategy';
-import { formatLastSignalText, formatSignalSourceLabel } from '../../types/strategy';
+import {
+  formatCoinPoolFetchMode,
+  formatCoinPoolRefreshHours,
+  formatLastSignalText,
+  formatSignalSourceLabel,
+} from '../../types/strategy';
 import type { Account } from '../../types';
 import StrategyForm from './StrategyForm';
 import { Play, Square, AlertTriangle, Edit, Trash2, Plus, Eye } from 'lucide-react';
@@ -166,7 +171,7 @@ export default function StrategyPage() {
               <div>止盈: <span className="text-gray-200">{s.take_profit_pct}% {s.take_profit_limit_order ? '(限价单)' : '(市价单)'}</span></div>
               <div>止损: <span className="text-gray-200">{s.stop_loss_enabled ? `${s.stop_loss_pct}%` : '已禁用'}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>
-              <div>选币池刷新: <span className="text-gray-200">{Math.round(s.coin_pool_refresh_seconds / 60)}分钟</span></div>
+              <div>选币间隔: <span className="text-gray-200">{formatCoinPoolRefreshHours(s.coin_pool_refresh_seconds)} / {formatCoinPoolFetchMode(s.coin_pool_fetch_mode, s.coin_pool_anchor_hour)}</span></div>
               <div>成交量过滤: <span className="text-gray-200">
                 {(s.coin_pool_min_volume_24h ?? 0) > 0
                   ? `≥ ${(s.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`

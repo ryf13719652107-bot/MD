@@ -63,6 +63,7 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN funding_rate_threshold_pct FLOAT DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN coin_pool_min_volume_24h FLOAT DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN price_drop_multiplier FLOAT DEFAULT 1.0",
+            "ALTER TABLE strategies ADD COLUMN coin_pool_anchor_hour INTEGER DEFAULT 8",
         ]
         for sql in migrations:
             try:
