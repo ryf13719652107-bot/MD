@@ -283,6 +283,27 @@ class CoinPoolService:
             r = await session.execute(select(func.max(CoinPool.last_updated)))
             return r.scalar()
 
+    async def _has_running_pool_strategies(self) -> bool:
+        async with async_session() as session:
+            r = await session.execute(
+                select(Strategy.id).where(
+                    Strategy.use_coin_pool.is_(True),
+                    Strategy.status == "running",
+                ).limit(1)
+            )
+            return r.scalar() is not None
+
+    async def has_running_scheduled_strategies(self) -> bool:
+        async with async_session() as session:
+            r = await session.execute(
+                select(Strategy.id).where(
+                    Strategy.use_coin_pool.is_(True),
+                    Strategy.status == "running",
+                    Strategy.coin_pool_fetch_mode == "scheduled",
+                ).limit(1)
+            )
+            return r.scalar() is not None
+
     def _next_anchor_slot_after(
         self, after: datetime, anchor_hour: int, interval: float,
     ) -> datetime:
@@ -330,6 +351,9 @@ class CoinPoolService:
         async def _loop():
             while True:
                 await self.sync_config_from_running_strategies()
+                if not await self._has_running_pool_strategies():
+                    await asyncio.sleep(60)
+                    continue
                 last_dt = await self._last_refresh_datetime_from_db()
                 delay = self._seconds_until_next_refresh(last_dt)
                 if delay > 0:

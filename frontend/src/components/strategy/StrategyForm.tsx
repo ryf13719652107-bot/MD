@@ -427,7 +427,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
                     <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>
                   ))}
                 </select>
-                <span className="text-xs text-gray-600">之后每隔上方间隔重复开选</span>
+                <span className="text-xs text-gray-600">仅计划时刻更新选币池；交易照常只使用池内币种</span>
               </div>
             )}
             <div>

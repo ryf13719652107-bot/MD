@@ -22,6 +22,12 @@ async def refresh_coin_pool():
     """Manually refresh the coin pool. Returns success/failure status, never 500."""
     from ..services.binance_service import get_public_binance
 
+    if await coin_pool_service.has_running_scheduled_strategies():
+        return {
+            "status": "error",
+            "message": "存在「指定时间开选」的运行中策略，请等待计划时刻自动选币",
+        }
+
     try:
         binance = await get_public_binance()
         await coin_pool_service.refresh_pool_sources(binance)
