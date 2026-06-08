@@ -63,7 +63,7 @@ export default function StrategyDetailPage() {
           ]);
           setPool(effective);
           try {
-            setRawPool(await api.getCoinPool(source));
+            setRawPool(await api.getCoinPool(source, Number(id)));
           } catch {
             setRawPool([]);
           }

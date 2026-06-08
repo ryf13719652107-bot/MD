@@ -8,11 +8,22 @@ router = APIRouter(prefix="/api/coin-pool", tags=["coin_pool"])
 
 
 @router.get("", response_model=list[CoinPoolResponse])
-async def get_coin_pool(source: str | None = None):
+async def get_coin_pool(
+    source: str | None = None,
+    strategy_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+):
     from ..services.binance_service import get_public_binance
     from ..services.coin_pool_presenter import coin_pool_responses_with_funding
+    from ..models.strategy import Strategy
 
-    coins = await coin_pool_service.get_pool(source)
+    if strategy_id is not None:
+        strategy = await db.get(Strategy, strategy_id)
+        if not strategy:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        coins = await coin_pool_service.get_pool_for_strategy(source=source, strategy=strategy)
+    else:
+        coins = await coin_pool_service.get_pool(source)
     public = await get_public_binance()
     return await coin_pool_responses_with_funding(public, coins)
 

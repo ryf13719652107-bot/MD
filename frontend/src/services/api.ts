@@ -144,8 +144,13 @@ export const api = {
     request(`/ticker?symbol=${symbol}`),
 
   // Coin pool
-  getCoinPool: (source?: string): Promise<CoinPoolEntry[]> =>
-    request<CoinPoolEntry[]>(`/coin-pool${source ? `?source=${source}` : ''}`),
+  getCoinPool: (source?: string, strategyId?: number): Promise<CoinPoolEntry[]> => {
+    const params = new URLSearchParams();
+    if (source) params.set('source', source);
+    if (strategyId != null) params.set('strategy_id', String(strategyId));
+    const query = params.toString();
+    return request<CoinPoolEntry[]>(`/coin-pool${query ? `?${query}` : ''}`);
+  },
   /** 与调度器一致：按该策略成交量 / top_n / TradFi 过滤后的可开仓列表 */
   getStrategyEffectiveCoinPool: (strategyId: number): Promise<CoinPoolEntry[]> =>
     request<CoinPoolEntry[]>(`/strategies/${strategyId}/effective-coin-pool`),

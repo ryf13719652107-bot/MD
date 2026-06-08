@@ -237,6 +237,18 @@ class CoinPoolService:
             coins = list(result.scalars().all())
             return sort_coin_pool_by_price_change(coins, source)
 
+    async def get_pool_for_strategy(
+        self,
+        *,
+        source: str | None = None,
+        strategy: Strategy,
+    ) -> list[CoinPool]:
+        """Raw pool for a strategy page, without filters, but respecting scheduled validity."""
+        coins = await self.get_pool(source)
+        if not self._coin_pool_valid_for_strategy(strategy, coins):
+            return []
+        return coins
+
     def _is_scheduled_refresh_time(
         self,
         dt: datetime,
