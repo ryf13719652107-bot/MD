@@ -25,6 +25,20 @@ def _panic_symbol_key(sym: str) -> str:
     return (sym or "").replace("/", "").replace(":USDT", "").upper()
 
 
+async def _panic_exchange_leg_contracts(binance, symbol: str, side: str) -> float:
+    """Best-effort exchange check for one leg after emergency close."""
+    side_low = (side or "").lower()
+    target = _panic_symbol_key(symbol)
+    positions = await binance.fetch_positions([symbol])
+    total = 0.0
+    for pos in positions:
+        pos_symbol = _panic_symbol_key(pos.get("symbol") or "")
+        pos_side = (pos.get("side") or "").lower()
+        if pos_symbol == target and pos_side == side_low:
+            total += float(pos.get("contracts", 0) or 0)
+    return total
+
+
 @router.post("", response_model=StrategyResponse)
 async def create_strategy(data: StrategyCreate, db: AsyncSession = Depends(get_db)):
     from ..models.account import Account
@@ -243,14 +257,57 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         try:
             order = await binance.close_position(sym_key, side)
         except Exception as e1:
-            results.append({"symbol": sym_key, "side": side, "status": "failed", "error": str(e1)})
-            logging.error("Panic close: failed %s %s: %s", sym_key, side, e1)
-            continue
+            try:
+                remaining = await _panic_exchange_leg_contracts(binance, sym_key, side)
+            except Exception as verify_error:
+                results.append({"symbol": sym_key, "side": side, "status": "failed", "error": str(e1)})
+                logging.error(
+                    "Panic close: failed %s %s: %s; verify failed: %s",
+                    sym_key,
+                    side,
+                    e1,
+                    verify_error,
+                )
+                continue
+            if remaining > 0:
+                results.append({"symbol": sym_key, "side": side, "status": "failed", "error": str(e1)})
+                logging.error(
+                    "Panic close: failed %s %s: %s; exchange still has %.8f contracts",
+                    sym_key,
+                    side,
+                    e1,
+                    remaining,
+                )
+                continue
+            order = None
+            logging.warning(
+                "Panic close: close order errored but exchange leg is flat %s %s: %s",
+                sym_key,
+                side,
+                e1,
+            )
         if not order:
-            results.append({"symbol": sym_key, "side": side, "status": "failed", "error": "empty_order_response"})
-            logging.error("Panic close: empty response %s %s", sym_key, side)
-            continue
-        exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
+            try:
+                remaining = await _panic_exchange_leg_contracts(binance, sym_key, side)
+            except Exception as verify_error:
+                results.append({"symbol": sym_key, "side": side, "status": "failed", "error": "empty_order_response"})
+                logging.error(
+                    "Panic close: empty response %s %s; verify failed: %s",
+                    sym_key,
+                    side,
+                    verify_error,
+                )
+                continue
+            if remaining > 0:
+                results.append({"symbol": sym_key, "side": side, "status": "failed", "error": "empty_order_response"})
+                logging.error(
+                    "Panic close: empty response %s %s; exchange still has %.8f contracts",
+                    sym_key,
+                    side,
+                    remaining,
+                )
+                continue
+        exit_price = float((order or {}).get("average", 0) or (order or {}).get("price", 0) or 0)
         results.append({"symbol": sym_key, "side": side, "status": "ok", "exit_price": exit_price, "order": order})
         logging.info("Panic close: closed %s %s", sym_key, side)
 
