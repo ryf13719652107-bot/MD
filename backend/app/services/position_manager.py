@@ -50,13 +50,18 @@ def _position_opened_at_from_exchange(ep: dict) -> Optional[datetime]:
     return None
 
 
-def _single_symbol_stop_loss_trigger(wallet_balance: float, symbol_floating_loss: float) -> bool:
-    """Trigger when single-symbol floating loss reaches 10% of wallet balance."""
+def _single_symbol_stop_loss_trigger(
+    wallet_balance: float,
+    symbol_floating_loss: float,
+    threshold_pct: float,
+) -> bool:
+    """Trigger when single-symbol floating loss reaches threshold % of wallet balance."""
     if symbol_floating_loss <= 0:
         return False
     if wallet_balance <= 0:
         return True
-    return symbol_floating_loss >= wallet_balance * 0.10
+    pct = max(0.0, float(threshold_pct or 0))
+    return symbol_floating_loss >= wallet_balance * (pct / 100.0)
 
 
 # _reconcile_orphan_from_exchange return values
@@ -934,7 +939,11 @@ class PositionManager:
         symbol_floating_loss = max(0.0, -symbol_unrealized_pnl)
         # 用户口径：钱包余额 = 当前余额 + 浮亏(负数)
         wallet_balance = float(total_margin) + min(0.0, symbol_unrealized_pnl)
-        if _single_symbol_stop_loss_trigger(wallet_balance, symbol_floating_loss):
+        if getattr(strategy, "single_symbol_stop_loss_enabled", True) and _single_symbol_stop_loss_trigger(
+            wallet_balance,
+            symbol_floating_loss,
+            float(getattr(strategy, "single_symbol_stop_loss_pct", 10) or 10),
+        ):
             close_reason = "single_symbol_stop_loss"
         elif strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
             close_reason = "stop_loss"

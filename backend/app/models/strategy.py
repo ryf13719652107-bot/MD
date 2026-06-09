@@ -51,6 +51,8 @@ class Strategy(Base):
     # Stop loss
     stop_loss_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     stop_loss_pct: Mapped[float] = mapped_column(Float, default=5.0)
+    single_symbol_stop_loss_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    single_symbol_stop_loss_pct: Mapped[float] = mapped_column(Float, default=10.0, server_default="10")
 
     # Slippage protection
     slippage_pct: Mapped[float] = mapped_column(Float, default=0.5)  # Max slippage %, 0 = disabled

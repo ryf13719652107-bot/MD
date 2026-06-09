@@ -32,6 +32,8 @@ class StrategyCreate(BaseModel):
     # Stop loss
     stop_loss_enabled: bool = False
     stop_loss_pct: float = Field(default=5.0, gt=0, le=100)
+    single_symbol_stop_loss_enabled: bool = True
+    single_symbol_stop_loss_pct: float = Field(default=10.0, gt=0, le=100)
     # Slippage protection
     slippage_pct: float = Field(default=0.5, ge=0, le=10)
     # Leverage
@@ -94,6 +96,8 @@ class StrategyUpdate(BaseModel):
     take_profit_limit_order: Optional[bool] = None
     stop_loss_enabled: Optional[bool] = None
     stop_loss_pct: Optional[float] = Field(default=None, gt=0, le=100)
+    single_symbol_stop_loss_enabled: Optional[bool] = None
+    single_symbol_stop_loss_pct: Optional[float] = Field(default=None, gt=0, le=100)
     slippage_pct: Optional[float] = Field(default=None, ge=0, le=10)
     leverage: Optional[int] = Field(default=None, ge=1, le=125)
     use_coin_pool: Optional[bool] = None
@@ -137,6 +141,8 @@ class StrategyResponse(BaseModel):
     take_profit_limit_order: bool
     stop_loss_enabled: bool
     stop_loss_pct: float
+    single_symbol_stop_loss_enabled: bool
+    single_symbol_stop_loss_pct: float
     slippage_pct: float
     leverage: int
     use_coin_pool: bool

@@ -8,6 +8,7 @@ import {
   formatCoinPoolRefreshHours,
   formatLastSignalText,
   formatSignalSourceLabel,
+  formatSingleSymbolStopLoss,
 } from '../../types/strategy';
 import type { Account } from '../../types';
 import StrategyForm from './StrategyForm';
@@ -169,7 +170,8 @@ export default function StrategyPage() {
               <div>最大层数: <span className="text-gray-200">{s.max_layers}</span></div>
               <div>跌幅触发: <span className="text-gray-200">{s.price_drop_pct}%{s.price_drop_multiplier != null && s.price_drop_multiplier !== 1 ? ` (x${s.price_drop_multiplier} 递增)` : ''}</span></div>
               <div>止盈: <span className="text-gray-200">{s.take_profit_pct}% {s.take_profit_limit_order ? '(限价单)' : '(市价单)'}</span></div>
-              <div>止损: <span className="text-gray-200">{s.stop_loss_enabled ? `${s.stop_loss_pct}%` : '已禁用'}</span></div>
+              <div>均价止损: <span className="text-gray-200">{s.stop_loss_enabled ? `${s.stop_loss_pct}%` : '已禁用'}</span></div>
+              <div>单币止损: <span className="text-gray-200">{formatSingleSymbolStopLoss(s.single_symbol_stop_loss_enabled, s.single_symbol_stop_loss_pct)}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>
               <div>选币间隔: <span className="text-gray-200">{formatCoinPoolRefreshHours(s.coin_pool_refresh_seconds)} / {formatCoinPoolFetchMode(s.coin_pool_fetch_mode, s.coin_pool_anchor_hour, s.coin_pool_anchor_minute)}</span></div>
               <div>成交量过滤: <span className="text-gray-200">

@@ -24,6 +24,8 @@ export interface Strategy {
   take_profit_limit_order: boolean;
   stop_loss_enabled: boolean;
   stop_loss_pct: number;
+  single_symbol_stop_loss_enabled: boolean;
+  single_symbol_stop_loss_pct: number;
   slippage_pct: number;
   leverage: number;
   use_coin_pool: boolean;
@@ -75,6 +77,8 @@ export interface StrategyFormData {
   take_profit_limit_order: boolean;
   stop_loss_enabled: boolean;
   stop_loss_pct: number;
+  single_symbol_stop_loss_enabled: boolean;
+  single_symbol_stop_loss_pct: number;
   slippage_pct: number;
   leverage: number;
   use_coin_pool: boolean;
@@ -118,6 +122,14 @@ export function formatSignalSourceLabel(
   if (source === 'wavetrend') return 'WaveTrend';
   if (source === 'martingale_base') return '基础马丁';
   return `RSI ${direction === 'long' ? '<' : '>'} ${rsiEntryThreshold ?? ''}`;
+}
+
+export function formatSingleSymbolStopLoss(
+  enabled?: boolean,
+  pct?: number,
+): string {
+  if (enabled === false) return '已禁用';
+  return `钱包余额 ${pct ?? 10}%（触发后拉黑）`;
 }
 
 export function formatCoinPoolRefreshHours(seconds: number): string {

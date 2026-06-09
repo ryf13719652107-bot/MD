@@ -67,6 +67,8 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN coin_pool_anchor_hour INTEGER DEFAULT 8",
             "ALTER TABLE strategies ADD COLUMN coin_pool_anchor_minute INTEGER DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN coin_pool_schedule_started_at TIMESTAMP",
+            "ALTER TABLE strategies ADD COLUMN single_symbol_stop_loss_enabled BOOLEAN DEFAULT 1",
+            "ALTER TABLE strategies ADD COLUMN single_symbol_stop_loss_pct FLOAT DEFAULT 10",
         ]
         for sql in migrations:
             try:
@@ -128,6 +130,26 @@ async def init_db():
                 lambda c: c.exec_driver_sql(
                     "UPDATE strategies SET price_drop_multiplier=1.0 "
                     "WHERE price_drop_multiplier IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET single_symbol_stop_loss_enabled=1 "
+                    "WHERE single_symbol_stop_loss_enabled IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET single_symbol_stop_loss_pct=10 "
+                    "WHERE single_symbol_stop_loss_pct IS NULL"
                 )
             )
         except Exception:

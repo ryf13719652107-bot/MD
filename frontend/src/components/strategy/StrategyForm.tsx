@@ -40,6 +40,8 @@ const schema = z.object({
   take_profit_limit_order: z.coerce.boolean(),
   stop_loss_enabled: z.coerce.boolean(),
   stop_loss_pct: z.number().min(0.1).max(100),
+  single_symbol_stop_loss_enabled: z.coerce.boolean(),
+  single_symbol_stop_loss_pct: z.number().min(0.1).max(100),
   leverage: z.number().min(1).max(125),
   use_coin_pool: z.coerce.boolean(),
   coin_pool_source: z.enum(['gainers', 'losers', 'both']),
@@ -92,6 +94,8 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       take_profit_limit_order: initialData.take_profit_limit_order,
       stop_loss_enabled: initialData.stop_loss_enabled ?? true,
       stop_loss_pct: initialData.stop_loss_pct,
+      single_symbol_stop_loss_enabled: initialData.single_symbol_stop_loss_enabled ?? true,
+      single_symbol_stop_loss_pct: initialData.single_symbol_stop_loss_pct ?? 10,
       slippage_pct: initialData.slippage_pct ?? 0.5,
       leverage: initialData.leverage ?? 10,
       use_coin_pool: initialData.use_coin_pool,
@@ -139,6 +143,8 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     take_profit_limit_order: true,
     stop_loss_enabled: false,
     stop_loss_pct: 5,
+    single_symbol_stop_loss_enabled: true,
+    single_symbol_stop_loss_pct: 10,
     slippage_pct: 0.5,
     leverage: 10,
     use_coin_pool: true,
@@ -181,6 +187,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
   const useCoinPool = watch('use_coin_pool', true);
   const fetchMode = watch('coin_pool_fetch_mode', 'interval');
   const stopLossEnabled = watch('stop_loss_enabled', true);
+  const singleSymbolStopLossEnabled = watch('single_symbol_stop_loss_enabled', true);
   const excludeFunding = watch('exclude_funding', false);
 
   // Auto-adjust RSI threshold on mount and when direction changes
@@ -527,7 +534,31 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           <div>
             <label className={labelClass}>止损 (%)</label>
             <input type="number" step="0.1" {...register('stop_loss_pct', { valueAsNumber: true })} className={inputClass} disabled={!stopLossEnabled} />
-            <span className="text-xs text-gray-600">{stopLossEnabled ? '止损已启用' : '止损已禁用'}</span>
+            <span className="text-xs text-gray-600">{stopLossEnabled ? '按均价跌幅止损' : '止损已禁用'}</span>
+          </div>
+          <div>
+            <label className={`${labelClass} flex items-center gap-2`}>
+              <span>单币止损</span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" {...register('single_symbol_stop_loss_enabled')} className="sr-only peer" />
+                <div className="w-9 h-5 bg-gray-600 peer-checked:bg-red-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+              </label>
+            </label>
+          </div>
+          <div>
+            <label className={labelClass}>单币止损 (%)</label>
+            <input
+              type="number"
+              step="0.1"
+              {...register('single_symbol_stop_loss_pct', { valueAsNumber: true })}
+              className={inputClass}
+              disabled={!singleSymbolStopLossEnabled}
+            />
+            <span className="text-xs text-gray-600">
+              {singleSymbolStopLossEnabled
+                ? '单币浮亏达钱包余额该比例时平仓并拉黑（钱包余额=当前余额+浮亏）'
+                : '单币止损已禁用'}
+            </span>
           </div>
           <div>
             <label className={`${labelClass} flex items-center gap-2`}>

@@ -8,6 +8,7 @@ import {
   formatCoinPoolFetchMode,
   formatCoinPoolRefreshHours,
   formatLastSignalText,
+  formatSingleSymbolStopLoss,
 } from '../../types/strategy';
 import type { CoinPoolEntry, Trade } from '../../types';
 import { ArrowLeft, Terminal } from 'lucide-react';
@@ -207,8 +208,17 @@ export default function StrategyDetailPage() {
             <div className={valClass}>{strategy.price_drop_pct}% {strategy.price_drop_multiplier != null && strategy.price_drop_multiplier !== 1 ? `(x${strategy.price_drop_multiplier} 递增)` : ''}</div>
           </div>
           <div>
-            <span className={labelClass}>止盈 / 止损</span>
+            <span className={labelClass}>止盈 / 均价止损</span>
             <div className={valClass}>{strategy.take_profit_pct}% ({strategy.take_profit_limit_order ? '限价单' : '市价单'}) / {strategy.stop_loss_enabled ? `${strategy.stop_loss_pct}%` : '禁用'}</div>
+          </div>
+          <div>
+            <span className={labelClass}>单币止损</span>
+            <div className={valClass}>
+              {formatSingleSymbolStopLoss(
+                strategy.single_symbol_stop_loss_enabled,
+                strategy.single_symbol_stop_loss_pct,
+              )}
+            </div>
           </div>
           <div>
             <span className={labelClass}>杠杆 / 滑点</span>
