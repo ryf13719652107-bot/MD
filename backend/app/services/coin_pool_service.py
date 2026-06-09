@@ -49,6 +49,7 @@ class CoinPoolService:
         self._last_refresh_ok: bool = False
         self._last_refresh_time: float = 0.0
         self._last_error: str = ""
+        self._schedule_tolerance_seconds: float = 300.0
 
     @property
     def config(self) -> dict:
@@ -306,10 +307,15 @@ class CoinPoolService:
         return coins
 
     @staticmethod
-    def _first_anchor_at_or_after(started: datetime, anchor_hour: int, anchor_minute: int) -> datetime:
+    def _first_anchor_at_or_after(
+        started: datetime,
+        anchor_hour: int,
+        anchor_minute: int,
+        tolerance_seconds: float = 0.0,
+    ) -> datetime:
         """璁″垝鐢熸晥鍚庣涓€涓敋鐐规暣鐐癸紙濡傞厤缃簬 02:30銆侀敋鐐?08:00 鈫?褰撴棩 08:00锛夈€?"""
         anchor_day = started.replace(hour=anchor_hour, minute=anchor_minute, second=0, microsecond=0)
-        if anchor_day >= started:
+        if started <= anchor_day + timedelta(seconds=tolerance_seconds):
             return anchor_day
         return anchor_day + timedelta(days=1)
 
@@ -363,8 +369,10 @@ class CoinPoolService:
         if started is None:
             # 鏃犺鍒掔敓鏁堝弬鐓?鍘嗗彶鏁版嵁)锛氶€€鍥為敋鐐圭綉鏍煎垽瀹氾紝閬垮厤璇激杩愯涓瓥鐣?
             return self._is_scheduled_refresh_time(last_dt, anchor, anchor_minute, interval)
-        tolerance = 300.0
-        first_slot = self._first_anchor_at_or_after(started, anchor, anchor_minute)
+        tolerance = self._schedule_tolerance_seconds
+        first_slot = self._first_anchor_at_or_after(
+            started, anchor, anchor_minute, tolerance_seconds=tolerance
+        )
         if last_dt < first_slot - timedelta(seconds=tolerance):
             return False
         remainder = (last_dt - first_slot).total_seconds() % interval
@@ -468,7 +476,12 @@ class CoinPoolService:
                 started = self._config.get("schedule_started_at")
                 if started is not None:
                     # 鎸囧畾鏃堕棿寮€閫変笖灏氭棤鍘嗗彶姹狅細绛夊埌璁″垝鐢熸晥鍚庣殑棣栦釜閿氱偣鍐嶉娆￠€夊竵
-                    first_slot = self._first_anchor_at_or_after(started, anchor, anchor_minute)
+                    first_slot = self._first_anchor_at_or_after(
+                        started,
+                        anchor,
+                        anchor_minute,
+                        tolerance_seconds=self._schedule_tolerance_seconds,
+                    )
                     if now < first_slot:
                         return max(0.0, (first_slot - now).total_seconds())
                     return 0.0
@@ -487,7 +500,12 @@ class CoinPoolService:
         started = self._config.get("schedule_started_at")
         if started is not None:
             # 鎸囧畾鏃堕棿寮€閫夛細棣栦釜閫夊竵鏃跺埢涓鸿鍒掔敓鏁堝悗鐨勭涓€涓敋鐐癸紝涔嬪墠涓嶅埛鏂?
-            first_slot = self._first_anchor_at_or_after(started, anchor, anchor_minute)
+            first_slot = self._first_anchor_at_or_after(
+                started,
+                anchor,
+                anchor_minute,
+                tolerance_seconds=self._schedule_tolerance_seconds,
+            )
             if now < first_slot:
                 return max(0.0, (first_slot - now).total_seconds())
             min_wait = max(0.0, interval - (now - last_dt).total_seconds())

@@ -184,3 +184,33 @@ def test_scheduled_pool_accepts_custom_minute_grid():
         CoinPool(symbol="M15USDT", rank=1, price_change_pct=1, source="gainers", last_updated=_dt(2026, 6, 9, 9, 15))
     ]
     assert svc._coin_pool_valid_for_strategy(strategy, pool)
+
+
+def test_scheduled_start_just_after_anchor_keeps_same_day_first_slot(monkeypatch):
+    """策略在锚点后几秒启动，首个开选仍应命中当日锚点而非推迟到次日。"""
+    svc = CoinPoolService()
+    svc.update_config(
+        refresh_interval_seconds=24 * 3600,
+        fetch_mode="scheduled",
+        anchor_hour=2,
+        anchor_minute=30,
+        schedule_started_at=datetime(2026, 6, 10, 2, 30, 1),
+    )
+    monkeypatch.setattr("app.services.coin_pool_service.now_beijing", lambda: datetime(2026, 6, 10, 2, 31, 0))
+    delay = svc._seconds_until_next_refresh(None)
+    assert delay == 0.0
+
+
+def test_scheduled_start_far_after_anchor_waits_next_day(monkeypatch):
+    """超过容差后再启动，应等待到次日同一锚点。"""
+    svc = CoinPoolService()
+    svc.update_config(
+        refresh_interval_seconds=24 * 3600,
+        fetch_mode="scheduled",
+        anchor_hour=2,
+        anchor_minute=30,
+        schedule_started_at=datetime(2026, 6, 10, 2, 36, 0),
+    )
+    monkeypatch.setattr("app.services.coin_pool_service.now_beijing", lambda: datetime(2026, 6, 10, 2, 36, 0))
+    delay = svc._seconds_until_next_refresh(None)
+    assert delay == pytest.approx(23 * 3600 + 54 * 60, rel=0.01)
