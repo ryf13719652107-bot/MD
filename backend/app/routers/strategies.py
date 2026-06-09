@@ -261,8 +261,18 @@ async def update_strategy(
         from ..services.coin_pool_service import coin_pool_service
 
         await coin_pool_service.sync_config_from_running_strategies()
+        coin_pool_service.wake_refresh_loop()
         strategy_scheduler.start()
         await strategy_scheduler.add_strategy(strategy_id, session=db)
+    elif (
+        strategy.use_coin_pool
+        and strategy.coin_pool_fetch_mode == "scheduled"
+        and schedule_keys.intersection(patch.keys())
+    ):
+        from ..services.coin_pool_service import coin_pool_service
+
+        await coin_pool_service.sync_config_from_running_strategies()
+        coin_pool_service.wake_refresh_loop()
 
     return await _to_strategy_response(db, strategy)
 
@@ -287,7 +297,13 @@ async def start_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
     from ..services.coin_pool_service import coin_pool_service
     from ..services.binance_service import get_public_binance
 
+    if strategy.use_coin_pool and strategy.coin_pool_fetch_mode == "scheduled":
+        strategy.coin_pool_schedule_started_at = now_beijing()
+        await db.commit()
+        await db.refresh(strategy)
+
     await coin_pool_service.sync_config_from_running_strategies()
+    coin_pool_service.wake_refresh_loop()
 
     if strategy.use_coin_pool and strategy.coin_pool_fetch_mode == "immediate":
         try:

@@ -11,6 +11,19 @@ export function poolSourceLabel(source: string): string {
   }
 }
 
+export function poolSourceRankLabel(source: string): string {
+  switch (source) {
+    case 'gainers':
+      return '涨幅榜前';
+    case 'losers':
+      return '跌幅榜前';
+    case 'both':
+      return '涨跌幅榜前';
+    default:
+      return '榜单前';
+  }
+}
+
 export function poolSourceBadgeClass(source: string): string {
   if (source === 'gainers') return 'bg-green-600/20 text-green-400';
   if (source === 'losers') return 'bg-red-600/20 text-red-400';

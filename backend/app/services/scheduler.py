@@ -421,6 +421,9 @@ class StrategyScheduler:
             else:
                 if strategy.use_coin_pool:
                     try:
+                        await coin_pool_service.ensure_scheduled_pool_if_due(
+                            public_binance, strategy
+                        )
                         min_vol = float(getattr(strategy, "coin_pool_min_volume_24h", 0) or 0)
                         excluded = await get_strategy_pool_exclude_symbols(
                             public_binance,

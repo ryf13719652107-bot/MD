@@ -35,6 +35,8 @@ class CoinPoolService:
     def __init__(self):
         self._refresh_task: asyncio.Task | None = None
         self._bg_tasks: set[asyncio.Task] = set()
+        self._wake_event = asyncio.Event()
+        self._refresh_lock = asyncio.Lock()
         self._config = {
             "refresh_interval_seconds": 3600,
             "pool_source": "both",
@@ -67,6 +69,43 @@ class CoinPoolService:
         task = asyncio.create_task(coro)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    def wake_refresh_loop(self) -> None:
+        """Interrupt idle/sleep waits so a newly started strategy re-evaluates refresh timing."""
+        self._wake_event.set()
+
+    async def _interruptible_sleep(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        self._wake_event.clear()
+        try:
+            await asyncio.wait_for(self._wake_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    async def ensure_scheduled_pool_if_due(
+        self, binance_service: BinanceService, strategy: Strategy
+    ) -> None:
+        """Refresh at anchor time when the background loop has not run yet (e.g. tick vs loop race)."""
+        if not strategy.use_coin_pool:
+            return
+        if getattr(strategy, "coin_pool_fetch_mode", "interval") != "scheduled":
+            return
+        from .strategy_flags import normalize_coin_pool_source
+
+        source = normalize_coin_pool_source(strategy.coin_pool_source)
+        coins = await self.get_pool(source)
+        if self._coin_pool_valid_for_strategy(strategy, coins):
+            return
+        last_dt = await self._last_refresh_datetime_from_db()
+        delay = self._seconds_until_next_refresh(last_dt)
+        if delay > 30:
+            return
+        async with self._refresh_lock:
+            coins = await self.get_pool(source)
+            if self._coin_pool_valid_for_strategy(strategy, coins):
+                return
+            await self.refresh_pool_sources(binance_service)
 
     async def sync_config_from_running_strategies(self) -> None:
         """鎸夎繍琛屼腑绛栫暐姹囨€诲埛鏂板懆鏈熶笌鍏ュ簱鏉℃暟锛涗粎涓€鏉＄瓥鐣ユ椂鍚屾娴嬭瘯鐢?pool_source銆?"""
@@ -473,7 +512,7 @@ class CoinPoolService:
             while True:
                 await self.sync_config_from_running_strategies()
                 if not await self._has_running_pool_strategies():
-                    await asyncio.sleep(60)
+                    await self._interruptible_sleep(60)
                     continue
                 last_dt = await self._last_refresh_datetime_from_db()
                 delay = self._seconds_until_next_refresh(last_dt)
@@ -495,9 +534,10 @@ class CoinPoolService:
                             delay,
                             int(self._config["refresh_interval_seconds"]),
                         )
-                    await asyncio.sleep(delay)
+                    await self._interruptible_sleep(delay)
                 try:
-                    await self.refresh_pool_sources(binance_service)
+                    async with self._refresh_lock:
+                        await self.refresh_pool_sources(binance_service)
                 except Exception as e:
                     self._last_refresh_ok = False
                     self._last_error = str(e)[:200]

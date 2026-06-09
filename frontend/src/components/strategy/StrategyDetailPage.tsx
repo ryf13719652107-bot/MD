@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { formatUsdtVolume, formatFundingRatePct, fundingRateColorClass } from '../../utils/format';
-import { poolSourceBadgeClass, poolSourceLabel } from '../../utils/poolSource';
+import { poolSourceBadgeClass, poolSourceLabel, poolSourceRankLabel } from '../../utils/poolSource';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import type { Strategy } from '../../types/strategy';
@@ -357,7 +357,7 @@ export default function StrategyDetailPage() {
             </div>
             {poolView === 'effective' && (
               <p className="text-xs text-gray-500 mb-2">
-                与实盘一致：榜单前 {strategy.coin_pool_top_n} 名内 + 成交量
+                与实盘一致：{poolSourceRankLabel(strategy.coin_pool_source)} {strategy.coin_pool_top_n} 名内 + 成交量
                 {(strategy.coin_pool_min_volume_24h ?? 0) > 0
                   ? ` ≥ ${(strategy.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`
                   : ' 不限制'}
