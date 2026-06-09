@@ -45,6 +45,7 @@ async def get_db() -> AsyncSession:
 
 async def init_db():
     from .models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline  # noqa: F401
+    from .models.strategy_blacklist import StrategySymbolBlacklist  # noqa: F401
 
     # Create tables from current model (no-op if already exist)
     async with engine.begin() as conn:
@@ -64,6 +65,7 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN coin_pool_min_volume_24h FLOAT DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN price_drop_multiplier FLOAT DEFAULT 1.0",
             "ALTER TABLE strategies ADD COLUMN coin_pool_anchor_hour INTEGER DEFAULT 8",
+            "ALTER TABLE strategies ADD COLUMN coin_pool_anchor_minute INTEGER DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN coin_pool_schedule_started_at TIMESTAMP",
         ]
         for sql in migrations:
@@ -109,6 +111,17 @@ async def init_db():
         except Exception:
             pass
 
+        # Backfill NULL coin_pool_anchor_minute for existing strategies
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET coin_pool_anchor_minute=0 "
+                    "WHERE coin_pool_anchor_minute IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
         # Backfill NULL price_drop_multiplier for existing strategies
         try:
             await conn.run_sync(
@@ -119,3 +132,6 @@ async def init_db():
             )
         except Exception:
             pass
+
+
+

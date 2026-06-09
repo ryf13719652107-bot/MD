@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def sort_coin_pool_by_price_change(coins: list[CoinPool], source: str | None = None) -> list[CoinPool]:
-    """按涨跌幅排序：涨幅榜降序，跌幅榜升序；both 时涨幅段在前。"""
+    """鎸夋定璺屽箙鎺掑簭锛氭定骞呮闄嶅簭锛岃穼骞呮鍗囧簭锛沚oth 鏃舵定骞呮鍦ㄥ墠銆?"""
     if not coins:
         return coins
     src = (source or "").lower()
@@ -41,6 +41,7 @@ class CoinPoolService:
             "max_symbols": 30,
             "fetch_mode": "interval",
             "anchor_hour": 8,
+            "anchor_minute": 0,
             "schedule_started_at": None,
         }
         self._last_refresh_ok: bool = False
@@ -68,7 +69,7 @@ class CoinPoolService:
         task.add_done_callback(self._bg_tasks.discard)
 
     async def sync_config_from_running_strategies(self) -> None:
-        """按运行中策略汇总刷新周期与入库条数；仅一条策略时同步测试用 pool_source。"""
+        """鎸夎繍琛屼腑绛栫暐姹囨€诲埛鏂板懆鏈熶笌鍏ュ簱鏉℃暟锛涗粎涓€鏉＄瓥鐣ユ椂鍚屾娴嬭瘯鐢?pool_source銆?"""
         async with async_session() as session:
             r = await session.execute(
                 select(Strategy).where(
@@ -93,6 +94,7 @@ class CoinPoolService:
             anchor_src = min(scheduled, key=lambda s: s.coin_pool_refresh_seconds)
             patch["fetch_mode"] = "scheduled"
             patch["anchor_hour"] = int(getattr(anchor_src, "coin_pool_anchor_hour", 8) or 8)
+            patch["anchor_minute"] = int(getattr(anchor_src, "coin_pool_anchor_minute", 0) or 0)
             starts = [
                 s.coin_pool_schedule_started_at
                 for s in scheduled
@@ -111,7 +113,7 @@ class CoinPoolService:
         self.update_config(**patch)
 
     async def _limit_for_source(self, source: str) -> int:
-        """该来源下运行策略所需的最大 top_n；无运行策略时用 max_symbols。"""
+        """璇ユ潵婧愪笅杩愯绛栫暐鎵€闇€鐨勬渶澶?top_n锛涙棤杩愯绛栫暐鏃剁敤 max_symbols銆?"""
         async with async_session() as session:
             stmt = select(Strategy.coin_pool_top_n).where(
                 Strategy.use_coin_pool.is_(True),
@@ -129,7 +131,7 @@ class CoinPoolService:
         return int(self._config.get("max_symbols", 30))
 
     async def _running_pool_sources(self) -> list[str]:
-        """运行中策略需要的选币池来源（去重）；无运行策略时用全局配置。"""
+        """杩愯涓瓥鐣ラ渶瑕佺殑閫夊竵姹犳潵婧愶紙鍘婚噸锛夛紱鏃犺繍琛岀瓥鐣ユ椂鐢ㄥ叏灞€閰嶇疆銆?"""
         async with async_session() as session:
             r = await session.execute(
                 select(Strategy.coin_pool_source).where(
@@ -158,7 +160,7 @@ class CoinPoolService:
         *,
         limit: int | None = None,
     ):
-        """拉取并写入指定来源的选币池；只替换该来源行，与其它来源互不影响。"""
+        """鎷夊彇骞跺啓鍏ユ寚瀹氭潵婧愮殑閫夊竵姹狅紱鍙浛鎹㈣鏉ユ簮琛岋紝涓庡叾瀹冩潵婧愪簰涓嶅奖鍝嶃€?"""
         source = source or self._config["pool_source"]
         from .strategy_flags import normalize_coin_pool_source
 
@@ -173,7 +175,7 @@ class CoinPoolService:
             self._last_refresh_ok = False
             self._last_error = f"选币池[{source}]返回空列表"
             logger.warning(
-                "选币池[%s]拉取结果为空，保留该来源旧数据与其它来源",
+                "閫夊竵姹燵%s]鎷夊彇缁撴灉涓虹┖锛屼繚鐣欒鏉ユ簮鏃ф暟鎹笌鍏跺畠鏉ユ簮",
                 source,
             )
             return
@@ -204,7 +206,7 @@ class CoinPoolService:
     async def refresh_pool_sources(
         self, binance_service: BinanceService, sources: list[str] | None = None
     ) -> None:
-        """只刷新当前运行策略用到的来源（gainers / losers / both）。"""
+        """鍙埛鏂板綋鍓嶈繍琛岀瓥鐣ョ敤鍒扮殑鏉ユ簮锛坓ainers / losers / both锛夈€?"""
         await self.sync_config_from_running_strategies()
         sources = sources or await self._running_pool_sources()
         for src in sources:
@@ -216,7 +218,7 @@ class CoinPoolService:
                 )
             except asyncio.TimeoutError:
                 self._last_refresh_ok = False
-                self._last_error = f"选币池[{src}]刷新超时({int(timeout)}s)"
+                self._last_error = f"閫夊竵姹燵{src}]鍒锋柊瓒呮椂({int(timeout)}s)"
                 logger.error("Coin pool refresh timed out for source=%s", src)
             except Exception as e:
                 self._last_refresh_ok = False
@@ -253,8 +255,8 @@ class CoinPoolService:
     ) -> list[CoinPool]:
         """Raw pool for a strategy page: respect scheduled validity + cap at the strategy's top_n.
 
-        "未过滤" 仅指未应用成交量/TradFi/下架/主流/费率等过滤，但仍限定在榜单前 top_n 内，
-        与策略「抓取榜单前 N」设置一致，避免出现多于 N 个的困惑。
+        "鏈繃婊? 浠呮寚鏈簲鐢ㄦ垚浜ら噺/TradFi/涓嬫灦/涓绘祦/璐圭巼绛夎繃婊わ紝浣嗕粛闄愬畾鍦ㄦ鍗曞墠 top_n 鍐咃紝
+        涓庣瓥鐣ャ€屾姄鍙栨鍗曞墠 N銆嶈缃竴鑷达紝閬垮厤鍑虹幇澶氫簬 N 涓殑鍥版儜銆?
         """
         coins = await self.get_pool(source)
         if not self._coin_pool_valid_for_strategy(strategy, coins):
@@ -265,16 +267,16 @@ class CoinPoolService:
         return coins
 
     @staticmethod
-    def _first_anchor_at_or_after(started: datetime, anchor_hour: int) -> datetime:
-        """计划生效后第一个锚点整点（如配置于 02:30、锚点 08:00 → 当日 08:00）。"""
-        anchor_day = started.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
+    def _first_anchor_at_or_after(started: datetime, anchor_hour: int, anchor_minute: int) -> datetime:
+        """璁″垝鐢熸晥鍚庣涓€涓敋鐐规暣鐐癸紙濡傞厤缃簬 02:30銆侀敋鐐?08:00 鈫?褰撴棩 08:00锛夈€?"""
+        anchor_day = started.replace(hour=anchor_hour, minute=anchor_minute, second=0, microsecond=0)
         if anchor_day >= started:
             return anchor_day
         return anchor_day + timedelta(days=1)
 
     @staticmethod
     def _next_slot_from_base(base: datetime, after: datetime, interval: float) -> datetime:
-        """以 base 为首个时刻、每 interval 秒一格，返回严格晚于 after 的下一格。"""
+        """浠?base 涓洪涓椂鍒汇€佹瘡 interval 绉掍竴鏍硷紝杩斿洖涓ユ牸鏅氫簬 after 鐨勪笅涓€鏍笺€?"""
         if after < base:
             return base
         elapsed = (after - base).total_seconds()
@@ -285,6 +287,7 @@ class CoinPoolService:
         self,
         dt: datetime,
         anchor_hour: int,
+        anchor_minute: int,
         interval: float,
         tolerance: float = 300.0,
     ) -> bool:
@@ -293,17 +296,17 @@ class CoinPoolService:
         Only accept refreshes after a scheduled slot. A pool written shortly before
         the slot (for example 02:56 for a 03:00 schedule) is still an old pool.
         """
-        anchor_today = dt.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
+        anchor_today = dt.replace(hour=anchor_hour, minute=anchor_minute, second=0, microsecond=0)
         base = anchor_today if anchor_today <= dt else anchor_today - timedelta(days=1)
         elapsed = (dt - base).total_seconds()
         remainder = elapsed % interval
         return remainder <= tolerance
 
     def _coin_pool_valid_for_strategy(self, strategy: Strategy, coins: list[CoinPool]) -> bool:
-        """Scheduled: 第一次必须等到计划生效后的首个锚点，之后按间隔连续。
+        """Scheduled: 绗竴娆″繀椤荤瓑鍒拌鍒掔敓鏁堝悗鐨勯涓敋鐐癸紝涔嬪悗鎸夐棿闅旇繛缁€?
 
-        即「指定时间开选」语义——首个选币时刻 = schedule_started_at 之后的第一个 anchor_hour 整点；
-        在该时刻之前写入的池(含凌晨)一律视为旧池/无效。该首点之后则按 interval 网格持续有效。
+        鍗炽€屾寚瀹氭椂闂村紑閫夈€嶈涔夆€斺€旈涓€夊竵鏃跺埢 = schedule_started_at 涔嬪悗鐨勭涓€涓?anchor_hour 鏁寸偣锛?
+        鍦ㄨ鏃跺埢涔嬪墠鍐欏叆鐨勬睜(鍚噷鏅?涓€寰嬭涓烘棫姹?鏃犳晥銆傝棣栫偣涔嬪悗鍒欐寜 interval 缃戞牸鎸佺画鏈夋晥銆?
         """
         if getattr(strategy, "coin_pool_fetch_mode", "interval") != "scheduled":
             return True
@@ -313,15 +316,16 @@ class CoinPoolService:
         if last_dt is None:
             return False
         anchor = int(getattr(strategy, "coin_pool_anchor_hour", 8) or 8)
+        anchor_minute = int(getattr(strategy, "coin_pool_anchor_minute", 0) or 0)
         interval = float(strategy.coin_pool_refresh_seconds or self._config["refresh_interval_seconds"])
         started = getattr(strategy, "coin_pool_schedule_started_at", None) or getattr(
             strategy, "started_at", None
         )
         if started is None:
-            # 无计划生效参照(历史数据)：退回锚点网格判定，避免误伤运行中策略
-            return self._is_scheduled_refresh_time(last_dt, anchor, interval)
+            # 鏃犺鍒掔敓鏁堝弬鐓?鍘嗗彶鏁版嵁)锛氶€€鍥為敋鐐圭綉鏍煎垽瀹氾紝閬垮厤璇激杩愯涓瓥鐣?
+            return self._is_scheduled_refresh_time(last_dt, anchor, anchor_minute, interval)
         tolerance = 300.0
-        first_slot = self._first_anchor_at_or_after(started, anchor)
+        first_slot = self._first_anchor_at_or_after(started, anchor, anchor_minute)
         if last_dt < first_slot - timedelta(seconds=tolerance):
             return False
         remainder = (last_dt - first_slot).total_seconds() % interval
@@ -336,7 +340,7 @@ class CoinPoolService:
         exclude_symbols_norm: set[str] | None = None,
         strategy: Strategy | None = None,
     ) -> list[CoinPool]:
-        """Strategy-facing pool: leaderboard top N → volume floor → optional symbol exclude."""
+        """Strategy-facing pool: leaderboard top N 鈫?volume floor 鈫?optional symbol exclude."""
         coins = await self.get_pool(source)
         if strategy is not None and not self._coin_pool_valid_for_strategy(strategy, coins):
             return []
@@ -356,7 +360,7 @@ class CoinPoolService:
         exclude_symbols_norm: set[str] | None = None,
         strategy: Strategy | None = None,
     ) -> list[str]:
-        """Symbol list for scheduler — same rules as get_effective_pool_entries."""
+        """Symbol list for scheduler 鈥?same rules as get_effective_pool_entries."""
         coins = await self.get_effective_pool_entries(
             source=source,
             limit=limit,
@@ -373,7 +377,7 @@ class CoinPoolService:
             return result.scalar() or 0
 
     async def _last_refresh_datetime_from_db(self) -> datetime | None:
-        """上一次整池写入时间（各行 last_updated 在 refresh 时一致，取 max 即可）。"""
+        """涓婁竴娆℃暣姹犲啓鍏ユ椂闂达紙鍚勮 last_updated 鍦?refresh 鏃朵竴鑷达紝鍙?max 鍗冲彲锛夈€?"""
         async with async_session() as session:
             r = await session.execute(select(func.max(CoinPool.last_updated)))
             return r.scalar()
@@ -400,20 +404,20 @@ class CoinPoolService:
             return r.scalar() is not None
 
     def _next_anchor_slot_after(
-        self, after: datetime, anchor_hour: int, interval: float,
+        self, after: datetime, anchor_hour: int, anchor_minute: int, interval: float,
     ) -> datetime:
-        """锚点时刻起每隔 interval 秒的下一次开选时刻（严格晚于 after）。
+        """閿氱偣鏃跺埢璧锋瘡闅?interval 绉掔殑涓嬩竴娆″紑閫夋椂鍒伙紙涓ユ牸鏅氫簬 after锛夈€?
 
-        网格跨日连续：凌晨未到当日锚点时，仍从昨日锚点推算（如 8:00/4h → …20:00/0:00/4:00/8:00）。
+        缃戞牸璺ㄦ棩杩炵画锛氬噷鏅ㄦ湭鍒板綋鏃ラ敋鐐规椂锛屼粛浠庢槰鏃ラ敋鐐规帹绠楋紙濡?8:00/4h 鈫?鈥?0:00/0:00/4:00/8:00锛夈€?
         """
-        anchor_today = after.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
+        anchor_today = after.replace(hour=anchor_hour, minute=anchor_minute, second=0, microsecond=0)
         base = anchor_today if anchor_today <= after else anchor_today - timedelta(days=1)
         elapsed = (after - base).total_seconds()
         n = int(elapsed // interval) + 1
         return base + timedelta(seconds=n * interval)
 
     def _seconds_until_next_refresh(self, last_dt: datetime | None) -> float:
-        """距下一次按计划刷新应等待的秒数；有历史记录时与上次选币时间对齐，重启不立即重选。"""
+        """璺濅笅涓€娆℃寜璁″垝鍒锋柊搴旂瓑寰呯殑绉掓暟锛涙湁鍘嗗彶璁板綍鏃朵笌涓婃閫夊竵鏃堕棿瀵归綈锛岄噸鍚笉绔嬪嵆閲嶉€夈€?"""
         interval = float(self._config["refresh_interval_seconds"])
         now = now_beijing()
         mode = self._config.get("fetch_mode", "interval")
@@ -421,15 +425,16 @@ class CoinPoolService:
         if last_dt is None:
             if mode == "scheduled":
                 anchor = int(self._config.get("anchor_hour", 8))
+                anchor_minute = int(self._config.get("anchor_minute", 0))
                 started = self._config.get("schedule_started_at")
                 if started is not None:
-                    # 指定时间开选且尚无历史池：等到计划生效后的首个锚点再首次选币
-                    first_slot = self._first_anchor_at_or_after(started, anchor)
+                    # 鎸囧畾鏃堕棿寮€閫変笖灏氭棤鍘嗗彶姹狅細绛夊埌璁″垝鐢熸晥鍚庣殑棣栦釜閿氱偣鍐嶉娆￠€夊竵
+                    first_slot = self._first_anchor_at_or_after(started, anchor, anchor_minute)
                     if now < first_slot:
                         return max(0.0, (first_slot - now).total_seconds())
                     return 0.0
                 next_slot = self._next_anchor_slot_after(
-                    now - timedelta(seconds=1), anchor, interval,
+                    now - timedelta(seconds=1), anchor, anchor_minute, interval,
                 )
                 return max(0.0, (next_slot - now).total_seconds())
             return 0.0
@@ -439,10 +444,11 @@ class CoinPoolService:
             return max(0.0, interval - elapsed)
 
         anchor = int(self._config.get("anchor_hour", 8))
+        anchor_minute = int(self._config.get("anchor_minute", 0))
         started = self._config.get("schedule_started_at")
         if started is not None:
-            # 指定时间开选：首个选币时刻为计划生效后的第一个锚点，之前不刷新
-            first_slot = self._first_anchor_at_or_after(started, anchor)
+            # 鎸囧畾鏃堕棿寮€閫夛細棣栦釜閫夊竵鏃跺埢涓鸿鍒掔敓鏁堝悗鐨勭涓€涓敋鐐癸紝涔嬪墠涓嶅埛鏂?
+            first_slot = self._first_anchor_at_or_after(started, anchor, anchor_minute)
             if now < first_slot:
                 return max(0.0, (first_slot - now).total_seconds())
             min_wait = max(0.0, interval - (now - last_dt).total_seconds())
@@ -456,12 +462,12 @@ class CoinPoolService:
         min_wait = max(0.0, interval - elapsed)
         earliest = now + timedelta(seconds=min_wait)
         next_slot = self._next_anchor_slot_after(
-            earliest - timedelta(seconds=1), anchor, interval,
+            earliest - timedelta(seconds=1), anchor, anchor_minute, interval,
         )
         return max(0.0, (next_slot - now).total_seconds())
 
     async def start_auto_refresh(self, binance_service: BinanceService):
-        """按计划间隔循环刷新；重启/改参后根据库内上次选币时间补齐等待，不立即重选。"""
+        """鎸夎鍒掗棿闅斿惊鐜埛鏂帮紱閲嶅惎/鏀瑰弬鍚庢牴鎹簱鍐呬笂娆￠€夊竵鏃堕棿琛ラ綈绛夊緟锛屼笉绔嬪嵆閲嶉€夈€?"""
 
         async def _loop():
             while True:
@@ -477,9 +483,10 @@ class CoinPoolService:
                     mode = self._config.get("fetch_mode", "interval")
                     if mode == "scheduled":
                         logger.info(
-                            "选币池将在 %.0f 秒后刷新（scheduled 锚点=%02d:00 周期=%ds）",
+                            "选币池将在 %.0f 秒后刷新（scheduled 锚点=%02d:%02d 周期=%ds）",
                             delay,
                             int(self._config.get("anchor_hour", 8)),
+                            int(self._config.get("anchor_minute", 0)),
                             int(self._config["refresh_interval_seconds"]),
                         )
                     else:
@@ -509,3 +516,9 @@ class CoinPoolService:
 
 
 coin_pool_service = CoinPoolService()
+
+
+
+
+
+

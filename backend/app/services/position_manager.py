@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.strategy import Strategy
 from ..models.position import Position
 from ..models.trade import Trade
+from ..models.strategy_blacklist import StrategySymbolBlacklist
 from ..config import now_beijing
 from .binance_service import BinanceService
 from .strategy_engine import calculate_rsi, generate_signal, Signal, calculate_wavetrend, generate_wt_signal
@@ -47,6 +48,15 @@ def _position_opened_at_from_exchange(ep: dict) -> Optional[datetime]:
             if dt:
                 return dt
     return None
+
+
+def _single_symbol_stop_loss_trigger(wallet_balance: float, symbol_floating_loss: float) -> bool:
+    """Trigger when single-symbol floating loss reaches 10% of wallet balance."""
+    if symbol_floating_loss <= 0:
+        return False
+    if wallet_balance <= 0:
+        return True
+    return symbol_floating_loss >= wallet_balance * 0.10
 
 
 # _reconcile_orphan_from_exchange return values
@@ -759,6 +769,17 @@ class PositionManager:
                 exclude_mainstream=mainstream_exclude,
             )
             exclude_norm = frozenset(excluded) if excluded else frozenset()
+        from ..database import async_session
+        async with async_session() as db:
+            bl_rows = (
+                await db.execute(
+                    select(StrategySymbolBlacklist.symbol_norm).where(
+                        StrategySymbolBlacklist.strategy_id == strategy.id
+                    )
+                )
+            ).scalars().all()
+        if bl_rows:
+            exclude_norm = frozenset(set(exclude_norm) | {(s or "").upper() for s in bl_rows if s})
 
         funding_rates = None
         funding_filter_enabled = False
@@ -909,7 +930,13 @@ class PositionManager:
         # --- Check SL / TP by price ---
         close_reason = None
         exit_price_override = current_price
-        if strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
+        symbol_unrealized_pnl = sum(float(p.unrealized_pnl or 0) for p in open_positions)
+        symbol_floating_loss = max(0.0, -symbol_unrealized_pnl)
+        # 用户口径：钱包余额 = 当前余额 + 浮亏(负数)
+        wallet_balance = float(total_margin) + min(0.0, symbol_unrealized_pnl)
+        if _single_symbol_stop_loss_trigger(wallet_balance, symbol_floating_loss):
+            close_reason = "single_symbol_stop_loss"
+        elif strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
             close_reason = "stop_loss"
         elif eng.check_take_profit(avg_entry, current_price, pos_side):
             close_reason = "take_profit"
@@ -1151,6 +1178,29 @@ class PositionManager:
             )
             session.add(trade)
             trades_to_backup.append(trade)
+        if close_reason == "single_symbol_stop_loss":
+            sym_norm = _norm_sym(symbol)
+            exists = (
+                await session.execute(
+                    select(StrategySymbolBlacklist.id).where(
+                        StrategySymbolBlacklist.strategy_id == strategy_id,
+                        StrategySymbolBlacklist.symbol_norm == sym_norm,
+                    )
+                )
+            ).first()
+            if not exists:
+                session.add(
+                    StrategySymbolBlacklist(
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        symbol_norm=sym_norm,
+                        reason="single_symbol_stop_loss",
+                    )
+                )
+            strategy_log_service.warning(
+                strategy_id,
+                f"{symbol} 触发单币止损(浮亏达钱包余额10%)，已加入黑名单，不再开新仓",
+            )
         await session.flush()
         for trade in trades_to_backup:
             backup_trade(trade)

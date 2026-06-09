@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db
 from ..models.strategy import Strategy
+from ..models.strategy_blacklist import StrategySymbolBlacklist
 from ..models.position import Position
 from ..schemas.strategy import StrategyCreate, StrategyUpdate, StrategyResponse
 from ..schemas.coin_pool import CoinPoolResponse
@@ -23,6 +24,43 @@ router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
 def _panic_symbol_key(sym: str) -> str:
     return (sym or "").replace("/", "").replace(":USDT", "").upper()
+
+
+async def _load_blacklist_map(db: AsyncSession, strategy_ids: list[int]) -> dict[int, list[str]]:
+    if not strategy_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(StrategySymbolBlacklist).where(
+                StrategySymbolBlacklist.strategy_id.in_(strategy_ids)
+            )
+        )
+    ).scalars().all()
+    out: dict[int, list[str]] = {}
+    for row in rows:
+        out.setdefault(row.strategy_id, []).append(row.symbol)
+    return out
+
+
+async def _to_strategy_response(db: AsyncSession, strategy: Strategy) -> StrategyResponse:
+    blacklist_map = await _load_blacklist_map(db, [strategy.id])
+    payload = StrategyResponse.model_validate(strategy).model_dump()
+    payload["blacklisted_symbols"] = blacklist_map.get(strategy.id, [])
+    return StrategyResponse.model_validate(payload)
+
+
+async def _to_strategy_response_list(db: AsyncSession, strategies: list[Strategy]) -> list[StrategyResponse]:
+    blacklist_map = await _load_blacklist_map(db, [s.id for s in strategies])
+    out: list[StrategyResponse] = []
+    for strategy in strategies:
+        payload = StrategyResponse.model_validate(strategy).model_dump()
+        payload["blacklisted_symbols"] = blacklist_map.get(strategy.id, [])
+        out.append(StrategyResponse.model_validate(payload))
+    return out
+
+
+def _normalize_symbol_input(symbol: str) -> str:
+    return _panic_symbol_key(symbol)
 
 
 async def _panic_exchange_leg_contracts(binance, symbol: str, side: str) -> float:
@@ -51,7 +89,7 @@ async def create_strategy(data: StrategyCreate, db: AsyncSession = Depends(get_d
     db.add(strategy)
     await db.commit()
     await db.refresh(strategy)
-    return StrategyResponse.model_validate(strategy)
+    return await _to_strategy_response(db, strategy)
 
 
 @router.get("", response_model=list[StrategyResponse])
@@ -62,7 +100,7 @@ async def list_strategies(status: str | None = None, account_id: int | None = No
     if account_id is not None:
         stmt = stmt.where(Strategy.account_id == account_id)
     result = await db.execute(stmt)
-    return [StrategyResponse.model_validate(s) for s in result.scalars().all()]
+    return await _to_strategy_response_list(db, list(result.scalars().all()))
 
 
 @router.get("/{strategy_id}", response_model=StrategyResponse)
@@ -70,12 +108,12 @@ async def get_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
     strategy = await db.get(Strategy, strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    return StrategyResponse.model_validate(strategy)
+    return await _to_strategy_response(db, strategy)
 
 
 @router.get("/{strategy_id}/effective-coin-pool", response_model=list[CoinPoolResponse])
 async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = Depends(get_db)):
-    """本策略实盘用于新开仓的选币池（成交量 + top_n + TradFi 与调度器一致）。"""
+    """????????????????? top_n ???????"""
     strategy = await db.get(Strategy, strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
@@ -95,12 +133,22 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
         exclude_delisting=exclude_delisting_enabled(strategy),
         exclude_mainstream=exclude_mainstream_enabled(strategy),
     )
+    blacklist_rows = (
+        await db.execute(
+            select(StrategySymbolBlacklist).where(
+                StrategySymbolBlacklist.strategy_id == strategy.id
+            )
+        )
+    ).scalars().all()
+    blacklist_norm = {_panic_symbol_key(row.symbol_norm) for row in blacklist_rows if row.symbol_norm}
+    merged_exclude = set(exclude_norm) if exclude_norm else set()
+    merged_exclude.update(blacklist_norm)
 
     entries = await coin_pool_service.get_effective_pool_entries(
         source=normalize_coin_pool_source(strategy.coin_pool_source),
         limit=strategy.coin_pool_top_n,
         min_volume_24h=float(strategy.coin_pool_min_volume_24h or 0),
-        exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
+        exclude_symbols_norm=merged_exclude if merged_exclude else None,
         strategy=strategy,
     )
     if exclude_funding_enabled(strategy):
@@ -116,6 +164,65 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
     from ..services.coin_pool_presenter import coin_pool_responses_with_funding
 
     return await coin_pool_responses_with_funding(public, entries)
+
+
+@router.post("/{strategy_id}/blacklist", response_model=StrategyResponse)
+async def add_blacklist_symbol(
+    strategy_id: int,
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    strategy = await db.get(Strategy, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    raw_symbol = str(payload.get("symbol") or "").strip()
+    if not raw_symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    symbol_norm = _normalize_symbol_input(raw_symbol)
+    existing = (
+        await db.execute(
+            select(StrategySymbolBlacklist.id).where(
+                StrategySymbolBlacklist.strategy_id == strategy_id,
+                StrategySymbolBlacklist.symbol_norm == symbol_norm,
+            )
+        )
+    ).first()
+    if not existing:
+        db.add(
+            StrategySymbolBlacklist(
+                strategy_id=strategy_id,
+                symbol=symbol_norm,
+                symbol_norm=symbol_norm,
+                reason="manual",
+            )
+        )
+        await db.commit()
+    return await _to_strategy_response(db, strategy)
+
+
+@router.delete("/{strategy_id}/blacklist/{symbol}", response_model=StrategyResponse)
+async def remove_blacklist_symbol(
+    strategy_id: int,
+    symbol: str,
+    db: AsyncSession = Depends(get_db),
+):
+    strategy = await db.get(Strategy, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    symbol_norm = _normalize_symbol_input(symbol)
+    rows = (
+        await db.execute(
+            select(StrategySymbolBlacklist).where(
+                StrategySymbolBlacklist.strategy_id == strategy_id,
+                StrategySymbolBlacklist.symbol_norm == symbol_norm,
+            )
+        )
+    ).scalars().all()
+    for row in rows:
+        await db.delete(row)
+    if rows:
+        await db.commit()
+    return await _to_strategy_response(db, strategy)
 
 
 @router.put("/{strategy_id}", response_model=StrategyResponse)
@@ -134,6 +241,7 @@ async def update_strategy(
     schedule_keys = {
         "coin_pool_fetch_mode",
         "coin_pool_anchor_hour",
+        "coin_pool_anchor_minute",
         "coin_pool_refresh_seconds",
         "coin_pool_source",
         "use_coin_pool",
@@ -156,7 +264,7 @@ async def update_strategy(
         strategy_scheduler.start()
         await strategy_scheduler.add_strategy(strategy_id, session=db)
 
-    return StrategyResponse.model_validate(strategy)
+    return await _to_strategy_response(db, strategy)
 
 
 @router.delete("/{strategy_id}", status_code=204)
@@ -405,3 +513,5 @@ async def get_exchange_positions(strategy_id: int, db: AsyncSession = Depends(ge
 async def get_strategy_logs(strategy_id: int, limit: int = 50):
     from ..services.log_service import strategy_log_service
     return strategy_log_service.get(strategy_id, limit)
+
+

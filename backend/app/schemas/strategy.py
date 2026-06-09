@@ -22,7 +22,7 @@ class StrategyCreate(BaseModel):
     rsi_entry_threshold: float = Field(default=30.0, ge=0, le=100)
     # Martingale
     price_drop_pct: float = Field(default=30.0, gt=0, le=100)
-    price_drop_multiplier: float = Field(default=1.0, ge=1.0, le=5.0, description="加仓跌幅倍数，每层递增")
+    price_drop_multiplier: float = Field(default=1.0, ge=1.0, le=5.0, description="?????????????????")
     martingale_mult: float = Field(default=1.5, ge=1.0, le=10.0)
     max_layers: int = Field(default=8, ge=1, le=200)
     martingale_rsi_enabled: bool = False
@@ -41,31 +41,32 @@ class StrategyCreate(BaseModel):
     coin_pool_source: Literal["gainers", "losers", "both"] = "gainers"
     coin_pool_refresh_seconds: int = Field(default=3600, ge=3600, le=86400)
     coin_pool_fetch_mode: Literal["immediate", "interval", "scheduled"] = "interval"
-    coin_pool_anchor_hour: int = Field(default=8, ge=0, le=23, description="北京时间整点，scheduled 模式首次开选")
+    coin_pool_anchor_hour: int = Field(default=8, ge=0, le=23)
+    coin_pool_anchor_minute: int = Field(default=0, ge=0, le=59)
     coin_pool_top_n: int = Field(default=20, ge=1, le=50)
     coin_pool_min_volume_24h: float = Field(
         default=0.0,
         ge=0,
-        description="最低 24h 成交额(USDT)，0=不限制；仅过滤本策略可开仓的选币池币种",
+        description="??24h???(USDT)?0??????",
     )
     exclude_tradefi: bool = True
     exclude_delisting: bool = Field(
         default=True,
-        description="排除 14 天内下架或非 TRADING 的 USDT 永续",
+        description="??? 14 ????????? TRADING ??USDT ???",
     )
     exclude_mainstream: bool = Field(
         default=True,
-        description="选币池模式下排除 BTC/ETH 等主流币；固定交易对不受限",
+        description="???????? BTC/ETH ?????",
     )
     exclude_funding: bool = Field(
         default=False,
-        description="选币池模式下按最近一次已结算资金费率过滤新开仓",
+        description="??????????????????????",
     )
     funding_rate_threshold_pct: float = Field(
         default=0.0,
         ge=-5.0,
         le=5.0,
-        description="最近结算资金费率阈值(%): 做多>阈值、做空<阈值 时不开新仓",
+        description="????????????????%): ???>?????????????????????",
     )
 
 
@@ -100,6 +101,7 @@ class StrategyUpdate(BaseModel):
     coin_pool_refresh_seconds: Optional[int] = Field(default=None, ge=3600, le=86400)
     coin_pool_fetch_mode: Optional[Literal["immediate", "interval", "scheduled"]] = None
     coin_pool_anchor_hour: Optional[int] = Field(default=None, ge=0, le=23)
+    coin_pool_anchor_minute: Optional[int] = Field(default=None, ge=0, le=59)
     coin_pool_top_n: Optional[int] = Field(default=None, ge=1, le=50)
     coin_pool_min_volume_24h: Optional[float] = Field(default=None, ge=0)
     exclude_tradefi: Optional[bool] = None
@@ -142,6 +144,7 @@ class StrategyResponse(BaseModel):
     coin_pool_refresh_seconds: int
     coin_pool_fetch_mode: str
     coin_pool_anchor_hour: int
+    coin_pool_anchor_minute: int
     coin_pool_top_n: int
     coin_pool_min_volume_24h: float
     exclude_tradefi: bool
@@ -149,6 +152,7 @@ class StrategyResponse(BaseModel):
     exclude_mainstream: bool
     exclude_funding: bool
     funding_rate_threshold_pct: float
+    blacklisted_symbols: list[str] = Field(default_factory=list)
     status: str
     started_at: Optional[datetime] = None
     last_rsi: Optional[float] = None
@@ -158,3 +162,8 @@ class StrategyResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+
+
+

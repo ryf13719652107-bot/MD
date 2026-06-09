@@ -84,6 +84,15 @@ export const api = {
     request(`/strategies/${id}/logs${limit ? `?limit=${limit}` : ''}`),
   getExchangePositions: (id: number): Promise<{ symbol: string; side: string; usdt: number; entry_price: number; mark_price: number; unrealized_pnl: number; pnl_pct: number }[]> =>
     request(`/strategies/${id}/exchange-positions`),
+  addStrategyBlacklistSymbol: (id: number, symbol: string): Promise<Strategy> =>
+    request<Strategy>(`/strategies/${id}/blacklist`, {
+      method: 'POST',
+      body: JSON.stringify({ symbol }),
+    }),
+  removeStrategyBlacklistSymbol: (id: number, symbol: string): Promise<Strategy> =>
+    request<Strategy>(`/strategies/${id}/blacklist/${encodeURIComponent(symbol)}`, {
+      method: 'DELETE',
+    }),
 
   // Positions
   listPositions: (params?: { strategy_id?: number; symbol?: string; account_id?: number }): Promise<Position[]> => {

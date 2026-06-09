@@ -153,3 +153,34 @@ def test_scheduled_loop_continues_after_first_anchor(monkeypatch):
     monkeypatch.setattr("app.services.coin_pool_service.now_beijing", lambda: _dt(2026, 6, 9, 8, 30))
     delay = svc._seconds_until_next_refresh(_dt(2026, 6, 9, 8, 0))
     assert delay == pytest.approx(0.5 * 3600, rel=0.01)
+
+def test_scheduled_loop_waits_for_custom_anchor_minute(monkeypatch):
+    """配置于当日02:30、08:15开选：03:00 应等到 08:15（5.25h）。"""
+    svc = CoinPoolService()
+    svc.update_config(
+        refresh_interval_seconds=3600,
+        fetch_mode="scheduled",
+        anchor_hour=8,
+        anchor_minute=15,
+        schedule_started_at=_dt(2026, 6, 9, 2, 30),
+    )
+    monkeypatch.setattr("app.services.coin_pool_service.now_beijing", lambda: _dt(2026, 6, 9, 3, 0))
+    delay = svc._seconds_until_next_refresh(None)
+    assert delay == pytest.approx(5.25 * 3600, rel=0.01)
+
+
+def test_scheduled_pool_accepts_custom_minute_grid():
+    """08:15 开选后，09:15 的池应被判定为有效。"""
+    svc = CoinPoolService()
+    strategy = Strategy(
+        use_coin_pool=True,
+        coin_pool_fetch_mode="scheduled",
+        coin_pool_anchor_hour=8,
+        coin_pool_anchor_minute=15,
+        coin_pool_refresh_seconds=3600,
+        coin_pool_schedule_started_at=_dt(2026, 6, 9, 2, 30),
+    )
+    pool = [
+        CoinPool(symbol="M15USDT", rank=1, price_change_pct=1, source="gainers", last_updated=_dt(2026, 6, 9, 9, 15))
+    ]
+    assert svc._coin_pool_valid_for_strategy(strategy, pool)

@@ -171,7 +171,7 @@ export default function StrategyPage() {
               <div>止盈: <span className="text-gray-200">{s.take_profit_pct}% {s.take_profit_limit_order ? '(限价单)' : '(市价单)'}</span></div>
               <div>止损: <span className="text-gray-200">{s.stop_loss_enabled ? `${s.stop_loss_pct}%` : '已禁用'}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>
-              <div>选币间隔: <span className="text-gray-200">{formatCoinPoolRefreshHours(s.coin_pool_refresh_seconds)} / {formatCoinPoolFetchMode(s.coin_pool_fetch_mode, s.coin_pool_anchor_hour)}</span></div>
+              <div>选币间隔: <span className="text-gray-200">{formatCoinPoolRefreshHours(s.coin_pool_refresh_seconds)} / {formatCoinPoolFetchMode(s.coin_pool_fetch_mode, s.coin_pool_anchor_hour, s.coin_pool_anchor_minute)}</span></div>
               <div>成交量过滤: <span className="text-gray-200">
                 {(s.coin_pool_min_volume_24h ?? 0) > 0
                   ? `≥ ${(s.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`

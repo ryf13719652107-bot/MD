@@ -2,7 +2,13 @@ import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import type { Strategy, StrategyApiPayload, StrategyFormData } from '../../types/strategy';
+import {
+  formatAnchorTime,
+  parseAnchorTime,
+  type Strategy,
+  type StrategyApiPayload,
+  type StrategyFormData,
+} from '../../types/strategy';
 import type { Account } from '../../types';
 
 const schema = z.object({
@@ -39,7 +45,7 @@ const schema = z.object({
   coin_pool_source: z.enum(['gainers', 'losers', 'both']),
   coin_pool_refresh_hours: z.number().min(1).max(24),
   coin_pool_fetch_mode: z.enum(['immediate', 'interval', 'scheduled']),
-  coin_pool_anchor_hour: z.number().min(0).max(23),
+  coin_pool_anchor_time: z.string().regex(/^\d{2}:\d{2}$/, '请输入 HH:mm 格式时间'),
   coin_pool_top_n: z.number().min(1).max(50),
   /** 表单内以「万 USDT」录入，提交时 ×1e4 转为 USDT */
   coin_pool_min_volume_24h: z.number().min(0).max(99999999),
@@ -95,7 +101,10 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
         initialData.coin_pool_fetch_mode === 'scheduled' || initialData.coin_pool_fetch_mode === 'immediate'
           ? initialData.coin_pool_fetch_mode
           : 'interval',
-      coin_pool_anchor_hour: initialData.coin_pool_anchor_hour ?? 8,
+      coin_pool_anchor_time: formatAnchorTime(
+        initialData.coin_pool_anchor_hour,
+        initialData.coin_pool_anchor_minute,
+      ),
       coin_pool_top_n: initialData.coin_pool_top_n ?? 20,
       coin_pool_min_volume_24h: (initialData.coin_pool_min_volume_24h ?? 0) / WAN,
       exclude_tradefi: initialData.exclude_tradefi ?? true,
@@ -136,7 +145,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     coin_pool_source: 'gainers',
     coin_pool_refresh_hours: 1,
     coin_pool_fetch_mode: 'interval',
-    coin_pool_anchor_hour: 8,
+    coin_pool_anchor_time: '08:00',
     coin_pool_top_n: 20,
     coin_pool_min_volume_24h: 0,
     exclude_tradefi: true,
@@ -148,10 +157,13 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
 }
 
 function toApiPayload(data: StrategyFormData): StrategyApiPayload {
-  const { coin_pool_refresh_hours, ...rest } = data;
+  const { coin_pool_refresh_hours, coin_pool_anchor_time, ...rest } = data;
+  const { hour, minute } = parseAnchorTime(coin_pool_anchor_time);
   return {
     ...rest,
     coin_pool_refresh_seconds: Math.round(coin_pool_refresh_hours * 3600),
+    coin_pool_anchor_hour: hour,
+    coin_pool_anchor_minute: minute,
     coin_pool_min_volume_24h: (data.coin_pool_min_volume_24h || 0) * WAN,
   };
 }
@@ -422,12 +434,13 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             {fetchMode === 'scheduled' && (
               <div>
                 <label className={labelClass}>首次开选时间(北京时间)</label>
-                <select {...register('coin_pool_anchor_hour', { valueAsNumber: true })} className={inputClass}>
-                  {Array.from({ length: 24 }, (_, h) => (
-                    <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>
-                  ))}
-                </select>
-                <span className="text-xs text-gray-600">仅计划时刻更新选币池；交易照常只使用池内币种</span>
+                <input
+                  type="time"
+                  step={60}
+                  {...register('coin_pool_anchor_time')}
+                  className={inputClass}
+                />
+                <span className="text-xs text-gray-600">可填任意时刻，如 00:00、08:15；仅计划时刻更新选币池</span>
               </div>
             )}
             <div>

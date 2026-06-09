@@ -31,6 +31,7 @@ export interface Strategy {
   coin_pool_refresh_seconds: number;
   coin_pool_fetch_mode: 'immediate' | 'interval' | 'scheduled';
   coin_pool_anchor_hour: number;
+  coin_pool_anchor_minute: number;
   coin_pool_top_n: number;
   /** 最低 24h 成交额(USDT)，0=不限制 */
   coin_pool_min_volume_24h: number;
@@ -39,6 +40,7 @@ export interface Strategy {
   exclude_mainstream: boolean;
   exclude_funding: boolean;
   funding_rate_threshold_pct: number;
+  blacklisted_symbols: string[];
   status: 'running' | 'stopped' | 'error';
   started_at: string | null;
   last_rsi: number | null;
@@ -79,7 +81,8 @@ export interface StrategyFormData {
   coin_pool_source: 'gainers' | 'losers' | 'both';
   coin_pool_refresh_hours: number;
   coin_pool_fetch_mode: 'immediate' | 'interval' | 'scheduled';
-  coin_pool_anchor_hour: number;
+  /** 表单内 HH:mm，提交时拆为 hour + minute */
+  coin_pool_anchor_time: string;
   coin_pool_top_n: number;
   coin_pool_min_volume_24h: number;
   exclude_tradefi: boolean;
@@ -89,9 +92,23 @@ export interface StrategyFormData {
   funding_rate_threshold_pct: number;
 }
 
-export type StrategyApiPayload = Omit<StrategyFormData, 'coin_pool_refresh_hours'> & {
+export type StrategyApiPayload = Omit<StrategyFormData, 'coin_pool_refresh_hours' | 'coin_pool_anchor_time'> & {
   coin_pool_refresh_seconds: number;
+  coin_pool_anchor_hour: number;
+  coin_pool_anchor_minute: number;
 };
+
+export function formatAnchorTime(hour?: number, minute?: number): string {
+  return `${String(hour ?? 8).padStart(2, '0')}:${String(minute ?? 0).padStart(2, '0')}`;
+}
+
+export function parseAnchorTime(time: string): { hour: number; minute: number } {
+  const [h, m] = time.split(':').map((v) => Number(v));
+  return {
+    hour: Number.isFinite(h) ? Math.min(23, Math.max(0, h)) : 8,
+    minute: Number.isFinite(m) ? Math.min(59, Math.max(0, m)) : 0,
+  };
+}
 
 export function formatSignalSourceLabel(
   source: Strategy['signal_source'],
@@ -111,9 +128,10 @@ export function formatCoinPoolRefreshHours(seconds: number): string {
 export function formatCoinPoolFetchMode(
   mode: Strategy['coin_pool_fetch_mode'],
   anchorHour?: number,
+  anchorMinute?: number,
 ): string {
   if (mode === 'scheduled') {
-    return `指定时间开选（${String(anchorHour ?? 0).padStart(2, '0')}:00 起）`;
+    return `指定时间开选（${formatAnchorTime(anchorHour, anchorMinute)} 起）`;
   }
   if (mode === 'immediate') return '启动时立即抓取';
   return '按间隔开选';

@@ -43,6 +43,8 @@ export default function StrategyDetailPage() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [blacklistInput, setBlacklistInput] = useState('');
+  const [blacklistBusy, setBlacklistBusy] = useState(false);
 
   const loadRef = useRef<() => void>(() => {});
 
@@ -114,6 +116,35 @@ export default function StrategyDetailPage() {
 
   const labelClass = 'text-xs text-gray-500';
   const valClass = 'text-sm text-gray-200';
+
+  const addBlacklistSymbol = async () => {
+    if (!id || !strategy) return;
+    const symbol = blacklistInput.trim().toUpperCase();
+    if (!symbol) return;
+    try {
+      setBlacklistBusy(true);
+      const updated = await api.addStrategyBlacklistSymbol(Number(id), symbol);
+      setStrategy(updated);
+      setBlacklistInput('');
+    } catch (e: any) {
+      window.alert(`加入黑名单失败：${e?.message || e}`);
+    } finally {
+      setBlacklistBusy(false);
+    }
+  };
+
+  const removeBlacklistSymbol = async (symbol: string) => {
+    if (!id || !strategy) return;
+    try {
+      setBlacklistBusy(true);
+      const updated = await api.removeStrategyBlacklistSymbol(Number(id), symbol);
+      setStrategy(updated);
+    } catch (e: any) {
+      window.alert(`移除黑名单失败：${e?.message || e}`);
+    } finally {
+      setBlacklistBusy(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -191,7 +222,7 @@ export default function StrategyDetailPage() {
             <span className={labelClass}>选币池</span>
             <div className={valClass}>
               {strategy.use_coin_pool
-                ? `${poolSourceLabel(strategy.coin_pool_source)} / ${formatCoinPoolRefreshHours(strategy.coin_pool_refresh_seconds)} / ${formatCoinPoolFetchMode(strategy.coin_pool_fetch_mode, strategy.coin_pool_anchor_hour)}`
+                ? `${poolSourceLabel(strategy.coin_pool_source)} / ${formatCoinPoolRefreshHours(strategy.coin_pool_refresh_seconds)} / ${formatCoinPoolFetchMode(strategy.coin_pool_fetch_mode, strategy.coin_pool_anchor_hour, strategy.coin_pool_anchor_minute)}`
                 : '固定交易对'}
             </div>
           </div>
@@ -231,6 +262,45 @@ export default function StrategyDetailPage() {
             <span className={labelClass}>TradFi / 股票永续</span>
             <div className={valClass}>
               {(strategy.exclude_tradefi === true) ? '已排除（TradFi/黄金白银原油等）' : '未排除'}
+            </div>
+          </div>
+          <div className="col-span-2 md:col-span-4">
+            <span className={labelClass}>黑名单（单币止损后禁开新仓）</span>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <input
+                value={blacklistInput}
+                onChange={(e) => setBlacklistInput(e.target.value)}
+                placeholder="输入币种，如 BTCUSDT"
+                className="h-8 px-2 rounded border border-gray-700 bg-gray-800 text-xs text-gray-200"
+              />
+              <button
+                type="button"
+                onClick={addBlacklistSymbol}
+                disabled={blacklistBusy || !blacklistInput.trim()}
+                className="h-8 px-3 rounded bg-red-600/80 hover:bg-red-600 disabled:opacity-50 text-xs text-white"
+              >
+                手动加入
+              </button>
+            </div>
+            <div className={`${valClass} mt-1 flex flex-wrap gap-2`}>
+              {(strategy.blacklisted_symbols?.length ?? 0) > 0 ? (
+                strategy.blacklisted_symbols.map((sym) => (
+                  <div key={sym} className="px-2 py-0.5 rounded bg-red-950/40 border border-red-500/40 text-red-300 text-xs font-mono flex items-center gap-2">
+                    <span>{sym}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeBlacklistSymbol(sym)}
+                      disabled={blacklistBusy}
+                      className="text-red-200 hover:text-white disabled:opacity-50"
+                      title="移除黑名单"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <span className="text-gray-500">无</span>
+              )}
             </div>
           </div>
           {strategy.last_rsi != null && (
@@ -427,7 +497,7 @@ export default function StrategyDetailPage() {
                     </td>
                     <td className="py-1.5 px-2 text-right text-gray-400">L{t.layer}</td>
                     <td className="py-1.5 px-2 text-right text-gray-400">
-                      {t.close_reason === 'take_profit' ? '止盈' : t.close_reason === 'stop_loss' ? '止损' : t.close_reason === 'panic_close' ? '紧急平仓' : t.close_reason === 'sync' ? '同步平仓' : t.close_reason === 'margin_stop' ? '保证金止损' : t.close_reason === 'manual' ? '手动平仓' : t.close_reason}
+                      {t.close_reason === 'take_profit' ? '止盈' : t.close_reason === 'stop_loss' ? '止损' : t.close_reason === 'single_symbol_stop_loss' ? '单币止损(黑名单)' : t.close_reason === 'panic_close' ? '紧急平仓' : t.close_reason === 'sync' ? '同步平仓' : t.close_reason === 'margin_stop' ? '保证金止损' : t.close_reason === 'manual' ? '手动平仓' : t.close_reason}
                     </td>
                     <td className="py-1.5 px-2 text-right text-gray-500">{fmtTime(t.entry_time)}</td>
                     <td className="py-1.5 px-2 text-right text-gray-500">{fmtTime(t.exit_time)}</td>

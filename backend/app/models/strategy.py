@@ -19,7 +19,7 @@ class Strategy(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=True)  # NULL = use coin pool
 
     # Signal source
-    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' | 'wavetrend' | 'martingale_base'(不看指标，每根K线开盘开首单)
+    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' | 'wavetrend' | 'martingale_base'(涓嶇湅鎸囨爣锛屾瘡鏍筀绾垮紑鐩樺紑棣栧崟)
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)
@@ -39,7 +39,7 @@ class Strategy(Base):
 
     # Martingale params
     price_drop_pct: Mapped[float] = mapped_column(Float, default=30.0)
-    price_drop_multiplier: Mapped[float] = mapped_column(Float, default=1.0)  # 加仓跌幅倍数：每层递增 price_drop_pct * multiplier^(layer-1)
+    price_drop_multiplier: Mapped[float] = mapped_column(Float, default=1.0)  # 鍔犱粨璺屽箙鍊嶆暟锛氭瘡灞傞€掑 price_drop_pct * multiplier^(layer-1)
     martingale_mult: Mapped[float] = mapped_column(Float, default=1.5)
     max_layers: Mapped[int] = mapped_column(Integer, default=8)
     martingale_rsi_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # Require RSI signal for adds
@@ -63,20 +63,21 @@ class Strategy(Base):
     coin_pool_source: Mapped[str] = mapped_column(String(20), default="gainers")  # gainers, losers, both
     coin_pool_refresh_seconds: Mapped[int] = mapped_column(Integer, default=3600)  # how often to refresh coin pool
     coin_pool_fetch_mode: Mapped[str] = mapped_column(String(20), default="interval")  # 'immediate' | 'interval' | 'scheduled'
-    coin_pool_anchor_hour: Mapped[int] = mapped_column(Integer, default=8, server_default="8")  # 北京时间整点，scheduled 模式首次开选
-    coin_pool_schedule_started_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)  # scheduled 模式配置生效时间
+    coin_pool_anchor_hour: Mapped[int] = mapped_column(Integer, default=8, server_default="8")
+    coin_pool_anchor_minute: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    coin_pool_schedule_started_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)  # scheduled 妯″紡閰嶇疆鐢熸晥鏃堕棿
     coin_pool_top_n: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
-    # 最低 24h 成交额（USDT quoteVolume）；0 = 不限制。仅本策略过滤选币池新开仓列表
+    # 鏈€浣?24h 鎴愪氦棰濓紙USDT quoteVolume锛夛紱0 = 涓嶉檺鍒躲€備粎鏈瓥鐣ヨ繃婊ら€夊竵姹犳柊寮€浠撳垪琛?
     coin_pool_min_volume_24h: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
-    # True: 排除 TRADIFI_PERPETUAL + 黄金白银原油等非加密货币合约
+    # True: 鎺掗櫎 TRADIFI_PERPETUAL + 榛勯噾鐧介摱鍘熸补绛夐潪鍔犲瘑璐у竵鍚堢害
     exclude_tradefi: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
-    # True: 排除 14 天内下架或非 TRADING 的合约（无仓时不开新单）
+    # True: 鎺掗櫎 14 澶╁唴涓嬫灦鎴栭潪 TRADING 鐨勫悎绾︼紙鏃犱粨鏃朵笉寮€鏂板崟锛?
     exclude_delisting: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
-    # True: 选币池模式下排除 BTC/ETH 等主流币（固定交易对不受限）
+    # True: 閫夊竵姹犳ā寮忎笅鎺掗櫎 BTC/ETH 绛変富娴佸竵锛堝浐瀹氫氦鏄撳涓嶅彈闄愶級
     exclude_mainstream: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
-    # True: 选币池模式下按资金费率过滤新开仓（已有持仓仍管理）
+    # True: 閫夊竵姹犳ā寮忎笅鎸夎祫閲戣垂鐜囪繃婊ゆ柊寮€浠擄紙宸叉湁鎸佷粨浠嶇鐞嗭級
     exclude_funding: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    # 最近结算资金费率阈值(%): 做多 rate>阈值 过滤；做空 rate<阈值 过滤；默认 0
+    # 鏈€杩戠粨绠楄祫閲戣垂鐜囬槇鍊?%): 鍋氬 rate>闃堝€?杩囨护锛涘仛绌?rate<闃堝€?杩囨护锛涢粯璁?0
     funding_rate_threshold_pct: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
 
     # Runtime state
@@ -103,3 +104,5 @@ def _track_status_change(mapper, connection, target):
             target.id, hist.deleted[0], target.status,
             "".join(traceback.format_stack()[-8:-1])
         )
+
+

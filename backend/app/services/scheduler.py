@@ -11,6 +11,7 @@ from ..models.strategy import Strategy
 from ..models.account import Account
 from ..models.bot_config import BotConfig
 from ..models.position import Position
+from ..models.strategy_blacklist import StrategySymbolBlacklist
 from ..config import now_beijing, BEIJING_TZ
 from .binance_service import (
     BinanceService,
@@ -393,6 +394,7 @@ class StrategyScheduler:
             pool_symbols: list[str] = []
             pool_entry_norms: set[str] | None = None
             pool_exclude_norm: frozenset[str] = frozenset()
+            strategy_blacklist_norm: frozenset[str] = frozenset()
             pool_exclude_loaded = False
 
             stmt_open_syms = (
@@ -402,6 +404,14 @@ class StrategyScheduler:
             )
             open_sym_rows = (await session.execute(stmt_open_syms)).scalars().all()
             open_syms = [s for s in open_sym_rows if s]
+            bl_rows = (
+                await session.execute(
+                    select(StrategySymbolBlacklist.symbol_norm).where(
+                        StrategySymbolBlacklist.strategy_id == strategy_id
+                    )
+                )
+            ).scalars().all()
+            strategy_blacklist_norm = frozenset((s or "").upper() for s in bl_rows if s)
 
             if mid_candle:
                 # Mid-candle: manage open legs only — no pool scan, no new entries.
@@ -418,7 +428,9 @@ class StrategyScheduler:
                             exclude_delisting=exclude_delisting_enabled(strategy),
                             exclude_mainstream=exclude_mainstream_enabled(strategy),
                         )
-                        pool_exclude_norm = frozenset(excluded) if excluded else frozenset()
+                        merged_exclude = set(excluded) if excluded else set()
+                        merged_exclude.update(strategy_blacklist_norm)
+                        pool_exclude_norm = frozenset(merged_exclude) if merged_exclude else frozenset()
                         pool_exclude_loaded = True
                         pool_symbols = await coin_pool_service.get_pool_symbols(
                             normalize_coin_pool_source(strategy.coin_pool_source),
@@ -498,7 +510,11 @@ class StrategyScheduler:
                         exclude_delisting=exclude_delisting_enabled(strategy),
                         exclude_mainstream=mainstream_exclude,
                     )
-                    exclude_norm = frozenset(excluded) if excluded else frozenset()
+                    merged_exclude = set(excluded) if excluded else set()
+                    merged_exclude.update(strategy_blacklist_norm)
+                    exclude_norm = frozenset(merged_exclude) if merged_exclude else frozenset()
+                elif strategy_blacklist_norm:
+                    exclude_norm = frozenset(set(exclude_norm) | set(strategy_blacklist_norm))
 
                 if strategy.use_coin_pool and exclude_funding_enabled(strategy):
                     funding_filter_enabled = True
