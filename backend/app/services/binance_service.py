@@ -24,6 +24,34 @@ def tradefi_cache_clear():
     _LAST_FUNDING_RATES_CACHE = None
 
 
+def _float_or_zero(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def extract_usdt_wallet_balance(balance: dict) -> float:
+    """Return a stable USDT wallet/equity value from ccxt Binance futures balance."""
+    info = balance.get("info") if isinstance(balance, dict) else {}
+    candidates: list[float] = []
+    if isinstance(info, dict):
+        for key in ("totalWalletBalance", "totalMarginBalance", "availableBalance"):
+            candidates.append(_float_or_zero(info.get(key)))
+
+    for section in ("total", "free"):
+        data = balance.get(section, {}) if isinstance(balance, dict) else {}
+        if isinstance(data, dict):
+            candidates.append(_float_or_zero(data.get("USDT")))
+
+    usdt_row = balance.get("USDT", {}) if isinstance(balance, dict) else {}
+    if isinstance(usdt_row, dict):
+        for key in ("total", "free"):
+            candidates.append(_float_or_zero(usdt_row.get(key)))
+
+    return max(candidates, default=0.0)
+
+
 def _normalize_symbol_for_tradefi(s: str) -> str:
     return (s or "").replace("/", "").replace(":USDT", "").upper()
 

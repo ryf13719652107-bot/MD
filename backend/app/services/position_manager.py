@@ -64,6 +64,37 @@ def _single_symbol_stop_loss_trigger(
     return symbol_floating_loss >= wallet_balance * (pct / 100.0)
 
 
+def _symbol_unrealized_pnl_from_exchange(
+    raw_exchange_positions: list[dict[str, Any]],
+    symbol: str,
+    side: str,
+) -> float | None:
+    sym_key = _norm_sym(symbol)
+    side_key = (side or "").lower()
+    matched = False
+    total = 0.0
+    for ep in raw_exchange_positions or []:
+        contracts = float(ep.get("contracts", 0) or 0)
+        if contracts <= 0:
+            continue
+        if _norm_sym(ep.get("symbol") or "") != sym_key:
+            continue
+        if (ep.get("side") or "").lower() != side_key:
+            continue
+        info = ep.get("info") or {}
+        if not isinstance(info, dict):
+            info = {}
+        matched = True
+        total += float(
+            ep.get("unrealizedPnl")
+            or ep.get("unrealized_pnl")
+            or info.get("unRealizedProfit")
+            or info.get("unrealizedProfit")
+            or 0
+        )
+    return total if matched else None
+
+
 # _reconcile_orphan_from_exchange return values
 RECONCILE_CREATED = "created"
 RECONCILE_NO_ORPHAN = "no_orphan"  # nothing on exchange for this symbol, or no insert needed
@@ -531,6 +562,7 @@ class PositionManager:
                 total_margin,
                 leverage,
                 klines,
+                ctx,
             )
         else:
             await session.flush()
@@ -916,7 +948,7 @@ class PositionManager:
             await self.execute_open_db(session, strategy, api_result)
 
     async def _manage_positions(
-        self, session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines=None
+        self, session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines=None, ctx: TickContext | None = None
     ):
         strategy_id = strategy.id
         pos_side = open_positions[0].side
@@ -935,15 +967,40 @@ class PositionManager:
         # --- Check SL / TP by price ---
         close_reason = None
         exit_price_override = current_price
-        symbol_unrealized_pnl = sum(float(p.unrealized_pnl or 0) for p in open_positions)
+        exchange_upnl = _symbol_unrealized_pnl_from_exchange(
+            ctx.raw_exchange_positions if ctx else [],
+            symbol,
+            pos_side,
+        )
+        symbol_unrealized_pnl = (
+            exchange_upnl
+            if exchange_upnl is not None
+            else sum(float(p.unrealized_pnl or 0) for p in open_positions)
+        )
         symbol_floating_loss = max(0.0, -symbol_unrealized_pnl)
-        # 用户口径：钱包余额 = 当前余额 + 浮亏(负数)
-        wallet_balance = float(total_margin) + min(0.0, symbol_unrealized_pnl)
+        wallet_balance = float(total_margin)
+        threshold_pct = float(getattr(strategy, "single_symbol_stop_loss_pct", 10) or 10)
         if getattr(strategy, "single_symbol_stop_loss_enabled", True) and _single_symbol_stop_loss_trigger(
             wallet_balance,
             symbol_floating_loss,
-            float(getattr(strategy, "single_symbol_stop_loss_pct", 10) or 10),
+            threshold_pct,
         ):
+            logger.warning(
+                "Strategy %d: single-symbol SL triggered %s %s loss=%.4f wallet=%.4f threshold=%.4f pct=%.4f upnl_source=%s",
+                strategy_id,
+                symbol,
+                pos_side,
+                symbol_floating_loss,
+                wallet_balance,
+                wallet_balance * (threshold_pct / 100.0),
+                threshold_pct,
+                "exchange" if exchange_upnl is not None else "local",
+            )
+            strategy_log_service.warning(
+                strategy_id,
+                f"{symbol} 单币止损触发 — 浮亏 {symbol_floating_loss:.2f}U / "
+                f"钱包 {wallet_balance:.2f}U / 阈值 {wallet_balance * (threshold_pct / 100.0):.2f}U",
+            )
             close_reason = "single_symbol_stop_loss"
         elif strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
             close_reason = "stop_loss"

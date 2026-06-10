@@ -20,6 +20,7 @@ from .binance_service import (
     get_strategy_pool_exclude_symbols,
     filter_pool_symbols_by_funding,
     get_cached_last_funding_rates_pct,
+    extract_usdt_wallet_balance,
 )
 from .strategy_flags import (
     exclude_delisting_enabled,
@@ -295,7 +296,7 @@ class StrategyScheduler:
                     if isinstance(_prefetch_balance, Exception):
                         raise _prefetch_balance
                     balance = _prefetch_balance
-                    total_margin = float(balance.get("total", {}).get("USDT", 0) or 0)
+                    total_margin = extract_usdt_wallet_balance(balance)
                     logger.info("Strategy %d: balance fetched — total=%.2f USDT", strategy_id, total_margin)
                     if strategy.margin_threshold > 0 and total_margin < strategy.margin_threshold:
                         strategy.status = "stopped"
