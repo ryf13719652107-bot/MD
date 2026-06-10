@@ -1,6 +1,7 @@
 import math
 import time
 import logging
+import hashlib
 import ccxt.async_support as ccxt_async
 import ccxt.pro as ccxtpro
 from typing import Optional
@@ -785,17 +786,22 @@ _public_created_at: float = 0.0
 _INSTANCE_TTL = 7200  # 2 hours before forcing recreation
 
 
+def _private_cache_key(api_key: str, secret: str, testnet: bool, hedge_mode: bool) -> str:
+    digest = hashlib.sha256(f"{api_key}\0{secret}".encode("utf-8")).hexdigest()
+    return f"{digest}:{testnet}:{hedge_mode}"
+
+
 async def get_binance_service(api_key: str, secret: str, testnet: bool = True, hedge_mode: bool = True) -> BinanceService:
     """Get a cached BinanceService for authenticated operations."""
     global _private_instances
-    cache_key = f"{api_key[:8]}:{testnet}:{hedge_mode}"
+    cache_key = _private_cache_key(api_key, secret, testnet, hedge_mode)
     now = time.time()
 
     if cache_key in _private_instances:
         created, svc = _private_instances[cache_key]
         if now - created < _INSTANCE_TTL:
             return svc
-        logger.info("Private BinanceService TTL expired for %s, recreating", cache_key[:10])
+        logger.info("Private BinanceService TTL expired for %s, recreating", cache_key[:12])
         try:
             await svc.close()
         except Exception:
@@ -804,6 +810,24 @@ async def get_binance_service(api_key: str, secret: str, testnet: bool = True, h
     svc = BinanceService(api_key, secret, testnet, hedge_mode)
     _private_instances[cache_key] = (now, svc)
     return svc
+
+
+async def clear_private_binance_service(
+    api_key: str,
+    secret: str,
+    testnet: bool = True,
+    hedge_mode: bool = True,
+) -> None:
+    """Close and remove one authenticated exchange cache entry."""
+    cache_key = _private_cache_key(api_key, secret, testnet, hedge_mode)
+    entry = _private_instances.pop(cache_key, None)
+    if not entry:
+        return
+    _, svc = entry
+    try:
+        await svc.close()
+    except Exception:
+        pass
 
 
 async def get_public_binance(use_testnet: bool = False) -> BinanceService:

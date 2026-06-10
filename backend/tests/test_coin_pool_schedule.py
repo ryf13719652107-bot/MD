@@ -95,6 +95,22 @@ def test_scheduled_pool_accepts_pool_from_scheduled_start():
     assert svc._coin_pool_valid_for_strategy(strategy, scheduled_pool)
 
 
+def test_scheduled_pool_accepts_late_refresh_after_first_anchor():
+    """计划锚点后补刷/晚刷的池应保持有效，不能因不在锚点容差内被清空。"""
+    svc = CoinPoolService()
+    strategy = Strategy(
+        use_coin_pool=True,
+        coin_pool_fetch_mode="scheduled",
+        coin_pool_anchor_hour=8,
+        coin_pool_refresh_seconds=24 * 3600,
+        coin_pool_schedule_started_at=_dt(2026, 6, 10, 2, 0),
+    )
+    late_pool = [
+        CoinPool(symbol="LATEUSDT", rank=1, price_change_pct=1, source="losers", last_updated=_dt(2026, 6, 10, 8, 7))
+    ]
+    assert svc._coin_pool_valid_for_strategy(strategy, late_pool)
+
+
 def test_scheduled_hourly_rejects_pool_before_first_anchor():
     """间隔1h、08:00开选、当日02:30配置：02:00 的池在首个锚点(08:00)之前 → 无效。"""
     svc = CoinPoolService()

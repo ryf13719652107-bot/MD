@@ -373,10 +373,9 @@ class CoinPoolService:
         first_slot = self._first_anchor_at_or_after(
             started, anchor, anchor_minute, tolerance_seconds=tolerance
         )
-        if last_dt < first_slot - timedelta(seconds=tolerance):
+        if last_dt < first_slot:
             return False
-        remainder = (last_dt - first_slot).total_seconds() % interval
-        return remainder <= tolerance
+        return True
 
     async def get_effective_pool_entries(
         self,

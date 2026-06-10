@@ -109,6 +109,8 @@ async def _delete_account_record(account_id: int, db: AsyncSession) -> None:
         strategy_log_service.clear(s.id)
 
     exchange_close_errors: list[str] = []
+    api_key: str | None = None
+    api_secret: str | None = None
     try:
         from ..services.binance_service import get_binance_service
 
@@ -142,6 +144,15 @@ async def _delete_account_record(account_id: int, db: AsyncSession) -> None:
     from ..models.position import Position
     from ..models.trade import Trade
     from ..models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline
+    from ..models.strategy_blacklist import StrategySymbolBlacklist
+
+    strategy_ids = [s.id for s in strategies]
+    if strategy_ids:
+        await db.execute(
+            sqla_delete(StrategySymbolBlacklist).where(
+                StrategySymbolBlacklist.strategy_id.in_(strategy_ids)
+            )
+        )
 
     await db.execute(sqla_delete(AccountBalanceSnapshot).where(AccountBalanceSnapshot.account_id == account_id))
     await db.execute(sqla_delete(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
@@ -149,6 +160,16 @@ async def _delete_account_record(account_id: int, db: AsyncSession) -> None:
     await db.execute(sqla_delete(Trade).where(Trade.account_id == account_id))
     await db.execute(sqla_delete(Strategy).where(Strategy.account_id == account_id))
     await db.execute(sqla_delete(Account).where(Account.id == account_id))
+
+    if api_key and api_secret:
+        try:
+            from ..services.binance_service import clear_private_binance_service
+
+            await clear_private_binance_service(
+                api_key, api_secret, account.testnet, account.hedge_mode
+            )
+        except Exception as e:
+            logger.warning("账户 %d 删除后清理 Binance 缓存失败: %s", account_id, e)
 
 
 @router.post("/purge-spam")
