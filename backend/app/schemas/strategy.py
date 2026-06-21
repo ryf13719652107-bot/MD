@@ -25,14 +25,14 @@ class StrategyCreate(BaseModel):
     price_drop_multiplier: float = Field(default=1.0, ge=1.0, le=5.0, description="?????????????????")
     martingale_mult: float = Field(default=1.5, ge=1.0, le=10.0)
     max_layers: int = Field(default=8, ge=1, le=200)
-    martingale_rsi_enabled: bool = False
+    martingale_rsi_enabled: bool = True
     # Take profit
     take_profit_pct: float = Field(default=2.0, gt=0, le=50)
     take_profit_limit_order: bool = True
     # Stop loss
     stop_loss_enabled: bool = False
     stop_loss_pct: float = Field(default=5.0, gt=0, le=100)
-    single_symbol_stop_loss_enabled: bool = True
+    single_symbol_stop_loss_enabled: bool = False
     single_symbol_stop_loss_pct: float = Field(default=10.0, gt=0, le=100)
     # Slippage protection
     slippage_pct: float = Field(default=0.5, ge=0, le=10)

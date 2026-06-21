@@ -980,7 +980,7 @@ class PositionManager:
         symbol_floating_loss = max(0.0, -symbol_unrealized_pnl)
         wallet_balance = float(total_margin)
         threshold_pct = float(getattr(strategy, "single_symbol_stop_loss_pct", 10) or 10)
-        if getattr(strategy, "single_symbol_stop_loss_enabled", True) and _single_symbol_stop_loss_trigger(
+        if getattr(strategy, "single_symbol_stop_loss_enabled", False) and _single_symbol_stop_loss_trigger(
             wallet_balance,
             symbol_floating_loss,
             threshold_pct,

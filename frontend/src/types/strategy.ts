@@ -128,7 +128,7 @@ export function formatSingleSymbolStopLoss(
   enabled?: boolean,
   pct?: number,
 ): string {
-  if (enabled === false) return '已禁用';
+  if (enabled !== true) return '已禁用';
   return `钱包余额 ${pct ?? 10}%（触发后拉黑）`;
 }
 

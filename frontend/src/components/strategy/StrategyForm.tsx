@@ -89,12 +89,12 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       price_drop_multiplier: initialData.price_drop_multiplier ?? 1,
       martingale_mult: initialData.martingale_mult,
       max_layers: Number(initialData.max_layers ?? 8),
-      martingale_rsi_enabled: initialData.martingale_rsi_enabled ?? false,
+      martingale_rsi_enabled: initialData.martingale_rsi_enabled ?? true,
       take_profit_pct: initialData.take_profit_pct,
       take_profit_limit_order: initialData.take_profit_limit_order,
       stop_loss_enabled: initialData.stop_loss_enabled ?? true,
       stop_loss_pct: initialData.stop_loss_pct,
-      single_symbol_stop_loss_enabled: initialData.single_symbol_stop_loss_enabled ?? true,
+      single_symbol_stop_loss_enabled: initialData.single_symbol_stop_loss_enabled ?? false,
       single_symbol_stop_loss_pct: initialData.single_symbol_stop_loss_pct ?? 10,
       slippage_pct: initialData.slippage_pct ?? 0.5,
       leverage: initialData.leverage ?? 10,
@@ -138,12 +138,12 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     price_drop_multiplier: 1,
     martingale_mult: 1.5,
     max_layers: 8,
-    martingale_rsi_enabled: false,
+    martingale_rsi_enabled: true,
     take_profit_pct: 2,
     take_profit_limit_order: true,
     stop_loss_enabled: false,
     stop_loss_pct: 5,
-    single_symbol_stop_loss_enabled: true,
+    single_symbol_stop_loss_enabled: false,
     single_symbol_stop_loss_pct: 10,
     slippage_pct: 0.5,
     leverage: 10,
@@ -187,7 +187,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
   const useCoinPool = watch('use_coin_pool', true);
   const fetchMode = watch('coin_pool_fetch_mode', 'interval');
   const stopLossEnabled = watch('stop_loss_enabled', true);
-  const singleSymbolStopLossEnabled = watch('single_symbol_stop_loss_enabled', true);
+  const singleSymbolStopLossEnabled = watch('single_symbol_stop_loss_enabled', false);
   const excludeFunding = watch('exclude_funding', false);
 
   // Auto-adjust RSI threshold on mount and when direction changes
@@ -505,13 +505,13 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
 
         <div>
           <label className={`${labelClass} flex items-center gap-2`}>
-            <span>马丁加仓RSI确认</span>
+            <span>马丁加仓信号确认</span>
             <label className="relative inline-flex items-center cursor-pointer">
               <input type="checkbox" {...register('martingale_rsi_enabled')} className="sr-only peer" />
               <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
             </label>
           </label>
-          <span className="text-xs text-gray-600">开启后，加仓时RSI仍需满足入场条件，防止反向加仓</span>
+          <span className="text-xs text-gray-600">开启后，加仓时仍需满足当前信号条件（RSI/WaveTrend），防止反向加仓</span>
         </div>
 
         <div className="border-t border-gray-800 my-3" />

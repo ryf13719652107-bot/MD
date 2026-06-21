@@ -42,7 +42,7 @@ class Strategy(Base):
     price_drop_multiplier: Mapped[float] = mapped_column(Float, default=1.0)  # 鍔犱粨璺屽箙鍊嶆暟锛氭瘡灞傞€掑 price_drop_pct * multiplier^(layer-1)
     martingale_mult: Mapped[float] = mapped_column(Float, default=1.5)
     max_layers: Mapped[int] = mapped_column(Integer, default=8)
-    martingale_rsi_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # Require RSI signal for adds
+    martingale_rsi_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")  # Require entry signal for martingale adds
 
     # Take profit params
     take_profit_pct: Mapped[float] = mapped_column(Float, default=2.0)
@@ -51,7 +51,7 @@ class Strategy(Base):
     # Stop loss
     stop_loss_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     stop_loss_pct: Mapped[float] = mapped_column(Float, default=5.0)
-    single_symbol_stop_loss_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    single_symbol_stop_loss_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     single_symbol_stop_loss_pct: Mapped[float] = mapped_column(Float, default=10.0, server_default="10")
 
     # Slippage protection
