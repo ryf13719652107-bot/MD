@@ -51,6 +51,8 @@ export default function DashboardPage() {
   ];
 
   const fmtPnl = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} USDT`;
+  const fmtSideUpnl = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}U`;
+  const sideUpnlClass = (v: number) => (v >= 0 ? 'text-green-400' : 'text-red-400');
 
   return (
     <div className="space-y-4">
@@ -74,20 +76,33 @@ export default function DashboardPage() {
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <h3 className="text-sm font-semibold text-gray-300 mb-3">
-                当前持仓
-                {totalUsdt > 0 && (
-                  <span className="ml-3 text-xs font-normal">
-                    <span className="text-green-400">多 {longPct.toFixed(0)}%</span>
-                    <span className="text-gray-600 mx-1">|</span>
-                    <span className="text-red-400">空 {shortPct.toFixed(0)}%</span>
-                    <span className="ml-2 w-24 h-2 bg-gray-700 rounded-full inline-flex overflow-hidden align-middle">
-                      <span className="h-full bg-green-500" style={{ width: `${longPct}%` }} />
-                      <span className="h-full bg-red-500" style={{ width: `${shortPct}%` }} />
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-3">
+                <h3 className="text-sm font-semibold text-gray-300 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  当前持仓
+                  {totalUsdt > 0 && (
+                    <span className="text-xs font-normal">
+                      <span className="text-green-400">多 {longPct.toFixed(0)}%</span>
+                      <span className="text-gray-600 mx-1">|</span>
+                      <span className="text-red-400">空 {shortPct.toFixed(0)}%</span>
+                      <span className="ml-2 w-24 h-2 bg-gray-700 rounded-full inline-flex overflow-hidden align-middle">
+                        <span className="h-full bg-green-500" style={{ width: `${longPct}%` }} />
+                        <span className="h-full bg-red-500" style={{ width: `${shortPct}%` }} />
+                      </span>
                     </span>
-                  </span>
+                  )}
+                </h3>
+                {positions.length > 0 && (
+                  <div className="text-xs font-mono shrink-0">
+                    <span className={sideUpnlClass(data.unrealized_pnl_long)}>
+                      多浮 {fmtSideUpnl(data.unrealized_pnl_long)}
+                    </span>
+                    <span className="text-gray-600 mx-1">|</span>
+                    <span className={sideUpnlClass(data.unrealized_pnl_short)}>
+                      空浮 {fmtSideUpnl(data.unrealized_pnl_short)}
+                    </span>
+                  </div>
                 )}
-              </h3>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
