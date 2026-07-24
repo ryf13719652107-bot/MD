@@ -1,6 +1,7 @@
 """Per-symbol position processing: signal, open, manage, close, martingale."""
 import asyncio
 import logging
+import math
 from datetime import datetime
 from typing import Optional, Any
 from sqlalchemy import select, func
@@ -59,7 +60,7 @@ def _single_symbol_stop_loss_trigger(
     if symbol_floating_loss <= 0:
         return False
     if wallet_balance <= 0:
-        return True
+        return False
     pct = max(0.0, float(threshold_pct or 0))
     return symbol_floating_loss >= wallet_balance * (pct / 100.0)
 
@@ -340,6 +341,8 @@ class PositionManager:
 
     def _passes_new_entry_filters(self, symbol: str, strategy: Strategy, ctx: TickContext) -> bool:
         sym_key = _norm_sym(symbol)
+        if not ctx.wallet_balance_valid:
+            return False
         if ctx.allow_new_norms is not None and sym_key not in ctx.allow_new_norms:
             return False
         if sym_key in ctx.exclude_norm:
@@ -539,11 +542,18 @@ class PositionManager:
 
         base_qty = self._compute_base_qty(strategy, total_margin, current_price)
         if base_qty is None:
-            strategy_log_service.warning(
-                strategy_id, f"{symbol} 无法管理 — 余额为0(当前{total_margin:.1f})"
-            )
-            await session.flush()
-            return
+            if open_positions:
+                # Balance-dependent sizing is unavailable, but existing positions
+                # must still receive TP/SL/close management. Martingale is blocked
+                # below until a valid wallet balance is available again.
+                layer_zero = min(open_positions, key=lambda p: p.layer)
+                base_qty = float(layer_zero.quantity or 0)
+            else:
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 无法管理 — 余额为0(当前{total_margin:.1f})"
+                )
+                await session.flush()
+                return
 
         if not auth_binance:
             await session.flush()
@@ -788,7 +798,12 @@ class PositionManager:
             (await session.execute(self._open_positions_stmt(strategy_id, sym_key))).scalars().all()
         )
         if ctx is None:
-            ctx = await self._build_legacy_tick_context(strategy, public_binance, auth_binance)
+            ctx = await self._build_legacy_tick_context(
+                strategy,
+                public_binance,
+                auth_binance,
+                wallet_balance_valid=math.isfinite(total_margin) and total_margin > 0,
+            )
 
         if open_positions:
             await self.manage_symbol(
@@ -819,6 +834,8 @@ class PositionManager:
         strategy: Strategy,
         public_binance: BinanceService,
         auth_binance: Optional[BinanceService],
+        *,
+        wallet_balance_valid: bool = False,
     ) -> TickContext:
         from ..services.strategy_flags import (
             exclude_delisting_enabled,
@@ -879,6 +896,7 @@ class PositionManager:
             funding_filter_enabled=funding_filter_enabled,
             exchange_legs=exchange_legs,
             raw_exchange_positions=raw_positions,
+            wallet_balance_valid=wallet_balance_valid,
         )
 
     async def _open_from_candidate(
@@ -1020,10 +1038,14 @@ class PositionManager:
         symbol_floating_loss = max(0.0, -symbol_unrealized_pnl)
         wallet_balance = float(total_margin)
         threshold_pct = float(getattr(strategy, "single_symbol_stop_loss_pct", 10) or 10)
-        if getattr(strategy, "single_symbol_stop_loss_enabled", False) and _single_symbol_stop_loss_trigger(
-            wallet_balance,
-            symbol_floating_loss,
-            threshold_pct,
+        if (
+            getattr(strategy, "single_symbol_stop_loss_enabled", False)
+            and (ctx is None or ctx.wallet_balance_valid)
+            and _single_symbol_stop_loss_trigger(
+                wallet_balance,
+                symbol_floating_loss,
+                threshold_pct,
+            )
         ):
             logger.warning(
                 "Strategy %d: single-symbol SL triggered %s %s loss=%.4f wallet=%.4f threshold=%.4f pct=%.4f upnl_source=%s",
@@ -1080,6 +1102,13 @@ class PositionManager:
         last_entry = max(open_positions, key=lambda p: p.layer).entry_price
         result = eng.should_add_position(current_layer, last_entry, current_price, pos_side)
         if result.should_add:
+            if ctx is not None and not ctx.wallet_balance_valid:
+                strategy_log_service.warning(
+                    strategy_id,
+                    f"{symbol} 余额数据无效，已跳过本次马丁加仓",
+                )
+                await session.flush()
+                return
             await self._martingale_add(session, strategy, symbol, auth_binance, open_positions, eng, result, avg_entry, total_qty, pos_side, current_price, klines, public_binance)
             return
 

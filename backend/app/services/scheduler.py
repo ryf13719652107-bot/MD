@@ -2,6 +2,7 @@
 import asyncio
 import time
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy import select
@@ -33,7 +34,12 @@ from .encryption import decrypt
 from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
 from .sync_service import PositionSyncService
-from .position_manager import PositionManager, _norm_sym
+from .position_manager import (
+    PositionManager,
+    RECONCILE_CREATED,
+    RECONCILE_DB_ERROR,
+    _norm_sym,
+)
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem, account_sync_lock
 from .backup_service import backup_trade
@@ -74,6 +80,46 @@ def _merge_pool_and_open_symbols(pool_symbols: list[str], open_symbols: list[str
         seen.add(k)
         out.append(s)
     return out
+
+
+def _exchange_symbols_for_direction(raw_positions: list, direction: str) -> list[str]:
+    """Return active exchange symbols matching this strategy's direction."""
+    direction_key = (direction or "").lower()
+    seen: set[str] = set()
+    out: list[str] = []
+    for ep in raw_positions or []:
+        try:
+            contracts = float(ep.get("contracts", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        side = (ep.get("side") or "").lower()
+        symbol = ep.get("symbol") or ""
+        symbol_key = _norm_sym(symbol)
+        if contracts <= 0 or side != direction_key or not symbol_key or symbol_key in seen:
+            continue
+        seen.add(symbol_key)
+        out.append(symbol)
+    return out
+
+
+def _strategy_can_recover_symbol(
+    strategy: Strategy,
+    same_direction_strategies: list[Strategy],
+    symbol: str,
+) -> bool:
+    """Resolve orphan ownership without letting same-direction strategies race."""
+    symbol_key = _norm_sym(symbol)
+    fixed_owners = [
+        peer
+        for peer in same_direction_strategies
+        if not peer.use_coin_pool
+        and _norm_sym(peer.symbol or "") == symbol_key
+    ]
+    if fixed_owners:
+        return len(fixed_owners) == 1 and fixed_owners[0].id == strategy.id
+
+    pool_owners = [peer for peer in same_direction_strategies if peer.use_coin_pool]
+    return len(pool_owners) == 1 and pool_owners[0].id == strategy.id
 
 
 def _next_candle_close(timeframe: str) -> datetime:
@@ -290,6 +336,7 @@ class StrategyScheduler:
 
             # Check margin threshold
             total_margin = 0.0
+            wallet_balance_valid = False
             leverage = float(strategy.leverage) if strategy.leverage else 10.0
             if auth_binance:
                 try:
@@ -297,6 +344,9 @@ class StrategyScheduler:
                         raise _prefetch_balance
                     balance = _prefetch_balance
                     total_margin = extract_usdt_wallet_balance(balance)
+                    if not math.isfinite(total_margin) or total_margin <= 0:
+                        raise ValueError("USDT wallet balance missing or non-positive")
+                    wallet_balance_valid = True
                     logger.info("Strategy %d: balance fetched — total=%.2f USDT", strategy_id, total_margin)
                     if strategy.margin_threshold > 0 and total_margin < strategy.margin_threshold:
                         strategy.status = "stopped"
@@ -389,7 +439,10 @@ class StrategyScheduler:
                         return
                 except Exception as e:
                     logger.error("Strategy %d: balance check failed: %s", strategy_id, e)
-                    strategy_log_service.error(strategy_id, f"余额获取失败 — {e}")
+                    strategy_log_service.error(
+                        strategy_id,
+                        f"余额获取失败，已跳过余额类风控并禁止新增仓位 — {e}",
+                    )
 
             # Get symbols: coin pool or fixed (for new entries), ∪ DB open positions (manage always)
             pool_symbols: list[str] = []
@@ -405,6 +458,110 @@ class StrategyScheduler:
             )
             open_sym_rows = (await session.execute(stmt_open_syms)).scalars().all()
             open_syms = [s for s in open_sym_rows if s]
+
+            prefetched_direction_symbols = (
+                []
+                if isinstance(_prefetch_positions, Exception)
+                else _exchange_symbols_for_direction(
+                    _prefetch_positions or [],
+                    strategy.direction,
+                )
+            )
+            open_norms = {_norm_sym(symbol) for symbol in open_syms}
+            orphan_prefetched = [
+                symbol
+                for symbol in prefetched_direction_symbols
+                if _norm_sym(symbol) not in open_norms
+            ]
+
+            if orphan_prefetched and auth_binance:
+                async with account_sync_lock(sync_account_id):
+                    peer_rows = (
+                        await session.execute(
+                            select(Strategy).where(
+                                Strategy.account_id == strategy.account_id,
+                                Strategy.status == "running",
+                                Strategy.direction == strategy.direction,
+                            )
+                        )
+                    ).scalars().all()
+                    same_direction_strategies = list(peer_rows)
+                    try:
+                        fresh_positions = await auth_binance.fetch_positions()
+                    except Exception as e:
+                        logger.error(
+                            "Strategy %d: fresh position fetch for orphan recovery failed: %s",
+                            strategy_id,
+                            e,
+                        )
+                    else:
+                        _prefetch_positions = fresh_positions
+                        fresh_direction_symbols = _exchange_symbols_for_direction(
+                            fresh_positions,
+                            strategy.direction,
+                        )
+                        fresh_recoverable = [
+                            symbol
+                            for symbol in fresh_direction_symbols
+                            if _norm_sym(symbol) not in open_norms
+                            and _strategy_can_recover_symbol(
+                                strategy,
+                                same_direction_strategies,
+                                symbol,
+                            )
+                        ]
+                        for symbol in fresh_recoverable:
+                            symbol_key = _norm_sym(symbol)
+                            exchange_row = next(
+                                (
+                                    ep
+                                    for ep in fresh_positions
+                                    if _norm_sym(ep.get("symbol") or "") == symbol_key
+                                    and (ep.get("side") or "").lower()
+                                    == (strategy.direction or "").lower()
+                                ),
+                                {},
+                            )
+                            try:
+                                current_price = float(
+                                    exchange_row.get("markPrice")
+                                    or exchange_row.get("mark_price")
+                                    or exchange_row.get("entryPrice")
+                                    or exchange_row.get("entry_price")
+                                    or 0
+                                )
+                            except (TypeError, ValueError):
+                                current_price = 0.0
+                            try:
+                                outcome = await self._position_mgr._reconcile_orphan_from_exchange(
+                                    session,
+                                    strategy,
+                                    symbol,
+                                    auth_binance,
+                                    current_price,
+                                    raw_exchange_positions=fresh_positions,
+                                )
+                                if outcome == RECONCILE_CREATED:
+                                    await session.commit()
+                                    open_norms.add(symbol_key)
+                                elif outcome == RECONCILE_DB_ERROR:
+                                    await session.rollback()
+                                    await session.refresh(strategy)
+                            except Exception as e:
+                                logger.error(
+                                    "Strategy %d: orphan recovery for %s failed: %s",
+                                    strategy_id,
+                                    symbol,
+                                    e,
+                                )
+                                await session.rollback()
+                                await session.refresh(strategy)
+
+                        open_sym_rows = (
+                            await session.execute(stmt_open_syms)
+                        ).scalars().all()
+                        open_syms = [s for s in open_sym_rows if s]
+
             bl_rows = (
                 await session.execute(
                     select(StrategySymbolBlacklist.symbol_norm).where(
@@ -416,9 +573,9 @@ class StrategyScheduler:
 
             if mid_candle:
                 # Mid-candle: manage open legs only — no pool scan, no new entries.
-                if not open_syms:
-                    return
                 symbols = open_syms
+                if not symbols:
+                    return
             else:
                 if strategy.use_coin_pool:
                     try:
@@ -543,6 +700,7 @@ class StrategyScheduler:
                 exchange_legs=exchange_legs,
                 raw_exchange_positions=raw_exchange_positions,
                 allow_new_norms=pool_entry_norms,
+                wallet_balance_valid=wallet_balance_valid,
             )
 
             # Preload open positions per symbol (one query)

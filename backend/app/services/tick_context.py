@@ -25,6 +25,7 @@ class TickContext:
     exchange_legs: dict[tuple[str, str], float] = field(default_factory=dict)
     raw_exchange_positions: list[dict[str, Any]] = field(default_factory=list)
     allow_new_norms: frozenset[str] | None = None
+    wallet_balance_valid: bool = False
 
 
 @dataclass

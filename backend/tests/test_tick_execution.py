@@ -70,6 +70,7 @@ def test_passes_new_entry_filters_uses_tick_context():
         funding_rates={"BTCUSDT": 0.5},
         funding_filter_enabled=True,
         allow_new_norms=frozenset({"BTCUSDT"}),
+        wallet_balance_valid=True,
     )
 
     with patch(
@@ -82,6 +83,51 @@ def test_passes_new_entry_filters_uses_tick_context():
         assert pm._passes_new_entry_filters("BTCUSDT", strategy, ctx) is True
         assert pm._passes_new_entry_filters("TRUMPUSDT", strategy, ctx) is False
         assert pm._passes_new_entry_filters("ETHUSDT", strategy, ctx) is False
+
+
+def test_invalid_wallet_balance_blocks_new_entry():
+    pm = PositionManager()
+    strategy = MagicMock()
+    strategy.direction = "long"
+    ctx = TickContext()
+
+    assert ctx.wallet_balance_valid is False
+    assert pm._passes_new_entry_filters("BTCUSDT", strategy, ctx) is False
+
+
+def test_exchange_symbols_for_direction_only_returns_active_matching_legs():
+    from app.services.scheduler import _exchange_symbols_for_direction
+
+    raw_positions = [
+        {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.5},
+        {"symbol": "BTCUSDT", "side": "long", "contracts": 0.5},
+        {"symbol": "ETHUSDT", "side": "short", "contracts": 1},
+        {"symbol": "SOLUSDT", "side": "long", "contracts": 0},
+        {"symbol": "BADUSDT", "side": "long", "contracts": "invalid"},
+    ]
+
+    assert _exchange_symbols_for_direction(raw_positions, "long") == [
+        "BTC/USDT:USDT"
+    ]
+
+
+def test_orphan_recovery_resolves_same_direction_strategy_ownership():
+    from app.services.scheduler import _strategy_can_recover_symbol
+
+    fixed_btc = MagicMock(id=1, use_coin_pool=False, symbol="BTCUSDT")
+    pool_a = MagicMock(id=2, use_coin_pool=True, symbol=None)
+
+    peers = [fixed_btc, pool_a]
+    assert _strategy_can_recover_symbol(fixed_btc, peers, "BTCUSDT") is True
+    assert _strategy_can_recover_symbol(pool_a, peers, "BTCUSDT") is False
+    assert _strategy_can_recover_symbol(pool_a, peers, "SOLUSDT") is True
+
+    pool_b = MagicMock(id=3, use_coin_pool=True, symbol=None)
+    assert _strategy_can_recover_symbol(
+        pool_a,
+        [fixed_btc, pool_a, pool_b],
+        "SOLUSDT",
+    ) is False
 
 
 @pytest.mark.asyncio

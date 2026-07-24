@@ -17,8 +17,25 @@ def test_single_symbol_stop_loss_not_triggered_below_10pct():
     assert not _single_symbol_stop_loss_trigger(wallet_balance=1000, symbol_floating_loss=99.99, threshold_pct=10)
 
 
-def test_single_symbol_stop_loss_triggers_when_wallet_non_positive():
-    assert _single_symbol_stop_loss_trigger(wallet_balance=0, symbol_floating_loss=1, threshold_pct=10)
+def test_single_symbol_stop_loss_skips_when_wallet_non_positive():
+    assert not _single_symbol_stop_loss_trigger(
+        wallet_balance=0,
+        symbol_floating_loss=1,
+        threshold_pct=10,
+    )
+
+
+def test_single_symbol_stop_loss_600_wallet_boundary():
+    assert not _single_symbol_stop_loss_trigger(
+        wallet_balance=600,
+        symbol_floating_loss=59.99,
+        threshold_pct=10,
+    )
+    assert _single_symbol_stop_loss_trigger(
+        wallet_balance=600,
+        symbol_floating_loss=60,
+        threshold_pct=10,
+    )
 
 
 def test_extract_usdt_wallet_balance_prefers_futures_wallet_fields():
