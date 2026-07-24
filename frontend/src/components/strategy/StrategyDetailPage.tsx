@@ -122,6 +122,10 @@ export default function StrategyDetailPage() {
     if (!id || !strategy) return;
     const symbol = blacklistInput.trim().toUpperCase();
     if (!symbol) return;
+    if (!/^[A-Z0-9]{2,30}USDT$/.test(symbol)) {
+      window.alert('请输入完整的币安 USDT-M 合约代码，例如 BTCUSDT 或 1000PEPEUSDT');
+      return;
+    }
     try {
       setBlacklistBusy(true);
       const updated = await api.addStrategyBlacklistSymbol(Number(id), symbol);
@@ -275,12 +279,12 @@ export default function StrategyDetailPage() {
             </div>
           </div>
           <div className="col-span-2 md:col-span-4">
-            <span className={labelClass}>黑名单（单币止损后禁开新仓）</span>
+            <span className={labelClass}>黑名单（禁止首次开仓）</span>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <input
                 value={blacklistInput}
                 onChange={(e) => setBlacklistInput(e.target.value)}
-                placeholder="输入币种，如 BTCUSDT"
+                placeholder="完整合约代码，如 BTCUSDT"
                 className="h-8 px-2 rounded border border-gray-700 bg-gray-800 text-xs text-gray-200"
               />
               <button
@@ -291,6 +295,9 @@ export default function StrategyDetailPage() {
               >
                 手动加入
               </button>
+            </div>
+            <div className="mt-1 text-xs text-gray-500">
+              请按币安实际合约填写（如 1000PEPEUSDT）；仅禁止首次开仓，不影响已有仓位的马丁加仓、止盈、止损和平仓。
             </div>
             <div className={`${valClass} mt-1 flex flex-wrap gap-2`}>
               {(strategy.blacklisted_symbols?.length ?? 0) > 0 ? (

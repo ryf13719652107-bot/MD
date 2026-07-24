@@ -567,6 +567,21 @@ class PositionManager:
         else:
             await session.flush()
 
+    async def _is_blacklisted_now(self, strategy_id: int, symbol: str) -> bool:
+        """Read the blacklist from a fresh session immediately before a first-entry order."""
+        from ..database import async_session
+
+        async with async_session() as db:
+            row = (
+                await db.execute(
+                    select(StrategySymbolBlacklist.id).where(
+                        StrategySymbolBlacklist.strategy_id == strategy_id,
+                        StrategySymbolBlacklist.symbol_norm == _norm_sym(symbol),
+                    )
+                )
+            ).first()
+        return row is not None
+
     async def execute_open_api(
         self,
         candidate: SignalCandidate,
@@ -595,6 +610,31 @@ class PositionManager:
         except Exception as e:
             logger.error("Strategy %d: set leverage for %s failed: %s", strategy_id, symbol, e)
             strategy_log_service.error(strategy_id, f"{symbol} 设置杠杆失败，已取消开仓 — {e}")
+            return None
+
+        try:
+            if await self._is_blacklisted_now(strategy_id, symbol):
+                logger.info(
+                    "Strategy %d: %s was blacklisted before order submission; first entry cancelled",
+                    strategy_id,
+                    symbol,
+                )
+                strategy_log_service.info(
+                    strategy_id,
+                    f"{symbol} 下单前黑名单复检命中，已取消首次开仓",
+                )
+                return None
+        except Exception as e:
+            logger.error(
+                "Strategy %d: blacklist recheck for %s failed; first entry cancelled: %s",
+                strategy_id,
+                symbol,
+                e,
+            )
+            strategy_log_service.error(
+                strategy_id,
+                f"{symbol} 下单前黑名单复检失败，已安全取消首次开仓 — {e}",
+            )
             return None
 
         try:

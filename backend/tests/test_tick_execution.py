@@ -121,11 +121,12 @@ async def test_execute_open_api_calls_market_order_not_evaluate_path():
     strategy.take_profit_limit_order = False
 
     auth = _make_binance_svc()
-    auth.set_symbol_leverage = AsyncMock(return_value=10)
+    auth.set_symbol_leverage = AsyncMock(return_value=(10, True))
     auth.create_market_order = AsyncMock(
         return_value={"id": "1", "average": 100.0, "filled": 0.01}
     )
     auth.create_limit_order = AsyncMock()
+    pm._is_blacklisted_now = AsyncMock(return_value=False)
 
     candidate = SignalCandidate(
         symbol="BTCUSDT",
@@ -140,8 +141,38 @@ async def test_execute_open_api_calls_market_order_not_evaluate_path():
     result = await pm.execute_open_api(candidate, strategy, auth, 10)
 
     assert result is not None
+    pm._is_blacklisted_now.assert_awaited_once_with(1, "BTCUSDT")
     auth.create_market_order.assert_awaited_once()
     auth.create_limit_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_open_api_rechecks_blacklist_before_market_order():
+    pm = PositionManager()
+    pm._is_blacklisted_now = AsyncMock(return_value=True)
+    strategy = MagicMock()
+    strategy.id = 1
+    strategy.leverage = 10
+
+    auth = _make_binance_svc()
+    auth.set_symbol_leverage = AsyncMock(return_value=(10, True))
+    auth.create_market_order = AsyncMock()
+
+    candidate = SignalCandidate(
+        symbol="1000PEPEUSDT",
+        signal=Signal.LONG,
+        klines=[],
+        current_price=0.01,
+        rsi=30.0,
+        signal_label="RSI",
+        base_qty=100.0,
+    )
+
+    result = await pm.execute_open_api(candidate, strategy, auth, 10)
+
+    assert result is None
+    pm._is_blacklisted_now.assert_awaited_once_with(1, "1000PEPEUSDT")
+    auth.create_market_order.assert_not_awaited()
 
 
 @pytest.mark.asyncio

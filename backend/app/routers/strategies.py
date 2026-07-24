@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +25,7 @@ router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
 
 def _panic_symbol_key(sym: str) -> str:
-    return (sym or "").replace("/", "").replace(":USDT", "").upper()
+    return (sym or "").upper().replace("/", "").replace(":USDT", "")
 
 
 async def _load_blacklist_map(db: AsyncSession, strategy_ids: list[int]) -> dict[int, list[str]]:
@@ -60,7 +62,13 @@ async def _to_strategy_response_list(db: AsyncSession, strategies: list[Strategy
 
 
 def _normalize_symbol_input(symbol: str) -> str:
-    return _panic_symbol_key(symbol)
+    normalized = _panic_symbol_key(symbol.strip())
+    if not re.fullmatch(r"[A-Z0-9]{2,30}USDT", normalized):
+        raise HTTPException(
+            status_code=400,
+            detail="请输入完整的币安 USDT-M 合约代码，例如 BTCUSDT 或 1000PEPEUSDT",
+        )
+    return normalized
 
 
 async def _panic_exchange_leg_contracts(binance, symbol: str, side: str) -> float:
@@ -209,7 +217,8 @@ async def remove_blacklist_symbol(
     strategy = await db.get(Strategy, strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    symbol_norm = _normalize_symbol_input(symbol)
+    # Keep malformed legacy rows removable even though new entries are validated.
+    symbol_norm = _panic_symbol_key(symbol)
     rows = (
         await db.execute(
             select(StrategySymbolBlacklist).where(
