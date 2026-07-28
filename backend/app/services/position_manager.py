@@ -12,7 +12,15 @@ from ..models.trade import Trade
 from ..models.strategy_blacklist import StrategySymbolBlacklist
 from ..config import now_beijing
 from .binance_service import BinanceService
-from .strategy_engine import calculate_rsi, generate_signal, Signal, calculate_wavetrend, generate_wt_signal
+from .strategy_engine import (
+    calculate_rsi,
+    generate_signal,
+    Signal,
+    calculate_wavetrend,
+    generate_wt_signal,
+    calculate_supertrend,
+    generate_trend_wt_signal,
+)
 from .martingale_engine import MartingaleEngine
 from .risk_manager import RiskManager
 from .log_service import strategy_log_service
@@ -372,6 +380,98 @@ class PositionManager:
             base_qty = strategy.base_qty_value / current_price
         return base_qty
 
+    @staticmethod
+    def _wt_like_limit(signal_source: str) -> int:
+        return 200 if signal_source in ("wavetrend", "trend_wt") else 100
+
+    async def _load_klines(
+        self,
+        public_binance: BinanceService,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        strategy_id: int,
+    ) -> list | None:
+        klines = await kline_stream_manager.get(
+            public_binance, symbol, timeframe, min_bars=limit
+        )
+        if not klines:
+            try:
+                klines = await public_binance.fetch_klines(symbol, timeframe, limit=limit)
+            except Exception as e:
+                logger.warning(
+                    "Strategy %d: %s %s kline fetch failed: %s",
+                    strategy_id, symbol, timeframe, e,
+                )
+                return None
+        return klines
+
+    async def _supertrend_bullish(
+        self,
+        strategy: Strategy,
+        symbol: str,
+        public_binance: BinanceService,
+        timeframe: str,
+    ) -> bool | None:
+        """Return Supertrend bullish on confirmed bars; None if data insufficient."""
+        atr_period = int(getattr(strategy, "st_atr_period", None) or 10)
+        factor = float(getattr(strategy, "st_factor", None) or 3.0)
+        limit = max(200, atr_period + 100)
+        klines = await self._load_klines(
+            public_binance, symbol, timeframe, limit, strategy.id
+        )
+        if not klines:
+            return None
+        confirmed = _klines_for_confirmed_signal_only(klines, timeframe)
+        st = calculate_supertrend(confirmed, atr_period, factor)
+        if st is None:
+            return None
+        return bool(st["bullish"])
+
+    async def _trend_wt_confirm(
+        self,
+        strategy: Strategy,
+        symbol: str,
+        public_binance: BinanceService,
+        klines_signal: list,
+    ) -> tuple[Signal, dict] | None:
+        """WaveTrend + dual-TF Supertrend filter. Returns (signal, wt) or None.
+
+        None only when WaveTrend itself cannot be computed (same as plain WT).
+        If Supertrend HTF data is missing, returns NEUTRAL so callers can still
+        use strategy-TF klines for price / stop-loss management.
+        """
+        wt = calculate_wavetrend(
+            klines_signal, strategy.wt_channel_length, strategy.wt_average_length
+        )
+        if wt is None:
+            return None
+        tf1 = getattr(strategy, "st_timeframe_1", None) or "15m"
+        tf2 = getattr(strategy, "st_timeframe_2", None) or "1h"
+        st1 = await self._supertrend_bullish(strategy, symbol, public_binance, tf1)
+        st2 = await self._supertrend_bullish(strategy, symbol, public_binance, tf2)
+        if st1 is None or st2 is None:
+            # ST 数据不足：不开新仓/不加仓，但不阻断 manage 用策略周期 K 线算价
+            wt = {
+                **wt,
+                "st1_bull": False,
+                "st2_bull": False,
+                "st_tf1": tf1,
+                "st_tf2": tf2,
+                "st_unavailable": True,
+            }
+            return Signal.NEUTRAL, wt
+        signal = generate_trend_wt_signal(
+            wt,
+            strategy.direction,
+            st1,
+            st2,
+            strategy.wt_os_level,
+            strategy.wt_ob_level,
+        )
+        wt = {**wt, "st1_bull": st1, "st2_bull": st2, "st_tf1": tf1, "st_tf2": tf2}
+        return signal, wt
+
     async def _fetch_klines_and_signal(
         self,
         strategy: Strategy,
@@ -379,21 +479,12 @@ class PositionManager:
         public_binance: BinanceService,
     ) -> tuple[list, float, str, Signal, float] | None:
         strategy_id = strategy.id
-        limit = 200 if strategy.signal_source == "wavetrend" else 100
-        klines = await kline_stream_manager.get(
-            public_binance, symbol, strategy.timeframe, min_bars=limit
+        limit = self._wt_like_limit(strategy.signal_source)
+        klines = await self._load_klines(
+            public_binance, symbol, strategy.timeframe, limit, strategy_id
         )
         if not klines:
-            try:
-                klines = await public_binance.fetch_klines(
-                    symbol, strategy.timeframe, limit=limit
-                )
-            except Exception as e:
-                logger.warning(
-                    "Strategy %d: %s kline fetch failed: %s",
-                    strategy_id, symbol, e,
-                )
-                return None
+            return None
 
         klines_signal = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
         rsi = 0.0
@@ -427,6 +518,37 @@ class PositionManager:
                     strategy_id,
                     f"{symbol} WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f} 信号={signal.value}",
                 )
+        elif strategy.signal_source == "trend_wt":
+            result = await self._trend_wt_confirm(
+                strategy, symbol, public_binance, klines_signal
+            )
+            if result is None:
+                return None
+            signal, wt = result
+            strategy.last_rsi = round(wt["wt1"], 2)
+            strategy.last_signal = signal.value
+            strategy.last_signal_at = now_beijing()
+            rsi = wt["wt1"]
+            signal_label = "趋势WT"
+            st_tag = (
+                f"ST({wt['st_tf1']}={'多' if wt['st1_bull'] else '空'},"
+                f"{wt['st_tf2']}={'多' if wt['st2_bull'] else '空'})"
+            )
+            if signal != Signal.NEUTRAL:
+                strategy_log_service.info(
+                    strategy_id,
+                    f"{symbol} 趋势WT WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f} {st_tag} 信号={signal.value}",
+                )
+            else:
+                raw = generate_wt_signal(
+                    wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level
+                )
+                if raw != Signal.NEUTRAL:
+                    reason = "ST数据不足" if wt.get("st_unavailable") else f"被超级趋势过滤 {st_tag}"
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{symbol} 趋势WT 原始信号={raw.value} {reason}",
+                    )
         else:
             rsi = calculate_rsi(klines_signal, strategy.rsi_period)
             if rsi is None:
@@ -1364,6 +1486,45 @@ class PositionManager:
                         strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓跳过 — WT1={wt['wt1']:.2f} 信号已消失")
                         return
                     strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓WT确认 — WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f}")
+            elif strategy.signal_source == "trend_wt":
+                # 默认只用 WT 确认加仓；开启 martingale_st_filter_enabled 才叠加超级趋势
+                use_st = bool(getattr(strategy, "martingale_st_filter_enabled", False))
+                if use_st:
+                    tw_result = await self._trend_wt_confirm(
+                        strategy, symbol, public_binance, klines_confirm
+                    )
+                    if tw_result is not None:
+                        confirm, wt = tw_result
+                        if confirm == Signal.NEUTRAL:
+                            strategy_log_service.info(
+                                strategy_id,
+                                f"{symbol} 马丁加仓跳过 — 趋势WT WT1={wt['wt1']:.2f} 信号已消失/被ST过滤",
+                            )
+                            return
+                        strategy_log_service.info(
+                            strategy_id,
+                            f"{symbol} 马丁加仓趋势WT确认 — WT1={wt['wt1']:.2f} "
+                            f"ST({wt['st_tf1']}={'多' if wt['st1_bull'] else '空'},"
+                            f"{wt['st_tf2']}={'多' if wt['st2_bull'] else '空'})",
+                        )
+                else:
+                    wt = calculate_wavetrend(
+                        klines_confirm, strategy.wt_channel_length, strategy.wt_average_length
+                    )
+                    if wt is not None:
+                        confirm = generate_wt_signal(
+                            wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level
+                        )
+                        if confirm == Signal.NEUTRAL:
+                            strategy_log_service.info(
+                                strategy_id,
+                                f"{symbol} 马丁加仓跳过 — WT1={wt['wt1']:.2f} 信号已消失",
+                            )
+                            return
+                        strategy_log_service.info(
+                            strategy_id,
+                            f"{symbol} 马丁加仓WT确认 — WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f}",
+                        )
             else:
                 rsi_val = calculate_rsi(klines_confirm, strategy.rsi_period)
                 if rsi_val is not None:

@@ -186,3 +186,140 @@ def generate_wt_signal(wt: dict, direction: str, os_level: float = -60.0, ob_lev
         if wt["cross_below"] and wt["wt1"] > ob_level:
             return Signal.SHORT
     return Signal.NEUTRAL
+
+
+# ── Supertrend (Pine ta.supertrend) ────────────────────────
+
+def true_range(highs: list[float], lows: list[float], closes: list[float]) -> list[float]:
+    """True Range series; first bar uses high-low only."""
+    if not highs:
+        return []
+    tr = [highs[0] - lows[0]]
+    for i in range(1, len(highs)):
+        tr.append(
+            max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+        )
+    return tr
+
+
+def rma(data: list[float], period: int) -> list[float]:
+    """Wilder's RMA (same as Pine ta.rma / ta.atr smoothing)."""
+    if len(data) < period:
+        return []
+    alpha = 1.0 / period
+    result = [sum(data[:period]) / period]
+    for v in data[period:]:
+        result.append(alpha * v + (1.0 - alpha) * result[-1])
+    return result
+
+
+def calculate_atr(klines: list, period: int = 14) -> Optional[list[float]]:
+    """ATR via Wilder RMA; returned series aligns to the end of klines."""
+    if len(klines) < period + 1:
+        return None
+    highs = [float(c[2]) for c in klines]
+    lows = [float(c[3]) for c in klines]
+    closes = [float(c[4]) for c in klines]
+    tr = true_range(highs, lows, closes)
+    atr = rma(tr, period)
+    return atr if atr else None
+
+
+def calculate_supertrend(
+    klines: list,
+    atr_period: int = 10,
+    factor: float = 3.0,
+) -> Optional[dict]:
+    """Pine Script ta.supertrend(factor, atrPeriod) — last bar only.
+
+    direction: -1 = bullish (uptrend), 1 = bearish (downtrend)
+    Returns: {direction, value, bullish}
+    """
+    if len(klines) < atr_period + 2:
+        return None
+
+    highs = [float(c[2]) for c in klines]
+    lows = [float(c[3]) for c in klines]
+    closes = [float(c[4]) for c in klines]
+    n = len(closes)
+
+    atr_vals = calculate_atr(klines, atr_period)
+    if not atr_vals:
+        return None
+    # ATR series starts at index (atr_period - 1) of TR/klines
+    atr_offset = n - len(atr_vals)
+
+    direction = 1
+    super_trend = 0.0
+    prev_upper = None
+    prev_lower = None
+    prev_st = None
+
+    for i in range(atr_offset, n):
+        atr_i = atr_vals[i - atr_offset]
+        src = (highs[i] + lows[i]) / 2.0
+        basic_upper = src + factor * atr_i
+        basic_lower = src - factor * atr_i
+
+        if prev_lower is None or prev_upper is None:
+            # First ATR bar: Pine sets direction := 1 when na(atr[1])
+            upper = basic_upper
+            lower = basic_lower
+            direction = 1
+            super_trend = upper
+        else:
+            # Trail bands (Pine nz + conditional)
+            close_prev = closes[i - 1]
+            lower = (
+                basic_lower
+                if (basic_lower > prev_lower or close_prev < prev_lower)
+                else prev_lower
+            )
+            upper = (
+                basic_upper
+                if (basic_upper < prev_upper or close_prev > prev_upper)
+                else prev_upper
+            )
+
+            if prev_st == prev_upper:
+                direction = -1 if closes[i] > upper else 1
+            else:
+                direction = 1 if closes[i] < lower else -1
+            super_trend = lower if direction == -1 else upper
+
+        prev_upper = upper
+        prev_lower = lower
+        prev_st = super_trend
+
+    return {
+        "direction": direction,
+        "value": super_trend,
+        "bullish": direction < 0,
+    }
+
+
+def generate_trend_wt_signal(
+    wt: dict,
+    direction: str,
+    st_bull_tf1: bool,
+    st_bull_tf2: bool,
+    os_level: float = -60.0,
+    ob_level: float = 60.0,
+) -> Signal:
+    """Trend WT: WaveTrend entry + both Supertrend TFs agree with direction.
+
+    long  = WT long  AND ST1 bullish AND ST2 bullish
+    short = WT short AND ST1 bearish AND ST2 bearish
+    """
+    base = generate_wt_signal(wt, direction, os_level, ob_level)
+    if base == Signal.LONG:
+        if st_bull_tf1 and st_bull_tf2:
+            return Signal.LONG
+    elif base == Signal.SHORT:
+        if (not st_bull_tf1) and (not st_bull_tf2):
+            return Signal.SHORT
+    return Signal.NEUTRAL

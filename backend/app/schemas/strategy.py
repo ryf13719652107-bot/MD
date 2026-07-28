@@ -8,7 +8,7 @@ class StrategyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: Literal["long", "short"]
     symbol: Optional[str] = None  # None = use coin pool
-    signal_source: Literal["rsi", "wavetrend", "martingale_base"] = "wavetrend"
+    signal_source: Literal["rsi", "wavetrend", "trend_wt", "martingale_base"] = "wavetrend"
     rsi_period: int = Field(default=14, ge=5, le=50)
     timeframe: Literal["1m", "5m", "15m", "1h"] = "1m"
     margin_threshold: float = Field(default=0.0, ge=0)
@@ -16,6 +16,10 @@ class StrategyCreate(BaseModel):
     wt_average_length: int = Field(default=21, ge=2, le=100)
     wt_ob_level: float = Field(default=60.0, ge=0, le=100)
     wt_os_level: float = Field(default=-60.0, ge=-100, le=0)
+    st_atr_period: int = Field(default=10, ge=1, le=100)
+    st_factor: float = Field(default=3.0, ge=0.1, le=20.0)
+    st_timeframe_1: Literal["5m", "15m", "1h", "4h"] = "15m"
+    st_timeframe_2: Literal["5m", "15m", "1h", "4h"] = "1h"
     # Entry
     base_qty_type: Literal["margin_pct", "usdt"] = "margin_pct"
     base_qty_value: float = Field(default=6.0, gt=0)
@@ -26,6 +30,7 @@ class StrategyCreate(BaseModel):
     martingale_mult: float = Field(default=1.5, ge=1.0, le=10.0)
     max_layers: int = Field(default=8, ge=1, le=200)
     martingale_rsi_enabled: bool = True
+    martingale_st_filter_enabled: bool = False
     # Take profit
     take_profit_pct: float = Field(default=2.0, gt=0, le=50)
     take_profit_limit_order: bool = True
@@ -76,7 +81,7 @@ class StrategyUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     direction: Optional[Literal["long", "short"]] = None
     symbol: Optional[str] = None
-    signal_source: Optional[Literal["rsi", "wavetrend", "martingale_base"]] = None
+    signal_source: Optional[Literal["rsi", "wavetrend", "trend_wt", "martingale_base"]] = None
     rsi_period: Optional[int] = Field(default=None, ge=5, le=50)
     timeframe: Optional[Literal["1m", "5m", "15m", "1h"]] = None
     margin_threshold: Optional[float] = Field(default=None, ge=0)
@@ -84,6 +89,10 @@ class StrategyUpdate(BaseModel):
     wt_average_length: Optional[int] = Field(default=None, ge=2, le=100)
     wt_ob_level: Optional[float] = Field(default=None, ge=0, le=100)
     wt_os_level: Optional[float] = Field(default=None, ge=-100, le=0)
+    st_atr_period: Optional[int] = Field(default=None, ge=1, le=100)
+    st_factor: Optional[float] = Field(default=None, ge=0.1, le=20.0)
+    st_timeframe_1: Optional[Literal["5m", "15m", "1h", "4h"]] = None
+    st_timeframe_2: Optional[Literal["5m", "15m", "1h", "4h"]] = None
     base_qty_type: Optional[Literal["margin_pct", "usdt"]] = None
     base_qty_value: Optional[float] = Field(default=None, gt=0)
     rsi_entry_threshold: Optional[float] = Field(default=None, ge=0, le=100)
@@ -92,6 +101,7 @@ class StrategyUpdate(BaseModel):
     martingale_mult: Optional[float] = Field(default=None, ge=1.0, le=10.0)
     max_layers: Optional[int] = Field(default=None, ge=1, le=200)
     martingale_rsi_enabled: Optional[bool] = None
+    martingale_st_filter_enabled: Optional[bool] = None
     take_profit_pct: Optional[float] = Field(default=None, gt=0, le=50)
     take_profit_limit_order: Optional[bool] = None
     stop_loss_enabled: Optional[bool] = None
@@ -128,6 +138,10 @@ class StrategyResponse(BaseModel):
     wt_average_length: int
     wt_ob_level: float
     wt_os_level: float
+    st_atr_period: int = 10
+    st_factor: float = 3.0
+    st_timeframe_1: str = "15m"
+    st_timeframe_2: str = "1h"
     margin_threshold: float
     base_qty_type: str
     base_qty_value: float
@@ -137,6 +151,7 @@ class StrategyResponse(BaseModel):
     martingale_mult: float
     max_layers: int
     martingale_rsi_enabled: bool
+    martingale_st_filter_enabled: bool = False
     take_profit_pct: float
     take_profit_limit_order: bool
     stop_loss_enabled: bool

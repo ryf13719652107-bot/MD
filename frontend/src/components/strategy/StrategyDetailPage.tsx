@@ -196,7 +196,13 @@ export default function StrategyDetailPage() {
           <div>
             <span className={labelClass}>信号源</span>
             <div className={valClass}>
-              {strategy.signal_source === 'wavetrend' ? `WaveTrend (通道${strategy.wt_channel_length} 均线${strategy.wt_average_length})` : strategy.signal_source === 'martingale_base' ? '基础马丁 (每根K线开盘开首单)' : `RSI (周期${strategy.rsi_period} ${strategy.direction === 'long' ? '<' : '>'}${strategy.rsi_entry_threshold})`}
+              {strategy.signal_source === 'wavetrend'
+                ? `WaveTrend (通道${strategy.wt_channel_length} 均线${strategy.wt_average_length})`
+                : strategy.signal_source === 'trend_wt'
+                  ? `趋势WT (通道${strategy.wt_channel_length} 均线${strategy.wt_average_length} · ST ${strategy.st_timeframe_1 ?? '15m'}+${strategy.st_timeframe_2 ?? '1h'} ATR${strategy.st_atr_period ?? 10}×${strategy.st_factor ?? 3})`
+                  : strategy.signal_source === 'martingale_base'
+                    ? '基础马丁 (每根K线开盘开首单)'
+                    : `RSI (周期${strategy.rsi_period} ${strategy.direction === 'long' ? '<' : '>'}${strategy.rsi_entry_threshold})`}
             </div>
           </div>
           <div>

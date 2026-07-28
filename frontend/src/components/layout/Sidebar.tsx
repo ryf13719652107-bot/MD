@@ -73,7 +73,7 @@ export default function Sidebar() {
             退出登录
           </button>
         )}
-        <div className="text-xs text-gray-600 text-center">v0.1.0</div>
+        <div className="text-xs text-gray-600 text-center">v1.0.0</div>
       </div>
     </aside>
   );

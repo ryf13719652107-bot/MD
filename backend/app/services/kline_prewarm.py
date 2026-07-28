@@ -21,7 +21,26 @@ _KLINE_PREWARM_CONCURRENCY = 8
 
 
 def _signal_kline_limit(strategy: Strategy) -> int:
-    return 200 if strategy.signal_source == "wavetrend" else 100
+    return 200 if strategy.signal_source in ("wavetrend", "trend_wt") else 100
+
+
+def _strategy_kline_timeframes(strategy: Strategy) -> list[tuple[str, int]]:
+    """(timeframe, min_bars) pairs to prewarm for a strategy."""
+    pairs = [(strategy.timeframe, _signal_kline_limit(strategy))]
+    if strategy.signal_source == "trend_wt":
+        atr_period = int(getattr(strategy, "st_atr_period", None) or 10)
+        st_bars = max(200, atr_period + 100)
+        for tf in (
+            getattr(strategy, "st_timeframe_1", None) or "15m",
+            getattr(strategy, "st_timeframe_2", None) or "1h",
+        ):
+            if tf != strategy.timeframe:
+                pairs.append((tf, st_bars))
+    # dedupe by timeframe (keep first / larger bars)
+    seen: dict[str, int] = {}
+    for tf, bars in pairs:
+        seen[tf] = max(seen.get(tf, 0), bars)
+    return list(seen.items())
 
 
 async def prewarm_symbols_klines(
@@ -64,17 +83,17 @@ async def prewarm_strategy_klines(
     if not symbols:
         return
 
-    min_bars = _signal_kline_limit(strategy)
-    ok, total = await prewarm_symbols_klines(
-        public_binance, symbols, strategy.timeframe, min_bars
-    )
-    logger.info(
-        "Strategy %d: prewarmed K-lines %s %d/%d symbols",
-        strategy.id,
-        strategy.timeframe,
-        ok,
-        total,
-    )
+    for timeframe, min_bars in _strategy_kline_timeframes(strategy):
+        ok, total = await prewarm_symbols_klines(
+            public_binance, symbols, timeframe, min_bars
+        )
+        logger.info(
+            "Strategy %d: prewarmed K-lines %s %d/%d symbols",
+            strategy.id,
+            timeframe,
+            ok,
+            total,
+        )
 
 
 async def prewarm_strategy_klines_by_id(strategy_id: int) -> None:
@@ -99,9 +118,9 @@ async def prewarm_running_strategies_klines() -> None:
         try:
             pool_syms = await resolve_strategy_pool_symbols(strategy, public_binance)
             open_syms = await _open_position_symbols(strategy.id)
-            groups[(strategy.timeframe, _signal_kline_limit(strategy))].extend(
-                pool_syms + open_syms
-            )
+            syms = pool_syms + open_syms
+            for timeframe, min_bars in _strategy_kline_timeframes(strategy):
+                groups[(timeframe, min_bars)].extend(syms)
         except Exception as e:
             logger.warning("Strategy %d K-line prewarm resolve failed: %s", strategy.id, e)
 

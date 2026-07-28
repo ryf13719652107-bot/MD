@@ -4,13 +4,17 @@ export interface Strategy {
   name: string;
   direction: 'long' | 'short';
   symbol: string | null;
-  signal_source: 'rsi' | 'wavetrend' | 'martingale_base';
+  signal_source: 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base';
   rsi_period: number;
   timeframe: string;
   wt_channel_length: number;
   wt_average_length: number;
   wt_ob_level: number;
   wt_os_level: number;
+  st_atr_period: number;
+  st_factor: number;
+  st_timeframe_1: string;
+  st_timeframe_2: string;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -20,6 +24,8 @@ export interface Strategy {
   martingale_mult: number;
   max_layers: number;
   martingale_rsi_enabled: boolean;
+  /** 趋势WT专用：加仓确认是否叠加超级趋势，默认 false=仅 WT */
+  martingale_st_filter_enabled: boolean;
   take_profit_pct: number;
   take_profit_limit_order: boolean;
   stop_loss_enabled: boolean;
@@ -57,13 +63,17 @@ export interface StrategyFormData {
   name: string;
   direction: 'long' | 'short';
   symbol?: string;
-  signal_source: 'rsi' | 'wavetrend' | 'martingale_base';
+  signal_source: 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base';
   rsi_period: number;
   timeframe: string;
   wt_channel_length: number;
   wt_average_length: number;
   wt_ob_level: number;
   wt_os_level: number;
+  st_atr_period: number;
+  st_factor: number;
+  st_timeframe_1: string;
+  st_timeframe_2: string;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -73,6 +83,8 @@ export interface StrategyFormData {
   martingale_mult: number;
   max_layers: number;
   martingale_rsi_enabled: boolean;
+  /** 趋势WT专用：加仓确认是否叠加超级趋势，默认 false=仅 WT */
+  martingale_st_filter_enabled: boolean;
   take_profit_pct: number;
   take_profit_limit_order: boolean;
   stop_loss_enabled: boolean;
@@ -120,6 +132,7 @@ export function formatSignalSourceLabel(
   rsiEntryThreshold?: number,
 ): string {
   if (source === 'wavetrend') return 'WaveTrend';
+  if (source === 'trend_wt') return '趋势WT';
   if (source === 'martingale_base') return '基础马丁';
   return `RSI ${direction === 'long' ? '<' : '>'} ${rsiEntryThreshold ?? ''}`;
 }
@@ -163,6 +176,6 @@ export function formatLastSignalText(
           ? '无信号'
           : lastSignal ?? '无信号';
   if (source === 'martingale_base') return `基础马丁 → ${dir}`;
-  const metric = source === 'wavetrend' ? 'WT1' : 'RSI';
+  const metric = source === 'wavetrend' || source === 'trend_wt' ? 'WT1' : 'RSI';
   return `${metric} ${lastRsi ?? '-'} → ${dir}`;
 }

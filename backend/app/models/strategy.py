@@ -19,7 +19,7 @@ class Strategy(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=True)  # NULL = use coin pool
 
     # Signal source
-    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' | 'wavetrend' | 'martingale_base'(涓嶇湅鎸囨爣锛屾瘡鏍筀绾垮紑鐩樺紑棣栧崟)
+    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base'
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)
@@ -32,6 +32,12 @@ class Strategy(Base):
     wt_ob_level: Mapped[float] = mapped_column(Float, default=60.0, server_default="60.0")
     wt_os_level: Mapped[float] = mapped_column(Float, default=-60.0, server_default="-60.0")
 
+    # Supertrend filter params (trend_wt only)
+    st_atr_period: Mapped[int] = mapped_column(Integer, default=10, server_default="10")
+    st_factor: Mapped[float] = mapped_column(Float, default=3.0, server_default="3.0")
+    st_timeframe_1: Mapped[str] = mapped_column(String(10), default="15m", server_default="15m")
+    st_timeframe_2: Mapped[str] = mapped_column(String(10), default="1h", server_default="1h")
+
     # Entry position params
     base_qty_type: Mapped[str] = mapped_column(String(20), default="margin_pct")  # 'margin_pct' or 'usdt'
     base_qty_value: Mapped[float] = mapped_column(Float, default=6.0)  # 6% margin or USDT amount
@@ -43,6 +49,8 @@ class Strategy(Base):
     martingale_mult: Mapped[float] = mapped_column(Float, default=1.5)
     max_layers: Mapped[int] = mapped_column(Integer, default=8)
     martingale_rsi_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")  # Require entry signal for martingale adds
+    # trend_wt only: when confirming martingale adds, also require Supertrend filter (default off = plain WT)
+    martingale_st_filter_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     # Take profit params
     take_profit_pct: Mapped[float] = mapped_column(Float, default=2.0)

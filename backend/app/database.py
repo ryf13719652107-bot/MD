@@ -69,6 +69,11 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN coin_pool_schedule_started_at TIMESTAMP",
             "ALTER TABLE strategies ADD COLUMN single_symbol_stop_loss_enabled BOOLEAN DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN single_symbol_stop_loss_pct FLOAT DEFAULT 10",
+            "ALTER TABLE strategies ADD COLUMN st_atr_period INTEGER DEFAULT 10",
+            "ALTER TABLE strategies ADD COLUMN st_factor FLOAT DEFAULT 3.0",
+            "ALTER TABLE strategies ADD COLUMN st_timeframe_1 VARCHAR(10) DEFAULT '15m'",
+            "ALTER TABLE strategies ADD COLUMN st_timeframe_2 VARCHAR(10) DEFAULT '1h'",
+            "ALTER TABLE strategies ADD COLUMN martingale_st_filter_enabled BOOLEAN DEFAULT 0",
         ]
         for sql in migrations:
             try:

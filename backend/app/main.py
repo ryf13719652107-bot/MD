@@ -125,7 +125,7 @@ from fastapi.responses import FileResponse, JSONResponse
 app = FastAPI(
     title="Smart Hedge Martin",
     description="智能对冲交易机器人系统",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -212,7 +212,7 @@ else:
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "1.0.0"}
 
 
 @app.get("/api/klines")

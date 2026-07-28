@@ -1,0 +1,94 @@
+// WaveTrend [LazyBear] — 与 MD 交易机器人 strategy_engine.py 对齐
+// 公式: esa=EMA(hlc3,n1), d=EMA(|hlc3-esa|,n1), ci=(hlc3-esa)/(0.015*d), wt1=EMA(ci,n2), wt2=SMA(wt1,4)
+// 信号: 做多 = crossover(wt1,wt2) 且 wt1 < 超卖线; 做空 = crossunder(wt1,wt2) 且 wt1 > 超买线
+// 超级趋势过滤: 默认 15m+1h 同为多头才做多，同为空头才做空（参数可改）
+//@version=5
+indicator("WaveTrend [MD Bot]", shorttitle="WT", overlay=false, timeframe="", timeframe_gaps=true)
+
+// ── 参数（默认与策略表单一致）──
+channelLength = input.int(10, "通道长度", minval=2, maxval=50, group="WaveTrend")
+averageLength = input.int(21, "均线长度", minval=2, maxval=100, group="WaveTrend")
+obLevel       = input.float(60.0, "超买线", minval=10, maxval=100, step=1, group="信号阈值")
+osLevel       = input.float(-60.0, "超卖线", minval=-100, maxval=-10, step=1, group="信号阈值")
+
+// ── 超级趋势过滤 ──
+useSTFilter  = input.bool(true, "启用超级趋势过滤", group="超级趋势过滤")
+stAtrPeriod  = input.int(10, "ATR 周期", minval=1, maxval=100, group="超级趋势过滤")
+stFactor     = input.float(3.0, "乘数 Factor", minval=0.1, maxval=10, step=0.1, group="超级趋势过滤")
+stTf1        = input.timeframe("15", "高级别 1", group="超级趋势过滤")
+stTf2        = input.timeframe("60", "高级别 2", group="超级趋势过滤")
+
+showSignals   = input.bool(true, "显示开多/开空标记", group="显示")
+showCrossDots = input.bool(true, "显示金叉/死叉圆点", group="显示")
+showSTBg      = input.bool(true, "显示超级趋势背景", group="显示")
+
+// ── WaveTrend 计算 ──
+ap  = hlc3
+esa = ta.ema(ap, channelLength)
+d   = ta.ema(math.abs(ap - esa), channelLength)
+ci  = d != 0 ? (ap - esa) / (0.015 * d) : 0.0
+wt1 = ta.ema(ci, averageLength)
+wt2 = ta.sma(wt1, 4)
+
+crossAbove = ta.crossover(wt1, wt2)
+crossBelow = ta.crossunder(wt1, wt2)
+
+// ── 超级趋势方向（ta.supertrend 的 direction: -1=多头, 1=空头）──
+f_stBull() =>
+    [_st, dir] = ta.supertrend(stFactor, stAtrPeriod)
+    dir < 0
+
+stBull1 = request.security(syminfo.tickerid, stTf1, f_stBull(), barmerge.gaps_off, barmerge.lookahead_off)
+stBull2 = request.security(syminfo.tickerid, stTf2, f_stBull(), barmerge.gaps_off, barmerge.lookahead_off)
+stBear1 = not stBull1
+stBear2 = not stBull2
+
+stLongOk  = stBull1 and stBull2   // 15m+30m 均为多头
+stShortOk = stBear1 and stBear2  // 15m+30m 均为空头
+
+// 与 generate_wt_signal() 一致，叠加超级趋势过滤
+longSignalRaw  = crossAbove and wt1 < osLevel
+shortSignalRaw = crossBelow and wt1 > obLevel
+longSignal     = longSignalRaw  and (not useSTFilter or stLongOk)
+shortSignal    = shortSignalRaw and (not useSTFilter or stShortOk)
+
+// ── 绘图 ──
+hline(0, "零轴", color=color.new(color.gray, 40), linestyle=hline.style_dotted)
+hline(obLevel, "超买", color=color.new(color.red, 60), linestyle=hline.style_dashed)
+hline(osLevel, "超卖", color=color.new(color.green, 60), linestyle=hline.style_dashed)
+
+plot(wt1, "WT1", color=#2962FF, linewidth=2)
+plot(wt2, "WT2", color=#FF6D00, linewidth=1)
+
+// LazyBear 风格交叉圆点
+plot(showCrossDots and crossAbove ? wt2 : na, "金叉点", color=color.black, style=plot.style_circles, linewidth=3)
+plot(showCrossDots and crossAbove ? wt1 : na, "金叉点2", color=color.black, style=plot.style_circles, linewidth=3)
+plot(showCrossDots and crossBelow ? wt2 : na, "死叉点", color=color.black, style=plot.style_circles, linewidth=3)
+plot(showCrossDots and crossBelow ? wt1 : na, "死叉点2", color=color.black, style=plot.style_circles, linewidth=3)
+
+plotshape(showSignals and longSignal, title="做多", text="多", style=shape.triangleup,
+     location=location.bottom, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+plotshape(showSignals and shortSignal, title="做空", text="空", style=shape.triangledown,
+     location=location.top, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+// 被超级趋势过滤掉的原始信号（半透明灰点，便于对比）
+plotshape(showSignals and useSTFilter and longSignalRaw and not stLongOk, title="多被过滤", text="×",
+     style=shape.triangleup, location=location.bottom, color=color.new(color.gray, 50), textcolor=color.gray, size=size.tiny)
+plotshape(showSignals and useSTFilter and shortSignalRaw and not stShortOk, title="空被过滤", text="×",
+     style=shape.triangledown, location=location.top, color=color.new(color.gray, 50), textcolor=color.gray, size=size.tiny)
+
+// 背景色：超买超卖区 + 超级趋势同向区
+bgcolor(wt1 > obLevel ? color.new(color.red, 92) : wt1 < osLevel ? color.new(color.green, 92) : na, title="WT区域")
+bgcolor(showSTBg and useSTFilter ? (stLongOk ? color.new(color.teal, 94) : stShortOk ? color.new(color.maroon, 94) : na) : na, title="ST同向区")
+
+// ── 数据窗口 ──
+plotchar(stBull1, "ST15多头", "", location.top, size=size.tiny, display=display.data_window)
+plotchar(stBull2, "ST30多头", "", location.top, size=size.tiny, display=display.data_window)
+plotchar(stLongOk, "ST多头通过", "", location.top, size=size.tiny, display=display.data_window)
+plotchar(stShortOk, "ST空头通过", "", location.top, size=size.tiny, display=display.data_window)
+
+// ── 警报 ──
+alertcondition(longSignal, title="WT 做多信号", message="WaveTrend: WT1 上穿 WT2 且 WT1 < 超卖线，高级别超级趋势多头 ({{ticker}} {{interval}})")
+alertcondition(shortSignal, title="WT 做空信号", message="WaveTrend: WT1 下穿 WT2 且 WT1 > 超买线，高级别超级趋势空头 ({{ticker}} {{interval}})")
+alertcondition(crossAbove, title="WT 金叉", message="WaveTrend 金叉 ({{ticker}} {{interval}})")
+alertcondition(crossBelow, title="WT 死叉", message="WaveTrend 死叉 ({{ticker}} {{interval}})")

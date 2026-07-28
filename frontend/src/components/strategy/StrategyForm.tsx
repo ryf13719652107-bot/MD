@@ -16,13 +16,17 @@ const schema = z.object({
   name: z.string().min(1, '请输入策略名称').max(100),
   direction: z.enum(['long', 'short']),
   symbol: z.string().optional().or(z.literal('')),
-  signal_source: z.enum(['rsi', 'wavetrend', 'martingale_base']),
+  signal_source: z.enum(['rsi', 'wavetrend', 'trend_wt', 'martingale_base']),
   rsi_period: z.number().min(5).max(50),
   timeframe: z.enum(['1m', '5m', '15m', '1h']),
   wt_channel_length: z.number().min(2).max(50),
   wt_average_length: z.number().min(2).max(100),
   wt_ob_level: z.number().min(10).max(100),
   wt_os_level: z.number().min(-100).max(-10),
+  st_atr_period: z.number().min(1).max(100),
+  st_factor: z.number().min(0.1).max(20),
+  st_timeframe_1: z.enum(['5m', '15m', '1h', '4h']),
+  st_timeframe_2: z.enum(['5m', '15m', '1h', '4h']),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -36,6 +40,7 @@ const schema = z.object({
     .min(1, '至少为 1')
     .max(200, '最大为 200'),
   martingale_rsi_enabled: z.coerce.boolean(),
+  martingale_st_filter_enabled: z.coerce.boolean(),
   take_profit_pct: z.number().min(0.1).max(50),
   take_profit_limit_order: z.coerce.boolean(),
   stop_loss_enabled: z.coerce.boolean(),
@@ -81,6 +86,10 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       wt_average_length: initialData.wt_average_length ?? 21,
       wt_ob_level: initialData.wt_ob_level ?? 60,
       wt_os_level: initialData.wt_os_level ?? -60,
+      st_atr_period: initialData.st_atr_period ?? 10,
+      st_factor: initialData.st_factor ?? 3,
+      st_timeframe_1: (initialData.st_timeframe_1 as StrategyFormData['st_timeframe_1']) || '15m',
+      st_timeframe_2: (initialData.st_timeframe_2 as StrategyFormData['st_timeframe_2']) || '1h',
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -90,6 +99,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       martingale_mult: initialData.martingale_mult,
       max_layers: Number(initialData.max_layers ?? 8),
       martingale_rsi_enabled: initialData.martingale_rsi_enabled ?? true,
+      martingale_st_filter_enabled: initialData.martingale_st_filter_enabled ?? false,
       take_profit_pct: initialData.take_profit_pct,
       take_profit_limit_order: initialData.take_profit_limit_order,
       stop_loss_enabled: initialData.stop_loss_enabled ?? true,
@@ -130,6 +140,10 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     wt_average_length: 21,
     wt_ob_level: 60,
     wt_os_level: -60,
+    st_atr_period: 10,
+    st_factor: 3,
+    st_timeframe_1: '15m',
+    st_timeframe_2: '1h',
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -139,6 +153,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     martingale_mult: 1.5,
     max_layers: 8,
     martingale_rsi_enabled: true,
+    martingale_st_filter_enabled: false,
     take_profit_pct: 2,
     take_profit_limit_order: true,
     stop_loss_enabled: false,
@@ -189,6 +204,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
   const stopLossEnabled = watch('stop_loss_enabled', true);
   const singleSymbolStopLossEnabled = watch('single_symbol_stop_loss_enabled', false);
   const excludeFunding = watch('exclude_funding', false);
+  const martingaleRsiEnabled = watch('martingale_rsi_enabled', true);
 
   // Auto-adjust RSI threshold on mount and when direction changes
   useEffect(() => {
@@ -238,6 +254,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <select {...register('signal_source')} className={inputClass}>
               <option value="rsi">RSI</option>
               <option value="wavetrend">WaveTrend</option>
+              <option value="trend_wt">趋势WT（WT + 超级趋势过滤）</option>
               <option value="martingale_base">基础马丁（每根K线开盘开首单）</option>
             </select>
           </div>
@@ -267,7 +284,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           </div>
         )}
 
-        {signalSource === 'wavetrend' && (
+        {(signalSource === 'wavetrend' || signalSource === 'trend_wt') && (
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelClass}>WT 通道长度</label>
@@ -288,6 +305,40 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <label className={labelClass}>WT 超卖线</label>
               <input type="number" step="1" {...register('wt_os_level', { valueAsNumber: true })} className={inputClass} />
               <span className="text-xs text-gray-600">金叉+WT1低于此值开多，默认-60</span>
+            </div>
+          </div>
+        )}
+
+        {signalSource === 'trend_wt' && (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass}>超级趋势 ATR 周期</label>
+              <input type="number" {...register('st_atr_period', { valueAsNumber: true })} className={inputClass} />
+              <span className="text-xs text-gray-600">默认10</span>
+            </div>
+            <div>
+              <label className={labelClass}>超级趋势 Factor</label>
+              <input type="number" step="0.1" {...register('st_factor', { valueAsNumber: true })} className={inputClass} />
+              <span className="text-xs text-gray-600">默认3.0</span>
+            </div>
+            <div>
+              <label className={labelClass}>超级趋势周期1</label>
+              <select {...register('st_timeframe_1')} className={inputClass}>
+                <option value="5m">5分钟</option>
+                <option value="15m">15分钟</option>
+                <option value="1h">1小时</option>
+                <option value="4h">4小时</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelClass}>超级趋势周期2</label>
+              <select {...register('st_timeframe_2')} className={inputClass}>
+                <option value="5m">5分钟</option>
+                <option value="15m">15分钟</option>
+                <option value="1h">1小时</option>
+                <option value="4h">4小时</option>
+              </select>
+              <span className="text-xs text-gray-600">两周期同向才开仓（默认15m+1h）</span>
             </div>
           </div>
         )}
@@ -513,6 +564,19 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           </label>
           <span className="text-xs text-gray-600">开启后，加仓时仍需满足当前信号条件（RSI/WaveTrend），防止反向加仓</span>
         </div>
+
+        {signalSource === 'trend_wt' && martingaleRsiEnabled && (
+          <div>
+            <label className={`${labelClass} flex items-center gap-2`}>
+              <span>加仓叠加超级趋势过滤</span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" {...register('martingale_st_filter_enabled')} className="sr-only peer" />
+                <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+              </label>
+            </label>
+            <span className="text-xs text-gray-600">默认关闭：加仓只看 WT；开启后加仓也需 15m+1h（可改）超级趋势同向</span>
+          </div>
+        )}
 
         <div className="border-t border-gray-800 my-3" />
 
