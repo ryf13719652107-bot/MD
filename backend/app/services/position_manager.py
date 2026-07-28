@@ -447,7 +447,7 @@ class PositionManager:
         if wt is None:
             return None
         tf1 = getattr(strategy, "st_timeframe_1", None) or "15m"
-        tf2 = getattr(strategy, "st_timeframe_2", None) or "1h"
+        tf2 = getattr(strategy, "st_timeframe_2", None) or "30m"
         st1 = await self._supertrend_bullish(strategy, symbol, public_binance, tf1)
         st2 = await self._supertrend_bullish(strategy, symbol, public_binance, tf2)
         if st1 is None or st2 is None:

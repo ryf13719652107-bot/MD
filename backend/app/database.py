@@ -72,7 +72,7 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN st_atr_period INTEGER DEFAULT 10",
             "ALTER TABLE strategies ADD COLUMN st_factor FLOAT DEFAULT 3.0",
             "ALTER TABLE strategies ADD COLUMN st_timeframe_1 VARCHAR(10) DEFAULT '15m'",
-            "ALTER TABLE strategies ADD COLUMN st_timeframe_2 VARCHAR(10) DEFAULT '1h'",
+            "ALTER TABLE strategies ADD COLUMN st_timeframe_2 VARCHAR(10) DEFAULT '30m'",
             "ALTER TABLE strategies ADD COLUMN martingale_st_filter_enabled BOOLEAN DEFAULT 0",
         ]
         for sql in migrations:
@@ -155,6 +155,26 @@ async def init_db():
                 lambda c: c.exec_driver_sql(
                     "UPDATE strategies SET single_symbol_stop_loss_pct=10 "
                     "WHERE single_symbol_stop_loss_pct IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET st_timeframe_1='15m' "
+                    "WHERE st_timeframe_1 IS NULL OR st_timeframe_1=''"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET st_timeframe_2='30m' "
+                    "WHERE st_timeframe_2 IS NULL OR st_timeframe_2=''"
                 )
             )
         except Exception:

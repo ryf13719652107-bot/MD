@@ -32,7 +32,7 @@ def _strategy_kline_timeframes(strategy: Strategy) -> list[tuple[str, int]]:
         st_bars = max(200, atr_period + 100)
         for tf in (
             getattr(strategy, "st_timeframe_1", None) or "15m",
-            getattr(strategy, "st_timeframe_2", None) or "1h",
+            getattr(strategy, "st_timeframe_2", None) or "30m",
         ):
             if tf != strategy.timeframe:
                 pairs.append((tf, st_bars))

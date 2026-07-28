@@ -18,8 +18,8 @@ class StrategyCreate(BaseModel):
     wt_os_level: float = Field(default=-60.0, ge=-100, le=0)
     st_atr_period: int = Field(default=10, ge=1, le=100)
     st_factor: float = Field(default=3.0, ge=0.1, le=20.0)
-    st_timeframe_1: Literal["5m", "15m", "1h", "4h"] = "15m"
-    st_timeframe_2: Literal["5m", "15m", "1h", "4h"] = "1h"
+    st_timeframe_1: Literal["5m", "15m", "30m", "1h", "4h"] = "15m"
+    st_timeframe_2: Literal["5m", "15m", "30m", "1h", "4h"] = "30m"
     # Entry
     base_qty_type: Literal["margin_pct", "usdt"] = "margin_pct"
     base_qty_value: float = Field(default=6.0, gt=0)
@@ -91,8 +91,8 @@ class StrategyUpdate(BaseModel):
     wt_os_level: Optional[float] = Field(default=None, ge=-100, le=0)
     st_atr_period: Optional[int] = Field(default=None, ge=1, le=100)
     st_factor: Optional[float] = Field(default=None, ge=0.1, le=20.0)
-    st_timeframe_1: Optional[Literal["5m", "15m", "1h", "4h"]] = None
-    st_timeframe_2: Optional[Literal["5m", "15m", "1h", "4h"]] = None
+    st_timeframe_1: Optional[Literal["5m", "15m", "30m", "1h", "4h"]] = None
+    st_timeframe_2: Optional[Literal["5m", "15m", "30m", "1h", "4h"]] = None
     base_qty_type: Optional[Literal["margin_pct", "usdt"]] = None
     base_qty_value: Optional[float] = Field(default=None, gt=0)
     rsi_entry_threshold: Optional[float] = Field(default=None, ge=0, le=100)
@@ -141,7 +141,7 @@ class StrategyResponse(BaseModel):
     st_atr_period: int = 10
     st_factor: float = 3.0
     st_timeframe_1: str = "15m"
-    st_timeframe_2: str = "1h"
+    st_timeframe_2: str = "30m"
     margin_threshold: float
     base_qty_type: str
     base_qty_value: float

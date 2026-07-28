@@ -158,7 +158,7 @@ export default function StrategyPage() {
               <div>交易对: <span className="text-gray-200">{s.symbol || '选币池自动'}</span></div>
               <div>K线周期: <span className="text-gray-200">{s.timeframe}</span></div>
               {s.signal_source === 'wavetrend' || s.signal_source === 'trend_wt' ? (
-                <div>WT参数: <span className="text-gray-200">通道{s.wt_channel_length} 均线{s.wt_average_length}{s.signal_source === 'trend_wt' ? ` · ST ${s.st_timeframe_1 ?? '15m'}+${s.st_timeframe_2 ?? '1h'}` : ''}</span></div>
+                <div>WT参数: <span className="text-gray-200">通道{s.wt_channel_length} 均线{s.wt_average_length}{s.signal_source === 'trend_wt' ? ` · ST ${s.st_timeframe_1 ?? '15m'}+${s.st_timeframe_2 ?? '30m'}` : ''}</span></div>
               ) : s.signal_source === 'martingale_base' ? (
                 <div>开仓方式: <span className="text-gray-200">每根K线开盘</span></div>
               ) : (

@@ -36,7 +36,7 @@ class Strategy(Base):
     st_atr_period: Mapped[int] = mapped_column(Integer, default=10, server_default="10")
     st_factor: Mapped[float] = mapped_column(Float, default=3.0, server_default="3.0")
     st_timeframe_1: Mapped[str] = mapped_column(String(10), default="15m", server_default="15m")
-    st_timeframe_2: Mapped[str] = mapped_column(String(10), default="1h", server_default="1h")
+    st_timeframe_2: Mapped[str] = mapped_column(String(10), default="30m", server_default="30m")
 
     # Entry position params
     base_qty_type: Mapped[str] = mapped_column(String(20), default="margin_pct")  # 'margin_pct' or 'usdt'

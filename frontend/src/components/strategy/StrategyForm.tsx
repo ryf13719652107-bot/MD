@@ -25,8 +25,8 @@ const schema = z.object({
   wt_os_level: z.number().min(-100).max(-10),
   st_atr_period: z.number().min(1).max(100),
   st_factor: z.number().min(0.1).max(20),
-  st_timeframe_1: z.enum(['5m', '15m', '1h', '4h']),
-  st_timeframe_2: z.enum(['5m', '15m', '1h', '4h']),
+  st_timeframe_1: z.enum(['5m', '15m', '30m', '1h', '4h']),
+  st_timeframe_2: z.enum(['5m', '15m', '30m', '1h', '4h']),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -89,7 +89,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       st_atr_period: initialData.st_atr_period ?? 10,
       st_factor: initialData.st_factor ?? 3,
       st_timeframe_1: (initialData.st_timeframe_1 as StrategyFormData['st_timeframe_1']) || '15m',
-      st_timeframe_2: (initialData.st_timeframe_2 as StrategyFormData['st_timeframe_2']) || '1h',
+      st_timeframe_2: (initialData.st_timeframe_2 as StrategyFormData['st_timeframe_2']) || '30m',
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -143,7 +143,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     st_atr_period: 10,
     st_factor: 3,
     st_timeframe_1: '15m',
-    st_timeframe_2: '1h',
+    st_timeframe_2: '30m',
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -326,6 +326,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <select {...register('st_timeframe_1')} className={inputClass}>
                 <option value="5m">5分钟</option>
                 <option value="15m">15分钟</option>
+                <option value="30m">30分钟</option>
                 <option value="1h">1小时</option>
                 <option value="4h">4小时</option>
               </select>
@@ -335,10 +336,11 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <select {...register('st_timeframe_2')} className={inputClass}>
                 <option value="5m">5分钟</option>
                 <option value="15m">15分钟</option>
+                <option value="30m">30分钟</option>
                 <option value="1h">1小时</option>
                 <option value="4h">4小时</option>
               </select>
-              <span className="text-xs text-gray-600">两周期同向才开仓（默认15m+1h）</span>
+              <span className="text-xs text-gray-600">两周期同向才开仓（默认15m+30m）</span>
             </div>
           </div>
         )}
@@ -574,7 +576,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
                 <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
               </label>
             </label>
-            <span className="text-xs text-gray-600">默认关闭：加仓只看 WT；开启后加仓也需 15m+1h（可改）超级趋势同向</span>
+            <span className="text-xs text-gray-600">默认关闭：加仓只看 WT；开启后加仓也需 15m+30m（可改）超级趋势同向</span>
           </div>
         )}
 
