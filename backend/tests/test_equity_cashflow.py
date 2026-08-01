@@ -1,4 +1,4 @@
-"""收益曲线划转校正：充提不计入回报/回撤。"""
+"""收益曲线划转校正：充值/提现均不计入回报与盈亏；余额曲线用真实余额。"""
 from datetime import datetime
 
 from app.services.equity_cashflow import (
@@ -27,7 +27,6 @@ def test_hours_to_sync_catchup_missed():
     from app.services.equity_cashflow import _hours_to_sync, beijing_naive_to_ms
 
     floor = datetime(2026, 8, 1, 22, 0, 0)
-    # 上次成功同步到 20:00 窗终点
     cursor = beijing_naive_to_ms(datetime(2026, 8, 1, 20, 0, 0))
     hours = _hours_to_sync(floor, cursor)
     assert hours == [
@@ -42,18 +41,22 @@ def test_transfer_in_does_not_change_adjusted():
     snaps = [(t0, 300.0), (t1, 350.0)]
     cfs = [(t1, 50.0)]
     pts = build_adjusted_points(snaps, cfs)
+    assert pts[0][1] == 300.0
+    assert pts[1][1] == 350.0  # 余额上涨
     assert pts[0][2] == 300.0
-    assert pts[1][2] == 300.0
+    assert pts[1][2] == 300.0  # 校正权益不变
 
 
-def test_transfer_out_does_not_create_drawdown_on_adjusted():
+def test_transfer_out_balance_drops_but_adjusted_flat():
+    """提现：余额下降，回报用的校正权益不降。"""
     t0 = datetime(2026, 7, 1, 10, 0, 0)
     t1 = datetime(2026, 7, 1, 11, 0, 0)
     snaps = [(t0, 300.0), (t1, 200.0)]
     cfs = [(t1, -100.0)]
     pts = build_adjusted_points(snaps, cfs)
+    assert pts[1][1] == 200.0  # 余额曲线下降
     assert pts[0][2] == 300.0
-    assert pts[1][2] == 300.0
+    assert pts[1][2] == 300.0  # 校正权益不变 → 收益率/盈亏不降
 
 
 def test_trading_loss_still_affects_adjusted():

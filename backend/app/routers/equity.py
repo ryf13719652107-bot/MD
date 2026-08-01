@@ -16,6 +16,7 @@ from ..services.equity_cashflow import (
     build_adjusted_points,
     window_deposit_withdraw,
     sync_account_cashflows_for_hour,
+    cum_net_external,
 )
 
 logger = logging.getLogger(__name__)
@@ -201,7 +202,7 @@ async def reset_equity_baseline(
         .scalars()
         .all()
     )
-    cum = sum(float(c.amount) for c in all_cfs)
+    cum = cum_net_external((c.occurred_at, float(c.amount)) for c in all_cfs)
     adjusted_baseline = cur_total - cum
     now = now_beijing()
 

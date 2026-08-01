@@ -1,6 +1,7 @@
-"""合约划转流水同步与收益曲线校正（剔除外部资金）。
+"""合约划转流水同步与收益曲线校正。
 
 整点快照时查询「上一小时」划转（22:00 快照 → [21:00, 22:00)）。
+校正规则：充值、提现均从回报率/盈亏/回撤中剔除；余额曲线仍用真实钱包余额。
 若中间整点任务漏跑，最多补齐最近 48 小时内未同步的小时窗，不回溯更早历史。
 """
 from __future__ import annotations
@@ -64,18 +65,28 @@ def build_adjusted_points(
 ) -> list[tuple[datetime, float, float]]:
     """
     返回 (t, total_usdt, adjusted_usdt)。
-    adjusted = total − 累计净划转(≤t)（仅含已按小时落库的流水）。
+    adjusted = total − 累计净划转(≤t)（充值+、提现− 都剔除）。
+    余额视图用 total；回报率/盈亏/回撤用 adjusted。
     """
     cfs = sorted(cashflows, key=lambda x: x[0])
     out: list[tuple[datetime, float, float]] = []
     i = 0
-    cum = 0.0
+    cum_external = 0.0
     for t, tot in snaps:
         while i < len(cfs) and cfs[i][0] <= t:
-            cum += cfs[i][1]
+            cum_external += cfs[i][1]
             i += 1
-        out.append((t, tot, tot - cum))
+        out.append((t, tot, tot - cum_external))
     return out
+
+
+def cum_net_external(cashflows: Iterable[tuple[datetime, float] | float]) -> float:
+    """累计净划转（充值正、提现负都计入）。"""
+    total = 0.0
+    for item in cashflows:
+        amt = float(item[1]) if isinstance(item, tuple) else float(item)
+        total += amt
+    return total
 
 
 def window_deposit_withdraw(
