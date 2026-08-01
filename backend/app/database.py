@@ -44,7 +44,7 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db():
-    from .models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline  # noqa: F401
+    from .models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline, AccountCashflow  # noqa: F401
     from .models.strategy_blacklist import StrategySymbolBlacklist  # noqa: F401
 
     # Create tables from current model (no-op if already exist)
@@ -74,6 +74,7 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN st_timeframe_1 VARCHAR(10) DEFAULT '15m'",
             "ALTER TABLE strategies ADD COLUMN st_timeframe_2 VARCHAR(10) DEFAULT '30m'",
             "ALTER TABLE strategies ADD COLUMN martingale_st_filter_enabled BOOLEAN DEFAULT 0",
+            "ALTER TABLE accounts ADD COLUMN cashflow_sync_cursor_ms INTEGER",
         ]
         for sql in migrations:
             try:

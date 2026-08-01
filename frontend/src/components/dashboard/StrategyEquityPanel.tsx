@@ -4,7 +4,7 @@ import { ChevronDown, ChevronRight, LineChart, RotateCcw } from 'lucide-react';
 import { api } from '../../services/api';
 import type { EquitySeriesData, EquitySeriesPoint, EquityViewMode } from '../../types';
 
-const DAY_OPTIONS = [7, 30, 90] as const;
+const DAY_OPTIONS = [7, 30, 90, 180, 365] as const;
 
 function formatUsd(n: number) {
   const sign = n >= 0 ? '' : '-';
@@ -206,7 +206,7 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
     if (accountId == null) return;
     if (
       !window.confirm(
-        '将清空该账户收益曲线的历史小时快照与收益基准，下个北京时间整点起重新记录。确认？',
+        '将清空该账户收益曲线的历史小时快照，并以当前校正权益（余额减去累计划转）设为新基准。划转流水保留。确认？',
       )
     )
       return;
@@ -285,7 +285,7 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
 
       {panelOpen && accountId != null && !loading && s && (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4 text-sm">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3 mb-4 text-sm">
             <div>
               <div className="text-gray-500 text-xs mb-0.5">余额</div>
               <div className="font-mono font-medium text-gray-100">{s.total_balance.toLocaleString('en-US', { maximumFractionDigits: 2 })}</div>
@@ -318,6 +318,14 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
               >
                 {s.return_drawdown_ratio != null ? s.return_drawdown_ratio.toFixed(2) : '—'}
               </div>
+            </div>
+            <div>
+              <div className="text-gray-500 text-xs mb-0.5">充值</div>
+              <div className="font-mono font-medium text-emerald-400/90">{formatUsd(s.deposit_usdt ?? 0)}</div>
+            </div>
+            <div>
+              <div className="text-gray-500 text-xs mb-0.5">提现</div>
+              <div className="font-mono font-medium text-amber-400/90">{formatUsd(s.withdraw_usdt ?? 0)}</div>
             </div>
           </div>
           {!data?.points.length ? (

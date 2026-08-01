@@ -143,7 +143,7 @@ async def _delete_account_record(account_id: int, db: AsyncSession) -> None:
 
     from ..models.position import Position
     from ..models.trade import Trade
-    from ..models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline
+    from ..models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline, AccountCashflow
     from ..models.strategy_blacklist import StrategySymbolBlacklist
 
     strategy_ids = [s.id for s in strategies]
@@ -156,6 +156,7 @@ async def _delete_account_record(account_id: int, db: AsyncSession) -> None:
 
     await db.execute(sqla_delete(AccountBalanceSnapshot).where(AccountBalanceSnapshot.account_id == account_id))
     await db.execute(sqla_delete(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
+    await db.execute(sqla_delete(AccountCashflow).where(AccountCashflow.account_id == account_id))
     await db.execute(sqla_delete(Position).where(Position.account_id == account_id))
     await db.execute(sqla_delete(Trade).where(Trade.account_id == account_id))
     await db.execute(sqla_delete(Strategy).where(Strategy.account_id == account_id))

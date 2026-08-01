@@ -389,6 +389,25 @@ class BinanceService:
     async def fetch_balance(self) -> dict:
         return await self.exchange.fetch_balance()
 
+    async def fetch_income_history(
+        self,
+        *,
+        income_type: str | None = None,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        """GET /fapi/v1/income — 合约账户流水（划转/盈亏/资金费等）。"""
+        params: dict = {"limit": min(int(limit), 1000)}
+        if income_type:
+            params["incomeType"] = income_type
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
+        raw = await self.exchange.fapiPrivateGetIncome(params)
+        return list(raw) if isinstance(raw, list) else []
+
     async def fetch_ticker(self, symbol: str) -> dict:
         return await self.exchange.fetch_ticker(self._format_symbol(symbol))
 

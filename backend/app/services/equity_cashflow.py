@@ -1,0 +1,250 @@
+"""合约划转流水同步与收益曲线校正（剔除外部资金）。
+
+整点快照时查询「上一小时」划转（22:00 快照 → [21:00, 22:00)）。
+若中间整点任务漏跑，最多补齐最近 48 小时内未同步的小时窗，不回溯更早历史。
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Iterable
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models.account import Account
+from ..models.equity_curve import AccountCashflow
+
+logger = logging.getLogger(__name__)
+
+EXTERNAL_INCOME_TYPES: tuple[str, ...] = (
+    "TRANSFER",
+    "INTERNAL_TRANSFER",
+    "CROSS_COLLATERAL_TRANSFER",
+    "COIN_SWAP_DEPOSIT",
+    "COIN_SWAP_WITHDRAW",
+)
+
+# 漏跑整点时最多补多少个小时窗（防止异常游标一次拉太久）
+MAX_CATCHUP_HOURS = 48
+
+BJ_OFFSET = timezone(timedelta(hours=8))
+
+
+def ms_to_beijing_naive(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000.0, tz=BJ_OFFSET).replace(tzinfo=None)
+
+
+def beijing_naive_to_ms(dt: datetime) -> int:
+    return int(dt.replace(tzinfo=BJ_OFFSET).timestamp() * 1000)
+
+
+def hour_cashflow_window(hour_floor: datetime) -> tuple[datetime, datetime]:
+    """22:00 快照 → 半开区间 [21:00, 22:00)，避免整点边界双计。"""
+    end = hour_floor.replace(minute=0, second=0, microsecond=0)
+    start = end - timedelta(hours=1)
+    return start, end
+
+
+def cashflow_external_id(row: dict) -> str:
+    """币安流水去重键：优先 tranId，否则 time+type+amount+asset。"""
+    tran = row.get("tranId") or row.get("tranID") or row.get("id")
+    if tran is not None and str(tran).strip() != "":
+        return f"tran:{tran}"
+    t = int(row.get("time") or 0)
+    typ = str(row.get("incomeType") or "")
+    income = str(row.get("income") or "")
+    asset = str(row.get("asset") or "")
+    return f"fb:{t}:{typ}:{income}:{asset}"
+
+
+def build_adjusted_points(
+    snaps: list[tuple[datetime, float]],
+    cashflows: list[tuple[datetime, float]],
+) -> list[tuple[datetime, float, float]]:
+    """
+    返回 (t, total_usdt, adjusted_usdt)。
+    adjusted = total − 累计净划转(≤t)（仅含已按小时落库的流水）。
+    """
+    cfs = sorted(cashflows, key=lambda x: x[0])
+    out: list[tuple[datetime, float, float]] = []
+    i = 0
+    cum = 0.0
+    for t, tot in snaps:
+        while i < len(cfs) and cfs[i][0] <= t:
+            cum += cfs[i][1]
+            i += 1
+        out.append((t, tot, tot - cum))
+    return out
+
+
+def window_deposit_withdraw(
+    cashflows: Iterable[tuple[datetime, float]],
+    start: datetime | None,
+    end: datetime | None = None,
+) -> tuple[float, float]:
+    """窗口内充值(=划入合计)、提现(=划出绝对值合计)。"""
+    dep = 0.0
+    wdr = 0.0
+    for t, amt in cashflows:
+        if start is not None and t < start:
+            continue
+        if end is not None and t > end:
+            continue
+        if amt > 0:
+            dep += amt
+        elif amt < 0:
+            wdr += -amt
+    return dep, wdr
+
+
+def _hours_to_sync(hour_floor: datetime, cursor_ms: int | None) -> list[datetime]:
+    """
+    需要同步的快照整点列表（每个对应其前一小时窗）。
+    - 无游标：只同步当前 hour_floor（不回溯历史）
+    - 有游标：从上次成功窗的下一小时补到 hour_floor（最多 MAX_CATCHUP_HOURS）
+    """
+    end = hour_floor.replace(minute=0, second=0, microsecond=0)
+    if cursor_ms is None:
+        return [end]
+
+    last_end = ms_to_beijing_naive(int(cursor_ms)).replace(minute=0, second=0, microsecond=0)
+    # cursor 存的是窗终点 (= 某次 hour_floor)；下一窗终点为 +1h
+    nxt = last_end + timedelta(hours=1)
+    if nxt > end:
+        # 本小时已同步过，仍再跑一次当前小时（幂等去重），防止上次部分类型失败
+        return [end]
+
+    hours: list[datetime] = []
+    cur = nxt
+    while cur <= end:
+        hours.append(cur)
+        cur += timedelta(hours=1)
+        if len(hours) >= MAX_CATCHUP_HOURS:
+            break
+    return hours or [end]
+
+
+async def _sync_one_hour_window(
+    session: AsyncSession,
+    account: Account,
+    binance,
+    hour_floor: datetime,
+    known: set[str],
+) -> tuple[int, bool]:
+    """同步单个小时窗。返回 (新写入数, 是否至少一次 API 成功)。"""
+    window_start, window_end = hour_cashflow_window(hour_floor)
+    start_ms = beijing_naive_to_ms(window_start)
+    # 半开 [start, end)：币安 endTime 含等号，故传 end_ms - 1
+    end_ms_inclusive = beijing_naive_to_ms(window_end) - 1
+    if end_ms_inclusive < start_ms:
+        return 0, True
+
+    inserted = 0
+    any_ok = False
+
+    for income_type in EXTERNAL_INCOME_TYPES:
+        cursor = start_ms
+        while cursor <= end_ms_inclusive:
+            try:
+                rows = await binance.fetch_income_history(
+                    income_type=income_type,
+                    start_time_ms=cursor,
+                    end_time_ms=end_ms_inclusive,
+                    limit=1000,
+                )
+                any_ok = True
+            except Exception as e:
+                logger.warning(
+                    "cashflow sync account %s type=%s window=%s~%s failed: %s",
+                    account.id,
+                    income_type,
+                    window_start,
+                    window_end,
+                    e,
+                )
+                break
+
+            if not rows:
+                break
+
+            batch_max = cursor
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                asset = str(row.get("asset") or "").upper()
+                if asset and asset != "USDT":
+                    continue
+                try:
+                    amount = float(row.get("income") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(amount) < 1e-12:
+                    continue
+                t_ms = int(row.get("time") or 0)
+                if t_ms < start_ms or t_ms >= beijing_naive_to_ms(window_end):
+                    continue
+                ext_id = cashflow_external_id(row)
+                if ext_id in known:
+                    batch_max = max(batch_max, t_ms)
+                    continue
+                session.add(
+                    AccountCashflow(
+                        account_id=account.id,
+                        amount=amount,
+                        occurred_at=ms_to_beijing_naive(t_ms),
+                        income_type=str(row.get("incomeType") or income_type),
+                        asset="USDT",
+                        external_id=ext_id,
+                        source="binance_income",
+                    )
+                )
+                known.add(ext_id)
+                inserted += 1
+                batch_max = max(batch_max, t_ms)
+
+            if len(rows) < 1000:
+                break
+            next_cursor = batch_max + 1
+            if next_cursor <= cursor:
+                break
+            cursor = next_cursor
+
+    return inserted, any_ok
+
+
+async def sync_account_cashflows_for_hour(
+    session: AsyncSession,
+    account: Account,
+    binance,
+    hour_floor: datetime,
+) -> int:
+    """
+    同步 hour_floor 对应前一小时划转；若有游标且中间漏跑，补齐中间小时窗（≤48h）。
+    返回新写入条数。
+    """
+    hour_floor = hour_floor.replace(minute=0, second=0, microsecond=0)
+    hours = _hours_to_sync(hour_floor, account.cashflow_sync_cursor_ms)
+
+    existing = (
+        await session.execute(
+            select(AccountCashflow.external_id).where(AccountCashflow.account_id == account.id)
+        )
+    ).scalars().all()
+    known = set(existing)
+
+    inserted_total = 0
+    last_ok_end: datetime | None = None
+
+    for hf in hours:
+        n, ok = await _sync_one_hour_window(session, account, binance, hf, known)
+        inserted_total += n
+        if not ok:
+            # 本小时 API 全失败：不推进游标越过它，避免永久漏窗
+            break
+        last_ok_end = hf
+
+    if last_ok_end is not None:
+        account.cashflow_sync_cursor_ms = beijing_naive_to_ms(last_ok_end)
+
+    return inserted_total

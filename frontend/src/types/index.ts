@@ -123,6 +123,10 @@ export interface EquitySummary {
   baseline_total_usdt: number;
   baseline_set_at: string | null;
   implicit_baseline: boolean;
+  /** 所选时间窗口内合约划入合计（自动同步） */
+  deposit_usdt: number;
+  /** 所选时间窗口内合约划出绝对值合计（自动同步） */
+  withdraw_usdt: number;
 }
 
 export interface EquitySeriesData {

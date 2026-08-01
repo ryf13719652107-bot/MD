@@ -1,4 +1,4 @@
-"""每小时写入账户 total USDT 快照（与仪表盘余额口径一致）。"""
+"""每小时写入账户 total USDT 快照，并自动同步合约划转流水。"""
 import asyncio
 import logging
 from sqlalchemy import select
@@ -9,6 +9,7 @@ from ..models.account import Account
 from ..models.equity_curve import AccountBalanceSnapshot
 from ..services.encryption import decrypt
 from ..services.binance_service import get_binance_service
+from ..services.equity_cashflow import sync_account_cashflows_for_hour
 
 logger = logging.getLogger(__name__)
 
@@ -46,4 +47,30 @@ async def run_hourly_equity_snapshots() -> None:
                         total_usdt=total,
                     )
                 )
+
+            # 只查快照前一小时划转（22:00 → 21:00–22:00），不回溯更早
+            acc = (
+                await session.execute(select(Account).where(Account.id == account.id))
+            ).scalar_one_or_none()
+            if acc is not None:
+                try:
+                    n = await asyncio.wait_for(
+                        sync_account_cashflows_for_hour(session, acc, binance, hour_floor),
+                        timeout=30.0,
+                    )
+                    if n:
+                        logger.info(
+                            "equity cashflow synced account %s hour=%s: +%s rows",
+                            account.id,
+                            hour_floor.strftime("%Y-%m-%d %H:%M"),
+                            n,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "equity cashflow sync skip account %s (%s): %s",
+                        account.id,
+                        account.name,
+                        e,
+                    )
+
             await session.commit()
