@@ -3,7 +3,9 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import {
+  COIN_POOL_REFRESH_OPTIONS,
   formatAnchorTime,
+  nearestCoinPoolRefreshSeconds,
   parseAnchorTime,
   type Strategy,
   type StrategyApiPayload,
@@ -55,7 +57,10 @@ const schema = z.object({
   leverage: z.number().min(1).max(125),
   use_coin_pool: z.coerce.boolean(),
   coin_pool_source: z.enum(['gainers', 'losers', 'both']),
-  coin_pool_refresh_hours: z.number().min(1).max(24),
+  coin_pool_refresh_seconds: z.number().refine(
+    (v) => [600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400].includes(v),
+    '请选择有效的选币间隔',
+  ),
   coin_pool_fetch_mode: z.enum(['immediate', 'interval', 'scheduled']),
   coin_pool_anchor_time: z.string().regex(/^\d{2}:\d{2}$/, '请输入 HH:mm 格式时间'),
   coin_pool_top_n: z.number().min(1).max(50),
@@ -120,7 +125,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       leverage: initialData.leverage ?? 10,
       use_coin_pool: initialData.use_coin_pool,
       coin_pool_source: initialData.coin_pool_source,
-      coin_pool_refresh_hours: Math.max(1, Math.round((initialData.coin_pool_refresh_seconds ?? 3600) / 3600)),
+      coin_pool_refresh_seconds: nearestCoinPoolRefreshSeconds(initialData.coin_pool_refresh_seconds ?? 3600),
       coin_pool_fetch_mode:
         initialData.coin_pool_fetch_mode === 'scheduled' || initialData.coin_pool_fetch_mode === 'immediate'
           ? initialData.coin_pool_fetch_mode
@@ -179,7 +184,7 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     leverage: 10,
     use_coin_pool: true,
     coin_pool_source: 'gainers',
-    coin_pool_refresh_hours: 1,
+    coin_pool_refresh_seconds: 3600,
     coin_pool_fetch_mode: 'interval',
     coin_pool_anchor_time: '08:00',
     coin_pool_top_n: 20,
@@ -193,11 +198,11 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
 }
 
 function toApiPayload(data: StrategyFormData): StrategyApiPayload {
-  const { coin_pool_refresh_hours, coin_pool_anchor_time, ...rest } = data;
+  const { coin_pool_anchor_time, ...rest } = data;
   const { hour, minute } = parseAnchorTime(coin_pool_anchor_time);
   return {
     ...rest,
-    coin_pool_refresh_seconds: Math.round(coin_pool_refresh_hours * 3600),
+    coin_pool_refresh_seconds: nearestCoinPoolRefreshSeconds(data.coin_pool_refresh_seconds),
     coin_pool_anchor_hour: hour,
     coin_pool_anchor_minute: minute,
     coin_pool_min_volume_24h: (data.coin_pool_min_volume_24h || 0) * WAN,
@@ -541,8 +546,12 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               </select>
             </div>
             <div>
-              <label className={labelClass}>选币间隔(小时)</label>
-              <input type="number" min={1} max={24} step={1} {...register('coin_pool_refresh_hours', { valueAsNumber: true })} className={inputClass} />
+              <label className={labelClass}>选币间隔</label>
+              <select {...register('coin_pool_refresh_seconds', { valueAsNumber: true })} className={inputClass}>
+                {COIN_POOL_REFRESH_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
               <span className="text-xs text-gray-600">默认1小时；重启/改参后按上次选币时间继续</span>
             </div>
             <div>

@@ -105,7 +105,7 @@ export interface StrategyFormData {
   leverage: number;
   use_coin_pool: boolean;
   coin_pool_source: 'gainers' | 'losers' | 'both';
-  coin_pool_refresh_hours: number;
+  coin_pool_refresh_seconds: number;
   coin_pool_fetch_mode: 'immediate' | 'interval' | 'scheduled';
   /** 表单内 HH:mm，提交时拆为 hour + minute */
   coin_pool_anchor_time: string;
@@ -118,11 +118,32 @@ export interface StrategyFormData {
   funding_rate_threshold_pct: number;
 }
 
-export type StrategyApiPayload = Omit<StrategyFormData, 'coin_pool_refresh_hours' | 'coin_pool_anchor_time'> & {
-  coin_pool_refresh_seconds: number;
+export type StrategyApiPayload = Omit<StrategyFormData, 'coin_pool_anchor_time'> & {
   coin_pool_anchor_hour: number;
   coin_pool_anchor_minute: number;
 };
+
+/** 选币刷新间隔可选项（秒） */
+export const COIN_POOL_REFRESH_OPTIONS = [
+  { value: 600, label: '10分钟' },
+  { value: 900, label: '15分钟' },
+  { value: 1800, label: '30分钟' },
+  { value: 3600, label: '1小时' },
+  { value: 7200, label: '2小时' },
+  { value: 14400, label: '4小时' },
+  { value: 28800, label: '8小时' },
+  { value: 43200, label: '12小时' },
+  { value: 86400, label: '24小时' },
+] as const;
+
+export function nearestCoinPoolRefreshSeconds(seconds: number): number {
+  const opts = COIN_POOL_REFRESH_OPTIONS.map((o) => o.value);
+  let best = opts[3]; // 默认 1 小时
+  for (const v of opts) {
+    if (Math.abs(v - seconds) < Math.abs(best - seconds)) best = v;
+  }
+  return best;
+}
 
 export function formatAnchorTime(hour?: number, minute?: number): string {
   return `${String(hour ?? 8).padStart(2, '0')}:${String(minute ?? 0).padStart(2, '0')}`;
@@ -157,6 +178,12 @@ export function formatSingleSymbolStopLoss(
 }
 
 export function formatCoinPoolRefreshHours(seconds: number): string {
+  const hit = COIN_POOL_REFRESH_OPTIONS.find((o) => o.value === seconds);
+  if (hit) return hit.label;
+  if (seconds < 3600) {
+    const m = Math.round(seconds / 60);
+    return `${m}分钟`;
+  }
   const hours = seconds / 3600;
   return Number.isInteger(hours) ? `${hours}小时` : `${hours.toFixed(1)}小时`;
 }

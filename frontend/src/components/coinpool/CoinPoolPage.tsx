@@ -4,6 +4,7 @@ import type { CoinPoolEntry } from '../../types';
 import { RefreshCw, TrendingUp, TrendingDown, FlaskConical } from 'lucide-react';
 import { formatUsdtVolume, formatFundingRatePct, fundingRateColorClass } from '../../utils/format';
 import { poolSourceBadgeClass, poolSourceLabel, poolSourceTextClass } from '../../utils/poolSource';
+import { COIN_POOL_REFRESH_OPTIONS, nearestCoinPoolRefreshSeconds } from '../../types/strategy';
 
 export default function CoinPoolPage() {
   const [coins, setCoins] = useState<CoinPoolEntry[]>([]);
@@ -152,12 +153,16 @@ export default function CoinPoolPage() {
             </select>
           </div>
           <div>
-            <label className="text-xs text-gray-400 block mb-1">刷新间隔(秒)</label>
-            <input
-              type="number" value={config.refresh_interval_seconds}
-              onChange={(e) => setConfig({ ...config, refresh_interval_seconds: parseInt(e.target.value) || 3600 })}
-              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm w-24"
-            />
+            <label className="text-xs text-gray-400 block mb-1">刷新间隔</label>
+            <select
+              value={nearestCoinPoolRefreshSeconds(config.refresh_interval_seconds)}
+              onChange={(e) => setConfig({ ...config, refresh_interval_seconds: parseInt(e.target.value, 10) || 3600 })}
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm"
+            >
+              {COIN_POOL_REFRESH_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
           </div>
           <div>
             <label className="text-xs text-gray-400 block mb-1">榜单来源</label>
