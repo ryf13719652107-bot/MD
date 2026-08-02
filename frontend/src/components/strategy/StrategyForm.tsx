@@ -16,7 +16,7 @@ const schema = z.object({
   name: z.string().min(1, '请输入策略名称').max(100),
   direction: z.enum(['long', 'short']),
   symbol: z.string().optional().or(z.literal('')),
-  signal_source: z.enum(['rsi', 'wavetrend', 'trend_wt', 'martingale_base']),
+  signal_source: z.enum(['rsi', 'wavetrend', 'trend_wt', 'martingale_base', 'wick_spike']),
   rsi_period: z.number().min(5).max(50),
   timeframe: z.enum(['1m', '5m', '15m', '1h']),
   wt_channel_length: z.number().min(2).max(50),
@@ -27,6 +27,11 @@ const schema = z.object({
   st_factor: z.number().min(0.1).max(20),
   st_timeframe_1: z.enum(['5m', '15m', '30m', '1h', '4h']),
   st_timeframe_2: z.enum(['5m', '15m', '30m', '1h', '4h']),
+  wick_volume_mult: z.number().min(0).max(100),
+  wick_volume_sma_period: z.number().min(2).max(200),
+  wick_atr_period: z.number().min(2).max(100),
+  wick_spike_atr_mult: z.number().min(0.1).max(50),
+  wick_cooldown_sec: z.number().min(0).max(3600),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -90,6 +95,11 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       st_factor: initialData.st_factor ?? 3,
       st_timeframe_1: (initialData.st_timeframe_1 as StrategyFormData['st_timeframe_1']) || '15m',
       st_timeframe_2: (initialData.st_timeframe_2 as StrategyFormData['st_timeframe_2']) || '30m',
+      wick_volume_mult: initialData.wick_volume_mult ?? 8,
+      wick_volume_sma_period: initialData.wick_volume_sma_period ?? 20,
+      wick_atr_period: initialData.wick_atr_period ?? 14,
+      wick_spike_atr_mult: initialData.wick_spike_atr_mult ?? 5,
+      wick_cooldown_sec: initialData.wick_cooldown_sec ?? 0,
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -144,6 +154,11 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     st_factor: 3,
     st_timeframe_1: '15m',
     st_timeframe_2: '30m',
+    wick_volume_mult: 8,
+    wick_volume_sma_period: 20,
+    wick_atr_period: 14,
+    wick_spike_atr_mult: 5,
+    wick_cooldown_sec: 0,
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -260,6 +275,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <option value="wavetrend">WaveTrend</option>
               <option value="trend_wt">趋势WT（WT + 超级趋势过滤）</option>
               <option value="martingale_base">基础马丁（每根K线开盘开首单）</option>
+              <option value="wick_spike">毫秒接针（仅币安）</option>
             </select>
           </div>
           <div>
@@ -270,7 +286,11 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <option value="15m">15分钟</option>
               <option value="1h">1小时</option>
             </select>
-            <span className="text-xs text-gray-600">按K线收盘后执行</span>
+            <span className="text-xs text-gray-600">
+              {signalSource === 'wick_spike'
+                ? '接针用此周期算 ATR/成交量；开仓由成交价流触发'
+                : '按K线收盘后执行'}
+            </span>
           </div>
         </div>
 
@@ -288,8 +308,47 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           </div>
         )}
 
-        {(signalSource === 'wavetrend' || signalSource === 'trend_wt') && (
+        {signalSource === 'wick_spike' && (
+          <div className="space-y-3">
+            <div className="rounded-md border border-cyan-700/50 bg-cyan-900/20 px-3 py-2 text-xs text-cyan-200 space-y-1">
+              <p>毫秒接针：仅币安。先放量（当前量 ≥ Vol SMA × 倍数），再用本根极值追认「开盘价 ± 上根 ATR × 倍数」后立刻市价开仓，无反弹确认。</p>
+              <p>调度错峰：持仓管理在每根 K 第 40 秒，止盈检测第 30 秒；:00 附近不占锁，留给价流开仓。止盈/层数下方手填；加仓可开 WT 确认。</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass}>放量倍数（相对 Vol SMA）</label>
+                <input type="number" step="0.1" {...register('wick_volume_mult', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">默认 8；填 0 关闭放量过滤</span>
+              </div>
+              <div>
+                <label className={labelClass}>成交量 SMA 周期</label>
+                <input type="number" {...register('wick_volume_sma_period', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">默认 20</span>
+              </div>
+              <div>
+                <label className={labelClass}>ATR 周期</label>
+                <input type="number" {...register('wick_atr_period', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">用上根已收盘 ATR，默认 14</span>
+              </div>
+              <div>
+                <label className={labelClass}>刺出 ATR 倍数</label>
+                <input type="number" step="0.1" {...register('wick_spike_atr_mult', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">N = ATR × 该值；默认 5</span>
+              </div>
+              <div>
+                <label className={labelClass}>同币额外冷却（秒）</label>
+                <input type="number" {...register('wick_cooldown_sec', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">默认 0（仅同币同根 K 去重）</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {(signalSource === 'wavetrend' || signalSource === 'trend_wt' || signalSource === 'wick_spike') && (
           <div className="grid grid-cols-2 gap-3">
+            {signalSource === 'wick_spike' && (
+              <div className="col-span-2 text-xs text-gray-500">以下 WT 参数仅用于可选的马丁加仓确认</div>
+            )}
             <div>
               <label className={labelClass}>WT 通道长度</label>
               <input type="number" {...register('wt_channel_length', { valueAsNumber: true })} className={inputClass} />
@@ -562,13 +621,17 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
 
         <div>
           <label className={`${labelClass} flex items-center gap-2`}>
-            <span>马丁加仓信号确认</span>
+            <span>{signalSource === 'wick_spike' ? '加仓需 WaveTrend 确认' : '马丁加仓信号确认'}</span>
             <label className="relative inline-flex items-center cursor-pointer">
               <input type="checkbox" {...register('martingale_rsi_enabled')} className="sr-only peer" />
               <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
             </label>
           </label>
-          <span className="text-xs text-gray-600">开启后，加仓时仍需满足当前信号条件（RSI/WaveTrend），防止反向加仓</span>
+          <span className="text-xs text-gray-600">
+            {signalSource === 'wick_spike'
+              ? '开启后：跌幅到位且 WT 同向才加仓；关闭则仅按价格跌幅加仓'
+              : '开启后，加仓时仍需满足当前信号条件（RSI/WaveTrend），防止反向加仓'}
+          </span>
         </div>
 
         {signalSource === 'trend_wt' && martingaleRsiEnabled && (

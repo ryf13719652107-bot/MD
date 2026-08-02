@@ -8,7 +8,7 @@ class StrategyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     direction: Literal["long", "short"]
     symbol: Optional[str] = None  # None = use coin pool
-    signal_source: Literal["rsi", "wavetrend", "trend_wt", "martingale_base"] = "wavetrend"
+    signal_source: Literal["rsi", "wavetrend", "trend_wt", "martingale_base", "wick_spike"] = "wavetrend"
     rsi_period: int = Field(default=14, ge=5, le=50)
     timeframe: Literal["1m", "5m", "15m", "1h"] = "1m"
     margin_threshold: float = Field(default=0.0, ge=0)
@@ -75,13 +75,19 @@ class StrategyCreate(BaseModel):
         le=5.0,
         description="????????????????%): ???>?????????????????????",
     )
+    # Wick spike
+    wick_volume_mult: float = Field(default=8.0, ge=0, le=100)
+    wick_volume_sma_period: int = Field(default=20, ge=2, le=200)
+    wick_atr_period: int = Field(default=14, ge=2, le=100)
+    wick_spike_atr_mult: float = Field(default=5.0, gt=0, le=50)
+    wick_cooldown_sec: int = Field(default=0, ge=0, le=3600)
 
 
 class StrategyUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     direction: Optional[Literal["long", "short"]] = None
     symbol: Optional[str] = None
-    signal_source: Optional[Literal["rsi", "wavetrend", "trend_wt", "martingale_base"]] = None
+    signal_source: Optional[Literal["rsi", "wavetrend", "trend_wt", "martingale_base", "wick_spike"]] = None
     rsi_period: Optional[int] = Field(default=None, ge=5, le=50)
     timeframe: Optional[Literal["1m", "5m", "15m", "1h"]] = None
     margin_threshold: Optional[float] = Field(default=None, ge=0)
@@ -123,6 +129,11 @@ class StrategyUpdate(BaseModel):
     exclude_mainstream: Optional[bool] = None
     exclude_funding: Optional[bool] = None
     funding_rate_threshold_pct: Optional[float] = Field(default=None, ge=-5.0, le=5.0)
+    wick_volume_mult: Optional[float] = Field(default=None, ge=0, le=100)
+    wick_volume_sma_period: Optional[int] = Field(default=None, ge=2, le=200)
+    wick_atr_period: Optional[int] = Field(default=None, ge=2, le=100)
+    wick_spike_atr_mult: Optional[float] = Field(default=None, gt=0, le=50)
+    wick_cooldown_sec: Optional[int] = Field(default=None, ge=0, le=3600)
 
 
 class StrategyResponse(BaseModel):
@@ -173,6 +184,11 @@ class StrategyResponse(BaseModel):
     exclude_mainstream: bool
     exclude_funding: bool
     funding_rate_threshold_pct: float
+    wick_volume_mult: float = 8.0
+    wick_volume_sma_period: int = 20
+    wick_atr_period: int = 14
+    wick_spike_atr_mult: float = 5.0
+    wick_cooldown_sec: int = 0
     blacklisted_symbols: list[str] = Field(default_factory=list)
     status: str
     started_at: Optional[datetime] = None

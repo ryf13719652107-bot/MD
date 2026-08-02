@@ -778,6 +778,10 @@ class BinanceService:
     async def watch_klines(self, symbol: str, timeframe: str = "1m"):
         return await self.ws_exchange.watch_ohlcv(self._format_symbol(symbol), timeframe)
 
+    async def watch_trades(self, symbol: str):
+        """Public aggTrade / trades stream for millisecond last price."""
+        return await self.ws_exchange.watch_trades(self._format_symbol(symbol))
+
     # ---- Helpers ----
 
     async def close(self):

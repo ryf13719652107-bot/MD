@@ -117,6 +117,11 @@ async def lifespan(app: FastAPI):
     strategy_scheduler.stop()
     await coin_pool_service.stop_auto_refresh()
     try:
+        from .services.wick_spike_runner import wick_spike_runner
+        await wick_spike_runner.shutdown()
+    except Exception as e:
+        logger.warning("wick_spike_runner shutdown error: %s", e)
+    try:
         from .services.kline_stream import kline_stream_manager
         await kline_stream_manager.shutdown()
     except Exception as e:

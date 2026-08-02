@@ -74,6 +74,11 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN st_timeframe_1 VARCHAR(10) DEFAULT '15m'",
             "ALTER TABLE strategies ADD COLUMN st_timeframe_2 VARCHAR(10) DEFAULT '30m'",
             "ALTER TABLE strategies ADD COLUMN martingale_st_filter_enabled BOOLEAN DEFAULT 0",
+            "ALTER TABLE strategies ADD COLUMN wick_volume_mult FLOAT DEFAULT 8.0",
+            "ALTER TABLE strategies ADD COLUMN wick_volume_sma_period INTEGER DEFAULT 20",
+            "ALTER TABLE strategies ADD COLUMN wick_atr_period INTEGER DEFAULT 14",
+            "ALTER TABLE strategies ADD COLUMN wick_spike_atr_mult FLOAT DEFAULT 5.0",
+            "ALTER TABLE strategies ADD COLUMN wick_cooldown_sec INTEGER DEFAULT 0",
             "ALTER TABLE accounts ADD COLUMN cashflow_sync_cursor_ms INTEGER",
             "ALTER TABLE accounts ADD COLUMN exchange VARCHAR(20) DEFAULT 'binance'",
         ]

@@ -132,6 +132,25 @@ def _next_candle_close(timeframe: str) -> datetime:
     return midnight + timedelta(seconds=((elapsed // secs) + 1) * secs)
 
 
+def _next_period_offset(timeframe: str, offset_sec: int) -> datetime:
+    """Next fire time at (period_open + offset_sec), e.g. 1m + 40s → :00:40, :01:40…"""
+    now = now_beijing()
+    secs = TIMEFRAME_SECONDS.get(timeframe, 60)
+    offset_sec = max(0, min(int(offset_sec), secs - 1))
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = (now - midnight).total_seconds()
+    period_idx = int(elapsed // secs)
+    candidate = midnight + timedelta(seconds=period_idx * secs + offset_sec)
+    if candidate <= now:
+        candidate = midnight + timedelta(seconds=(period_idx + 1) * secs + offset_sec)
+    return candidate
+
+
+# 接针策略：持仓管理错开到每根 K 的第 40 秒，把 :00 附近锁让给价流开仓
+_WICK_SPIKE_MANAGE_OFFSET_SEC = 40
+_WICK_SPIKE_TP_OFFSET_SEC = 30
+
+
 class StrategyScheduler:
     def __init__(self):
         self._scheduler = AsyncIOScheduler(timezone=BEIJING_TZ)
@@ -154,7 +173,10 @@ class StrategyScheduler:
             )
             rows = list(result.scalars().all())
         for s in rows:
-            self._register_strategy_jobs(s.id, s.timeframe)
+            self._register_strategy_jobs(s.id, s.timeframe, s.signal_source)
+            if s.signal_source == "wick_spike":
+                from .wick_spike_runner import wick_spike_runner
+                await wick_spike_runner.start(s.id)
             strategy_log_service.info(
                 s.id, "后端已重启：已恢复调度任务（仍为运行中）",
             )
@@ -163,10 +185,24 @@ class StrategyScheduler:
                 s.id, s.name,
             )
 
-    def _register_strategy_jobs(self, strategy_id: int, timeframe: str) -> None:
-        """注册主周期任务（:00 扫信号/开仓）+ 中段任务（:30 止盈检测/加仓）；不写数据库。"""
+    def _register_strategy_jobs(
+        self,
+        strategy_id: int,
+        timeframe: str,
+        signal_source: str = "",
+    ) -> None:
+        """注册主周期任务 + 中段止盈任务；不写数据库。
+
+        普通信号：收盘 :00 管理/开仓，:+30s 止盈检测。
+        接针 wick_spike：:+40s 持仓管理（不扫新开），:+30s 止盈检测 —— 把 :00 附近留给价流。
+        """
         interval_seconds = TIMEFRAME_SECONDS.get(timeframe, 60)
-        next_run = _next_candle_close(timeframe)
+        if signal_source == "wick_spike":
+            next_manage = _next_period_offset(timeframe, _WICK_SPIKE_MANAGE_OFFSET_SEC)
+            next_tp = _next_period_offset(timeframe, _WICK_SPIKE_TP_OFFSET_SEC)
+        else:
+            next_manage = _next_candle_close(timeframe)
+            next_tp = next_manage + timedelta(seconds=30)
 
         job_id = f"strategy_{strategy_id}"
         if self._scheduler.get_job(job_id):
@@ -177,7 +213,7 @@ class StrategyScheduler:
             seconds=interval_seconds,
             id=job_id,
             args=[strategy_id],
-            next_run_time=next_run,
+            next_run_time=next_manage,
         )
         self._strategy_tasks[strategy_id] = job_id
 
@@ -190,8 +226,16 @@ class StrategyScheduler:
             seconds=interval_seconds,
             id=tp_job_id,
             args=[strategy_id],
-            next_run_time=next_run + timedelta(seconds=30),
+            next_run_time=next_tp,
         )
+        if signal_source == "wick_spike":
+            logger.info(
+                "Strategy %d wick_spike jobs: manage@+%ds tp@+%ds (timeframe=%s)",
+                strategy_id,
+                _WICK_SPIKE_MANAGE_OFFSET_SEC,
+                _WICK_SPIKE_TP_OFFSET_SEC,
+                timeframe,
+            )
 
     def start(self):
         if not self._scheduler.running:
@@ -214,14 +258,36 @@ class StrategyScheduler:
             logger.warning("Strategy %d not found", strategy_id)
             return False
 
-        self._register_strategy_jobs(strategy_id, strategy.timeframe)
+        if strategy.signal_source == "wick_spike":
+            account = await session.get(Account, strategy.account_id)
+            if account_exchange_id(account) != "binance":
+                strategy_log_service.error(
+                    strategy_id,
+                    "毫秒接针仅支持币安账户，无法启动",
+                )
+                logger.warning(
+                    "Strategy %d wick_spike rejected: account exchange is not binance",
+                    strategy_id,
+                )
+                return False
+
+        self._register_strategy_jobs(
+            strategy_id, strategy.timeframe, strategy.signal_source
+        )
 
         strategy.status = "running"
         strategy.started_at = now_beijing()
         await session.commit()
         await session.refresh(strategy)
         logger.info("Strategy %d (%s) started", strategy_id, strategy.name)
-        strategy_log_service.success(strategy_id, f"策略启动 — {strategy.name}")
+        if strategy.signal_source == "wick_spike":
+            strategy_log_service.success(
+                strategy_id,
+                f"策略启动 — {strategy.name}（接针：持仓管理每根K第{_WICK_SPIKE_MANAGE_OFFSET_SEC}秒，"
+                f"止盈检测第{_WICK_SPIKE_TP_OFFSET_SEC}秒；首仓由价流触发）",
+            )
+        else:
+            strategy_log_service.success(strategy_id, f"策略启动 — {strategy.name}")
         from .leverage_prewarm import prewarm_strategy_leverage_by_id
         from .kline_prewarm import prewarm_strategy_klines_by_id
 
@@ -232,9 +298,16 @@ class StrategyScheduler:
             task = asyncio.create_task(coro)
             self._bg_sync_tasks.add(task)
             task.add_done_callback(self._bg_sync_tasks.discard)
+
+        if strategy.signal_source == "wick_spike":
+            from .wick_spike_runner import wick_spike_runner
+            await wick_spike_runner.start(strategy_id)
         return True
 
     async def remove_strategy(self, strategy_id: int):
+        from .wick_spike_runner import wick_spike_runner
+        await wick_spike_runner.stop(strategy_id)
+
         job_id = f"strategy_{strategy_id}"
         tp_job_id = f"strategy_{strategy_id}_tp"
         self._strategy_tasks.pop(strategy_id, None)
@@ -737,6 +810,8 @@ class StrategyScheduler:
                     await session.rollback()
 
             # Phase 1b + 2: signal scan and new opens — K-line close (:00) only.
+            # wick_spike: 首仓由价流循环开，收盘 tick 只管理持仓（马丁/止盈/止损）。
+            wick_spike_mode = strategy.signal_source == "wick_spike"
             manage_symbols: list[tuple[str, list[Position]]] = []
             if mid_candle:
                 seen_manage: set[str] = set()
@@ -755,6 +830,8 @@ class StrategyScheduler:
                     open_positions = open_by_norm.get(sym_key, [])
                     if open_positions:
                         manage_symbols.append((symbol, open_positions))
+                        continue
+                    if wick_spike_mode:
                         continue
                     allow_new = pool_entry_norms is None or sym_key in pool_entry_norms
                     if allow_new:

@@ -19,7 +19,14 @@ class Strategy(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=True)  # NULL = use coin pool
 
     # Signal source
-    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base'
+    signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base' | 'wick_spike'
+
+    # Wick spike (毫秒接针) params — only used when signal_source == wick_spike
+    wick_volume_mult: Mapped[float] = mapped_column(Float, default=8.0, server_default="8.0")
+    wick_volume_sma_period: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
+    wick_atr_period: Mapped[int] = mapped_column(Integer, default=14, server_default="14")
+    wick_spike_atr_mult: Mapped[float] = mapped_column(Float, default=5.0, server_default="5.0")
+    wick_cooldown_sec: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)

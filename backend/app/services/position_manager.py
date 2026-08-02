@@ -404,7 +404,7 @@ class PositionManager:
 
     @staticmethod
     def _wt_like_limit(signal_source: str) -> int:
-        return 200 if signal_source in ("wavetrend", "trend_wt") else 100
+        return 200 if signal_source in ("wavetrend", "trend_wt", "wick_spike") else 100
 
     async def _load_klines(
         self,
@@ -511,6 +511,19 @@ class PositionManager:
         klines_signal = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
         rsi = 0.0
         signal_label = "RSI"
+        if strategy.signal_source == "wick_spike":
+            # 首仓由 WickSpikeRunner 负责；此处仅供持仓管理取价/K线，信号恒为中性。
+            signal = Signal.NEUTRAL
+            signal_label = "毫秒接针"
+            strategy.last_signal = signal.value
+            strategy.last_signal_at = now_beijing()
+            try:
+                current_price = float(klines[-1][4])
+            except (TypeError, ValueError, IndexError):
+                logger.warning("Strategy %d: %s invalid kline data, skipping", strategy_id, symbol)
+                strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
+                return None
+            return klines, current_price, signal_label, signal, float(rsi or 0.0)
         if strategy.signal_source == "martingale_base":
             # 基础马丁：不看任何指标，每根 K 线开盘按策略方向直接开首单。
             signal = Signal.LONG if strategy.direction == "long" else Signal.SHORT
@@ -1495,7 +1508,7 @@ class PositionManager:
             and public_binance is not None
         ):
             klines_confirm = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
-            if strategy.signal_source == "wavetrend":
+            if strategy.signal_source in ("wavetrend", "wick_spike"):
                 wt = calculate_wavetrend(
                     klines_confirm, strategy.wt_channel_length, strategy.wt_average_length
                 )

@@ -157,8 +157,11 @@ export default function StrategyPage() {
             <div className="grid grid-cols-2 gap-2 text-xs text-gray-400">
               <div>交易对: <span className="text-gray-200">{s.symbol || '选币池自动'}</span></div>
               <div>K线周期: <span className="text-gray-200">{s.timeframe}</span></div>
-              {s.signal_source === 'wavetrend' || s.signal_source === 'trend_wt' ? (
-                <div>WT参数: <span className="text-gray-200">通道{s.wt_channel_length} 均线{s.wt_average_length}{s.signal_source === 'trend_wt' ? ` · ST ${s.st_timeframe_1 ?? '15m'}+${s.st_timeframe_2 ?? '30m'}` : ''}</span></div>
+              {s.signal_source === 'wick_spike' ? (
+                <div>接针: <span className="text-gray-200">量×{s.wick_volume_mult ?? 8} ATR×{s.wick_spike_atr_mult ?? 5}</span></div>
+              ) : null}
+              {s.signal_source === 'wavetrend' || s.signal_source === 'trend_wt' || s.signal_source === 'wick_spike' ? (
+                <div>WT参数: <span className="text-gray-200">通道{s.wt_channel_length} 均线{s.wt_average_length}{s.signal_source === 'trend_wt' ? ` · ST ${s.st_timeframe_1 ?? '15m'}+${s.st_timeframe_2 ?? '30m'}` : s.signal_source === 'wick_spike' ? ' · 加仓确认用' : ''}</span></div>
               ) : s.signal_source === 'martingale_base' ? (
                 <div>开仓方式: <span className="text-gray-200">每根K线开盘</span></div>
               ) : (

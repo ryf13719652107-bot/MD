@@ -4,7 +4,7 @@ export interface Strategy {
   name: string;
   direction: 'long' | 'short';
   symbol: string | null;
-  signal_source: 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base';
+  signal_source: 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base' | 'wick_spike';
   rsi_period: number;
   timeframe: string;
   wt_channel_length: number;
@@ -15,6 +15,11 @@ export interface Strategy {
   st_factor: number;
   st_timeframe_1: string;
   st_timeframe_2: string;
+  wick_volume_mult: number;
+  wick_volume_sma_period: number;
+  wick_atr_period: number;
+  wick_spike_atr_mult: number;
+  wick_cooldown_sec: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -63,7 +68,7 @@ export interface StrategyFormData {
   name: string;
   direction: 'long' | 'short';
   symbol?: string;
-  signal_source: 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base';
+  signal_source: 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base' | 'wick_spike';
   rsi_period: number;
   timeframe: string;
   wt_channel_length: number;
@@ -74,6 +79,11 @@ export interface StrategyFormData {
   st_factor: number;
   st_timeframe_1: string;
   st_timeframe_2: string;
+  wick_volume_mult: number;
+  wick_volume_sma_period: number;
+  wick_atr_period: number;
+  wick_spike_atr_mult: number;
+  wick_cooldown_sec: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -134,6 +144,7 @@ export function formatSignalSourceLabel(
   if (source === 'wavetrend') return 'WaveTrend';
   if (source === 'trend_wt') return '趋势WT';
   if (source === 'martingale_base') return '基础马丁';
+  if (source === 'wick_spike') return '毫秒接针';
   return `RSI ${direction === 'long' ? '<' : '>'} ${rsiEntryThreshold ?? ''}`;
 }
 
@@ -176,6 +187,7 @@ export function formatLastSignalText(
           ? '无信号'
           : lastSignal ?? '无信号';
   if (source === 'martingale_base') return `基础马丁 → ${dir}`;
+  if (source === 'wick_spike') return `接针 vol×${lastRsi ?? '-'} → ${dir}`;
   const metric = source === 'wavetrend' || source === 'trend_wt' ? 'WT1' : 'RSI';
   return `${metric} ${lastRsi ?? '-'} → ${dir}`;
 }

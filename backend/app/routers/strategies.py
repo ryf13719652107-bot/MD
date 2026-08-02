@@ -328,7 +328,12 @@ async def start_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
         except Exception:
             pass
 
-    await strategy_scheduler.add_strategy(strategy_id, session=db)
+    ok = await strategy_scheduler.add_strategy(strategy_id, session=db)
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="策略启动失败（毫秒接针仅支持币安账户，或策略不存在）",
+        )
     return {"status": "running", "id": strategy_id}
 
 

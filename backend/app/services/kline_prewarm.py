@@ -22,7 +22,7 @@ _KLINE_PREWARM_CONCURRENCY = 8
 
 
 def _signal_kline_limit(strategy: Strategy) -> int:
-    return 200 if strategy.signal_source in ("wavetrend", "trend_wt") else 100
+    return 200 if strategy.signal_source in ("wavetrend", "trend_wt", "wick_spike") else 100
 
 
 def _strategy_kline_timeframes(strategy: Strategy) -> list[tuple[str, int]]:
