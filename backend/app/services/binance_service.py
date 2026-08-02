@@ -36,24 +36,41 @@ def _float_or_zero(value) -> float:
 
 
 def extract_usdt_wallet_balance(balance: dict) -> float:
-    """Return a stable USDT wallet/equity value from ccxt Binance futures balance."""
-    info = balance.get("info") if isinstance(balance, dict) else {}
-    candidates: list[float] = []
+    """USDT-M 账户权益（随未实现盈亏变动）。
+
+    优先 totalMarginBalance（保证金余额 = 钱包 + 未实现），与币安 App 大字余额、
+    Gate 权益口径一致。禁止用 max()：浮亏时 wallet>margin 会冻在钱包余额上，
+    看起来像「余额不更新」。
+    """
+    if not isinstance(balance, dict):
+        return 0.0
+
+    info = balance.get("info")
     if isinstance(info, dict):
-        for key in ("totalWalletBalance", "totalMarginBalance", "availableBalance"):
-            candidates.append(_float_or_zero(info.get(key)))
+        for key in ("totalMarginBalance", "totalWalletBalance"):
+            v = _float_or_zero(info.get(key))
+            if v > 0:
+                return v
 
     for section in ("total", "free"):
-        data = balance.get(section, {}) if isinstance(balance, dict) else {}
+        data = balance.get(section) or {}
         if isinstance(data, dict):
-            candidates.append(_float_or_zero(data.get("USDT")))
+            v = _float_or_zero(data.get("USDT"))
+            if v > 0:
+                return v
 
-    usdt_row = balance.get("USDT", {}) if isinstance(balance, dict) else {}
+    usdt_row = balance.get("USDT") or {}
     if isinstance(usdt_row, dict):
         for key in ("total", "free"):
-            candidates.append(_float_or_zero(usdt_row.get(key)))
+            v = _float_or_zero(usdt_row.get(key))
+            if v > 0:
+                return v
 
-    return max(candidates, default=0.0)
+    if isinstance(info, dict):
+        v = _float_or_zero(info.get("availableBalance"))
+        if v > 0:
+            return v
+    return 0.0
 
 
 def _normalize_symbol_for_tradefi(s: str) -> str:

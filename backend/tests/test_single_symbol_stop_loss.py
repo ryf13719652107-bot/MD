@@ -38,7 +38,8 @@ def test_single_symbol_stop_loss_600_wallet_boundary():
     )
 
 
-def test_extract_usdt_wallet_balance_prefers_futures_wallet_fields():
+def test_extract_usdt_wallet_balance_prefers_margin_equity_over_wallet():
+    """浮亏时 margin < wallet；必须取保证金余额，否则仪表盘余额看似冻结。"""
     balance = {
         "free": {"USDT": 12},
         "total": {"USDT": 20},
@@ -49,7 +50,16 @@ def test_extract_usdt_wallet_balance_prefers_futures_wallet_fields():
             "totalMarginBalance": "244.1",
         },
     }
-    assert extract_usdt_wallet_balance(balance) == 248.5
+    assert extract_usdt_wallet_balance(balance) == 244.1
+
+
+def test_extract_usdt_wallet_balance_falls_back_to_wallet_when_no_margin():
+    balance = {
+        "free": {"USDT": 5},
+        "total": {"USDT": 5},
+        "info": {"totalWalletBalance": "248"},
+    }
+    assert extract_usdt_wallet_balance(balance) == 248.0
 
 
 def test_single_symbol_stop_loss_uses_wallet_not_small_available_balance():

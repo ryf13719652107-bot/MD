@@ -37,7 +37,7 @@ export default function DashboardPage() {
   const leverageColor = data.leverage_multiplier > 5 ? 'text-red-400' : data.leverage_multiplier > 2 ? 'text-yellow-400' : 'text-green-400';
 
   const mainStats = [
-    { label: '钱包余额', value: `${data.total_balance.toFixed(2)} USDT`, icon: Wallet, color: 'text-blue-400' },
+    { label: '保证金余额', value: `${data.total_balance.toFixed(2)} USDT`, icon: Wallet, color: 'text-blue-400' },
     { label: '可用余额', value: `${data.available_balance.toFixed(2)} USDT`, icon: PiggyBank, color: 'text-green-400' },
     { label: '杠杆倍数', value: `${data.leverage_multiplier.toFixed(2)}x`, icon: Gauge, color: leverageColor },
     {
