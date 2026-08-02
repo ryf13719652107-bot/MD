@@ -124,7 +124,7 @@ class CoinPoolService:
     async def ensure_scheduled_pool_if_due(
         self, exchange_service, strategy: Strategy, *, exchange: str = "binance"
     ) -> None:
-        """Refresh at anchor time when the background loop has not run yet (e.g. tick vs loop race)."""
+        """若 scheduled 池到期且后台循环未刷：只投递后台刷新，不阻塞调用方（接针价流）。"""
         if not strategy.use_coin_pool:
             return
         if getattr(strategy, "coin_pool_fetch_mode", "interval") != "scheduled":
@@ -140,10 +140,15 @@ class CoinPoolService:
         delay = self._seconds_until_next_refresh(last_dt, exchange=ex)
         if delay > 30:
             return
+        if self._refresh_lock.locked():
+            return
+        self._fire_background(self._refresh_exchange_locked(exchange_service, ex))
+
+    async def _refresh_exchange_locked(self, exchange_service, exchange: str) -> None:
+        ex = normalize_exchange_id(exchange)
+        if self._refresh_lock.locked():
+            return
         async with self._refresh_lock:
-            coins = await self.get_pool(source, exchange=ex)
-            if self._coin_pool_valid_for_strategy(strategy, coins):
-                return
             await self.refresh_pool_sources(exchange_service, exchange=ex)
 
     @staticmethod
@@ -713,15 +718,16 @@ class CoinPoolService:
                     await self._interruptible_sleep(wait)
                     continue
 
-                try:
-                    async with self._refresh_lock:
-                        for ex in due:
-                            client = await get_public_exchange(ex)
-                            await self.refresh_pool_sources(client, exchange=ex)
-                except Exception as e:
-                    for ex in due:
+                # 逐所后台刷新，避免长时间占满事件循环拖住接针价流
+                for ex in due:
+                    try:
+                        client = await get_public_exchange(ex)
+                        self._fire_background(self._refresh_exchange_locked(client, ex))
+                    except Exception as e:
                         self._set_refresh_status(ex, ok=False, error=str(e)[:200])
-                    logger.error("Coin pool refresh error: %s", e)
+                        logger.error("Coin pool refresh schedule error [%s]: %s", ex, e)
+                # 勿紧挨着再扫：给后台任务让出时间片
+                await self._interruptible_sleep(5.0)
 
         if self._refresh_task is None or self._refresh_task.done():
             self._refresh_task = asyncio.create_task(_loop())

@@ -62,6 +62,7 @@ async def prewarm_symbols_klines(
                 rows = await kline_stream_manager.get(
                     public_client, sym, timeframe, min_bars=min_bars
                 )
+                await asyncio.sleep(0)  # 让出给接针价流
                 return len(rows) >= min_bars
             except Exception as e:
                 logger.debug("kline prewarm %s %s failed: %s", sym, timeframe, e)

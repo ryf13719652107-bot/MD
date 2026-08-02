@@ -48,7 +48,9 @@ from .wick_spike_engine import (
     WickSpikeParams,
     WickSymbolState,
     build_bar_snapshot,
+    enrich_snap_with_trades,
     mark_bar_triggered,
+    near_miss_diag,
     on_tick,
     release_bar_trigger,
 )
@@ -57,14 +59,28 @@ from .strategy_engine import Signal
 logger = logging.getLogger(__name__)
 
 _SYMBOL_REFRESH_SEC = 15.0
-_POLL_IDLE_SEC = 0.02
+_POLL_IDLE_SEC = 0.005
 _KLINE_MIN_BARS = 80
+# 策略参数/DB 重载间隔（热路径不每圈查库）
+_STRATEGY_RELOAD_SEC = 2.0
+# 近阈值诊断写入 bot.log 的节流（秒）；不进前端策略日志
+_NEAR_MISS_LOG_SEC = 8.0
+# 缓冲不足时后台 REST 纠偏节流
+_BG_REST_SEC = 5.0
+# 抢策略锁最长等待（毫秒级 TP 检测），超时则 release 重试
+_LOCK_WAIT_SEC = 0.12
 
 
 class WickSpikeRunner:
     def __init__(self):
         self._tasks: dict[int, asyncio.Task] = {}
+        self._bg_tasks: set[asyncio.Task] = set()
         self._position_mgr = PositionManager()
+
+    def _fire_bg(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     def is_running(self, strategy_id: int) -> bool:
         t = self._tasks.get(strategy_id)
@@ -103,30 +119,78 @@ class WickSpikeRunner:
         ids = list(self._tasks.keys())
         for sid in ids:
             await self.stop(sid)
+        bg = list(self._bg_tasks)
+        self._bg_tasks.clear()
+        for t in bg:
+            t.cancel()
+        for t in bg:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         await price_stream_manager.shutdown()
 
     async def _run_strategy(self, strategy_id: int) -> None:
         strategy_log_service.info(strategy_id, "毫秒接针价流循环已启动")
         states: dict[str, WickSymbolState] = {}
         last_seq: dict[str, int] = {}
+        last_kline_fp: dict[str, tuple] = {}
+        last_bg_rest: dict[str, float] = {}
+        last_near_miss_log: dict[str, float] = {}
         symbols: list[str] = []
         next_refresh = 0.0
+        next_strategy_reload = 0.0
         total_margin = 0.0
         tick_ctx = TickContext()
         auth = None
         public = None
         leverage = 10.0
+        timeframe = "1m"
+        params = WickSpikeParams(direction="short")
+        atr_period = 14
+        vol_period = 20
+        direction = "short"
+        filter_strategy = None
+        # 后台刷新结果槽：热循环只消费，不 await 刷池/预热
+        refresh_slot: dict = {"task": None, "packed": None, "failed": False}
+
+        async def _bg_refresh() -> None:
+            try:
+                packed = await self._refresh_context(strategy_id)
+                if packed is None:
+                    refresh_slot["failed"] = True
+                else:
+                    refresh_slot["packed"] = packed
+                    refresh_slot["failed"] = False
+            except Exception as e:
+                logger.warning("wick_spike bg refresh %d: %s", strategy_id, e)
+                refresh_slot["failed"] = True
+            finally:
+                refresh_slot["task"] = None
+
+        async def _bg_prewarm_klines(pub, syms: list[str], tf: str) -> None:
+            for sym in syms:
+                try:
+                    await kline_stream_manager.get(pub, sym, tf, _KLINE_MIN_BARS)
+                except Exception:
+                    pass
+                await asyncio.sleep(0)
+
+        async def _bg_rest_one(pub, sym: str, tf: str) -> None:
+            try:
+                await kline_stream_manager.refresh_rest(pub, sym, tf, _KLINE_MIN_BARS)
+            except Exception:
+                pass
 
         try:
             while True:
                 now = time.time()
-                if now >= next_refresh:
-                    packed = await self._refresh_context(strategy_id)
-                    if packed is None:
-                        await asyncio.sleep(2.0)
-                        continue
+                # 应用已完成的后台刷新（不阻塞）
+                packed = refresh_slot.get("packed")
+                if packed is not None:
+                    refresh_slot["packed"] = None
                     (
-                        strategy,
+                        _strategy_stub,
                         symbols,
                         tick_ctx,
                         total_margin,
@@ -134,72 +198,116 @@ class WickSpikeRunner:
                         public,
                         leverage,
                     ) = packed
-                    await price_stream_manager.set_wanted(public, set(symbols))
-                    # Pre-warm klines for ATR/volume
-                    for sym in symbols:
-                        try:
-                            await kline_stream_manager.get(
-                                public, sym, strategy.timeframe, _KLINE_MIN_BARS
-                            )
-                        except Exception:
-                            pass
+                    timeframe = getattr(_strategy_stub, "timeframe", timeframe) or timeframe
+                    await price_stream_manager.set_wanted(
+                        public, set(symbols), timeframe=timeframe
+                    )
+                    self._fire_bg(_bg_prewarm_klines(public, list(symbols), timeframe))
+
+                if now >= next_refresh:
                     next_refresh = now + _SYMBOL_REFRESH_SEC
+                    t = refresh_slot.get("task")
+                    if t is None or t.done():
+                        refresh_slot["task"] = asyncio.create_task(_bg_refresh())
+                        self._bg_tasks.add(refresh_slot["task"])
+                        refresh_slot["task"].add_done_callback(self._bg_tasks.discard)
 
                 if not symbols or auth is None or public is None:
-                    await asyncio.sleep(_POLL_IDLE_SEC)
+                    if refresh_slot.get("failed") and (refresh_slot.get("task") is None):
+                        await asyncio.sleep(2.0)
+                        refresh_slot["failed"] = False
+                        next_refresh = 0.0
+                    else:
+                        await asyncio.sleep(_POLL_IDLE_SEC)
                     continue
 
-                # Reload strategy fields each cycle (keep attrs after session closes)
-                async with async_session() as session:
-                    strategy = await session.get(Strategy, strategy_id)
-                    if not strategy or strategy.status != "running":
-                        break
-                    if strategy.signal_source != "wick_spike":
-                        break
-                    params = WickSpikeParams(
-                        direction=strategy.direction,
-                        volume_mult=float(getattr(strategy, "wick_volume_mult", 8.0) or 0),
-                        atr_mult=float(getattr(strategy, "wick_spike_atr_mult", 5.0) or 5.0),
-                        cooldown_sec=float(getattr(strategy, "wick_cooldown_sec", 0) or 0),
-                    )
-                    atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
-                    vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)
-                    timeframe = strategy.timeframe
-                    direction = strategy.direction
-                    # Detach a filter stub with only fields used by entry filters
-                    filter_strategy = strategy
-                    session.expunge(filter_strategy)
+                # 策略参数低频重载，避免每圈打 DB
+                if filter_strategy is None or now >= next_strategy_reload:
+                    next_strategy_reload = now + _STRATEGY_RELOAD_SEC
+                    async with async_session() as session:
+                        strategy = await session.get(Strategy, strategy_id)
+                        if not strategy or strategy.status != "running":
+                            break
+                        if strategy.signal_source != "wick_spike":
+                            break
+                        params = WickSpikeParams(
+                            direction=strategy.direction,
+                            volume_mult=float(getattr(strategy, "wick_volume_mult", 8.0) or 0),
+                            atr_mult=float(getattr(strategy, "wick_spike_atr_mult", 5.0) or 5.0),
+                            cooldown_sec=float(getattr(strategy, "wick_cooldown_sec", 0) or 0),
+                        )
+                        atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
+                        vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)
+                        timeframe = strategy.timeframe
+                        direction = strategy.direction
+                        filter_strategy = strategy
+                        session.expunge(filter_strategy)
 
-                any_update = False
+                # 优先处理刚有成交的币，降低池内扫尾延迟
+                hot: list[str] = []
+                cold: list[str] = []
                 for sym in symbols:
                     sym_key = _norm_sym(sym)
-                    got = price_stream_manager.get(sym)
-                    if not got:
-                        continue
-                    price, _ts = got
                     seq = price_stream_manager.seq(sym_key)
-                    if last_seq.get(sym_key) == seq:
-                        continue
-                    last_seq[sym_key] = seq
-                    any_update = True
+                    if last_seq.get(sym_key) != seq:
+                        hot.append(sym)
+                    else:
+                        cold.append(sym)
+                scan_order = hot + cold
+
+                any_update = False
+                for sym in scan_order:
+                    sym_key = _norm_sym(sym)
+                    got = price_stream_manager.get(sym)
+                    price = float(got[0]) if got else 0.0
+                    trade_ts_ms = int(got[1]) if got else 0
+                    seq = price_stream_manager.seq(sym_key)
+                    price_changed = last_seq.get(sym_key) != seq
+                    if price_changed:
+                        last_seq[sym_key] = seq
 
                     if not self._position_mgr._passes_new_entry_filters(
                         sym, filter_strategy, tick_ctx
                     ):
                         continue
 
-                    # Skip if already have open leg this direction
                     side = "long" if direction == "long" else "short"
                     if tick_ctx.exchange_legs.get((sym_key, side), 0) > 0:
                         continue
 
-                    try:
-                        klines = await kline_stream_manager.get(
-                            public, sym, timeframe, _KLINE_MIN_BARS
-                        )
-                    except Exception as e:
-                        logger.debug("wick_spike klines %s: %s", sym, e)
+                    # 热路径：只读 WS 内存，绝不 await REST
+                    klines = kline_stream_manager.peek(public, sym, timeframe)
+                    if len(klines) < atr_period + 2:
+                        if now - last_bg_rest.get(sym_key, 0.0) >= _BG_REST_SEC:
+                            last_bg_rest[sym_key] = now
+                            self._fire_bg(_bg_rest_one(public, sym, timeframe))
                         continue
+
+                    last = klines[-1]
+                    try:
+                        fp = (
+                            int(last[0]),
+                            float(last[2]),
+                            float(last[3]),
+                            float(last[4]),
+                            float(last[5]),
+                        )
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    kline_changed = last_kline_fp.get(sym_key) != fp
+                    if not price_changed and not kline_changed:
+                        continue
+                    last_kline_fp[sym_key] = fp
+                    any_update = True
+
+                    if price <= 0:
+                        try:
+                            price = float(last[4])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                    if price <= 0:
+                        continue
+
                     snap = build_bar_snapshot(
                         klines,
                         atr_period=atr_period,
@@ -207,11 +315,29 @@ class WickSpikeRunner:
                     )
                     if snap is None:
                         continue
+                    # 成交流量/高低补强（K 线 WS 量常滞后数秒）
+                    snap = enrich_snap_with_trades(
+                        snap,
+                        trade_vol=price_stream_manager.bar_volume(sym_key),
+                        trade_high=price_stream_manager.bar_high(sym_key),
+                        trade_low=price_stream_manager.bar_low(sym_key),
+                    )
 
                     st = states.setdefault(sym_key, WickSymbolState())
                     now_ms = int(time.time() * 1000)
+                    t_signal0 = time.perf_counter()
                     signal = on_tick(st, params, snap, price, now_ms)
                     if signal is None:
+                        if now - last_near_miss_log.get(sym_key, 0.0) >= _NEAR_MISS_LOG_SEC:
+                            diag = near_miss_diag(params, snap, st, price)
+                            if diag:
+                                last_near_miss_log[sym_key] = now
+                                logger.info(
+                                    "wick_spike near-miss strategy=%d %s %s",
+                                    strategy_id,
+                                    sym_key,
+                                    diag,
+                                )
                         continue
 
                     outcome = await self._try_open(
@@ -226,6 +352,8 @@ class WickSpikeRunner:
                         total_margin=total_margin,
                         leverage=leverage,
                         tick_ctx=tick_ctx,
+                        trade_ts_ms=trade_ts_ms,
+                        signal_detect_perf=t_signal0,
                     )
                     if outcome == "opened":
                         mark_bar_triggered(st, params, snap.bar_open_ts, now_ms)
@@ -316,6 +444,7 @@ class WickSpikeRunner:
 
         if strategy.use_coin_pool:
             try:
+                # scheduled 到期只投递后台刷池，不在此 await 完整刷新
                 await coin_pool_service.ensure_scheduled_pool_if_due(
                     public, strategy, exchange="binance"
                 )
@@ -395,34 +524,57 @@ class WickSpikeRunner:
         total_margin: float,
         leverage: float,
         tick_ctx: TickContext,
+        trade_ts_ms: int = 0,
+        signal_detect_perf: float = 0.0,
     ) -> str:
         """Returns: opened | busy | has_pos | retryable_fail | committed_fail"""
         from .scheduler import strategy_scheduler
 
         lock = strategy_scheduler._get_strategy_lock(strategy_id)
-        if lock.locked():
-            # 不长时间死等 tick（管理池子可能数秒），避免接到过时飞刀；调用方会 release 后重试
+        # 短等锁：躲过 TP 检测的短暂占用；manage 长占则超时重试
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=_LOCK_WAIT_SEC)
+        except asyncio.TimeoutError:
             strategy_log_service.info(
                 strategy_id,
-                f"{symbol} 接针触发但 :00/:30 调度占锁，稍后重试",
+                f"{symbol} 接针触发但调度占锁，稍后重试",
             )
             return "busy"
 
         vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
         n = snap.atr * params.atr_mult
+        trade_age_ms = (
+            max(0, int(time.time() * 1000) - int(trade_ts_ms)) if trade_ts_ms > 0 else -1
+        )
+        detect_ms = (
+            (time.perf_counter() - signal_detect_perf) * 1000.0
+            if signal_detect_perf > 0
+            else -1.0
+        )
         strategy_log_service.info(
             strategy_id,
             f"{symbol} 毫秒接针触发 → {signal.value} "
             f"价={price:.6g} open={snap.bar_open:.6g} N={n:.6g} "
             f"ATR={snap.atr:.6g} vol×={vol_ratio:.1f}",
         )
+        logger.info(
+            "wick_spike trigger strategy=%d %s %s px=%.6g vol×=%.2f "
+            "trade_age_ms=%d detect_to_lock_ms=%.1f",
+            strategy_id,
+            symbol,
+            signal.value,
+            price,
+            vol_ratio,
+            trade_age_ms,
+            detect_ms,
+        )
 
-        async with lock:
+        t_open0 = time.perf_counter()
+        try:
             async with async_session() as session:
                 strategy = await session.get(Strategy, strategy_id)
                 if not strategy or strategy.status != "running":
                     return "retryable_fail"
-                # Re-check no open position in DB
                 sym_key = _norm_sym(symbol)
                 existing = list(
                     (
@@ -465,16 +617,24 @@ class WickSpikeRunner:
                     )
                 if api_res is None:
                     await session.rollback()
-                    # 未成交（黑名单/杠杆/交易所拒单）— 同根可再试
                     return "retryable_fail"
                 try:
                     await self._position_mgr.execute_open_db(session, strategy, api_res)
                     await session.commit()
-                    # Update in-memory legs so we don't double-fire before next refresh
                     side = signal.value
                     tick_ctx.exchange_legs[(sym_key, side)] = (
                         tick_ctx.exchange_legs.get((sym_key, side), 0)
                         + float(api_res.filled_qty or 0)
+                    )
+                    open_ms = (time.perf_counter() - t_open0) * 1000.0
+                    logger.info(
+                        "wick_spike opened strategy=%d %s open_api_db_ms=%.0f "
+                        "trade_age_ms=%d vol×=%.2f",
+                        strategy_id,
+                        symbol,
+                        open_ms,
+                        trade_age_ms,
+                        vol_ratio,
                     )
                     return "opened"
                 except Exception as e:
@@ -485,7 +645,8 @@ class WickSpikeRunner:
                         f"{symbol} 接针开仓已可能成交但写库失败 — 请手动检查交易所，本根不再重试",
                     )
                     return "committed_fail"
-        return "retryable_fail"
+        finally:
+            lock.release()
 
 
 wick_spike_runner = WickSpikeRunner()

@@ -189,6 +189,45 @@ class KlineStreamManager:
                         self._janitor_loop(), name="kline_stream_janitor"
                     )
 
+    def peek(
+        self,
+        public_client,
+        symbol: str,
+        timeframe: str,
+    ) -> list[list]:
+        """同步读内存缓冲，零 await — 接针热路径专用。"""
+        key = self._key(public_client, symbol, timeframe)
+        self._last_access[key] = time.time()
+        buf = self._buffers.get(key) or []
+        return list(buf[-self._max_bars :])
+
+    def buffer_len(self, public_client, symbol: str, timeframe: str) -> int:
+        key = self._key(public_client, symbol, timeframe)
+        return len(self._buffers.get(key) or [])
+
+    async def refresh_rest(
+        self,
+        public_client,
+        symbol: str,
+        timeframe: str,
+        min_bars: int,
+    ) -> list[list]:
+        """强制 REST 合并当前 K 线（仅后台纠偏，勿在接针热路径 await）。"""
+        key = self._key(public_client, symbol, timeframe)
+        await self._ensure_started(public_client, symbol, timeframe, min_bars)
+        self._last_access[key] = time.time()
+        try:
+            data = await public_client.fetch_klines(
+                symbol, timeframe, limit=max(min_bars, self._max_bars)
+            )
+            if data:
+                self._merge(key, data)
+        except Exception as e:
+            logger.warning(
+                "kline_stream REST refresh failed for %s %s: %s", symbol, timeframe, e
+            )
+        return list((self._buffers.get(key) or [])[-self._max_bars :])
+
     async def get(
         self,
         public_client,

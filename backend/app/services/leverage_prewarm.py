@@ -128,6 +128,8 @@ async def prewarm_symbols_leverage(
         async with sem:
             try:
                 await auth_client.set_symbol_leverage(sym, lev)
+                # 让出事件循环，避免刷池后预热挤占接针价流
+                await asyncio.sleep(0)
                 return True
             except Exception as e:
                 logger.debug("prewarm leverage %s %sx failed: %s", sym, lev, e)

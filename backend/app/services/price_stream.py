@@ -1,6 +1,7 @@
 """Binance-only millisecond last-price cache via ccxt.pro watch_trades.
 
 仅供 wick_spike 使用；不影响 K 线信号路径。订阅集按需增删，空闲回收。
+同时按 K 线周期累计本根成交量/高低，供接针放量判定（不依赖 K 线 WS 量能滞后）。
 """
 
 from __future__ import annotations
@@ -21,6 +22,18 @@ def _norm_sym(s: str) -> str:
     return (s or "").replace("/", "").replace(":USDT", "").replace("_", "").upper()
 
 
+def _timeframe_ms(timeframe: str) -> int:
+    mapping = {
+        "1m": 60_000,
+        "3m": 180_000,
+        "5m": 300_000,
+        "15m": 900_000,
+        "30m": 1_800_000,
+        "1h": 3_600_000,
+    }
+    return mapping.get(timeframe or "1m", 60_000)
+
+
 class PriceStreamManager:
     """Per-symbol last trade price fed by Binance watch_trades."""
 
@@ -35,6 +48,12 @@ class PriceStreamManager:
         self._lock = asyncio.Lock()
         self._janitor_task: Optional[asyncio.Task] = None
         self._global_seq = 0
+        # 本根（按 tf 对齐）从成交累计
+        self._tf_ms: int = 60_000
+        self._bar_open_ms: dict[str, int] = {}
+        self._bar_vol: dict[str, float] = {}
+        self._bar_high: dict[str, float] = {}
+        self._bar_low: dict[str, float] = {}
 
     def get(self, symbol: str) -> tuple[float, int] | None:
         """Return (price, event_ts_ms) or None."""
@@ -48,13 +67,33 @@ class PriceStreamManager:
     def seq(self, symbol: str) -> int:
         return int(self._seq.get(_norm_sym(symbol), 0))
 
+    def bar_volume(self, symbol: str) -> float:
+        return float(self._bar_vol.get(_norm_sym(symbol), 0.0) or 0.0)
+
+    def bar_high(self, symbol: str) -> float:
+        return float(self._bar_high.get(_norm_sym(symbol), 0.0) or 0.0)
+
+    def bar_low(self, symbol: str) -> float:
+        v = self._bar_low.get(_norm_sym(symbol))
+        return float(v) if v is not None and v > 0 else 0.0
+
+    def bar_open_ms(self, symbol: str) -> int:
+        return int(self._bar_open_ms.get(_norm_sym(symbol), 0) or 0)
+
     @property
     def global_seq(self) -> int:
         return self._global_seq
 
-    async def set_wanted(self, client, symbols: set[str]) -> None:
+    async def set_wanted(
+        self,
+        client,
+        symbols: set[str],
+        *,
+        timeframe: str = "1m",
+    ) -> None:
         """Ensure watchers for `symbols`; drop others when idle janitor runs."""
         self._client = client
+        self._tf_ms = _timeframe_ms(timeframe)
         wanted = {_norm_sym(s) for s in symbols if s}
         async with self._lock:
             self._wanted = wanted
@@ -70,6 +109,27 @@ class PriceStreamManager:
                 self._janitor_task = asyncio.create_task(
                     self._janitor_loop(), name="price_stream_janitor"
                 )
+
+    def _apply_trade(self, symbol_norm: str, px: float, amount: float, ts_ms: int) -> None:
+        self._prices[symbol_norm] = px
+        self._ts_ms[symbol_norm] = ts_ms
+        self._seq[symbol_norm] = self._seq.get(symbol_norm, 0) + 1
+        self._global_seq += 1
+        self._last_access[symbol_norm] = time.time()
+
+        tf = max(1, int(self._tf_ms))
+        bar = (int(ts_ms) // tf) * tf
+        if self._bar_open_ms.get(symbol_norm) != bar:
+            self._bar_open_ms[symbol_norm] = bar
+            self._bar_vol[symbol_norm] = 0.0
+            self._bar_high[symbol_norm] = px
+            self._bar_low[symbol_norm] = px
+        if amount > 0:
+            self._bar_vol[symbol_norm] = float(self._bar_vol.get(symbol_norm, 0.0)) + amount
+        hi = self._bar_high.get(symbol_norm, px)
+        lo = self._bar_low.get(symbol_norm, px)
+        self._bar_high[symbol_norm] = max(hi, px)
+        self._bar_low[symbol_norm] = min(lo, px) if lo > 0 else px
 
     async def _run_symbol(self, symbol_norm: str) -> None:
         backoff = _RECONNECT_INITIAL_BACKOFF
@@ -90,16 +150,16 @@ class PriceStreamManager:
                         continue
                     if px <= 0:
                         continue
+                    try:
+                        amount = float(t.get("amount") or 0)
+                    except (TypeError, ValueError):
+                        amount = 0.0
                     ts = t.get("timestamp")
                     try:
                         ts_ms = int(ts) if ts is not None else int(time.time() * 1000)
                     except (TypeError, ValueError):
                         ts_ms = int(time.time() * 1000)
-                    self._prices[symbol_norm] = px
-                    self._ts_ms[symbol_norm] = ts_ms
-                    self._seq[symbol_norm] = self._seq.get(symbol_norm, 0) + 1
-                    self._global_seq += 1
-                    self._last_access[symbol_norm] = time.time()
+                    self._apply_trade(symbol_norm, px, amount, ts_ms)
                 backoff = _RECONNECT_INITIAL_BACKOFF
             except asyncio.CancelledError:
                 raise
@@ -133,6 +193,10 @@ class PriceStreamManager:
                         self._prices.pop(sym, None)
                         self._ts_ms.pop(sym, None)
                         self._seq.pop(sym, None)
+                        self._bar_open_ms.pop(sym, None)
+                        self._bar_vol.pop(sym, None)
+                        self._bar_high.pop(sym, None)
+                        self._bar_low.pop(sym, None)
                         logger.info("price_stream stopped idle %s", sym)
         except asyncio.CancelledError:
             raise
@@ -152,6 +216,10 @@ class PriceStreamManager:
         self._prices.clear()
         self._ts_ms.clear()
         self._seq.clear()
+        self._bar_open_ms.clear()
+        self._bar_vol.clear()
+        self._bar_high.clear()
+        self._bar_low.clear()
 
 
 price_stream_manager = PriceStreamManager()

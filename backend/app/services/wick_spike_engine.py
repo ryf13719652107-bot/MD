@@ -6,7 +6,7 @@ N = 上根 ATR × atr_mult。开盘价由调用方传入（须为 K 线官方 op
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 from .strategy_engine import Signal, calculate_atr
@@ -92,6 +92,78 @@ def _volume_hot(params: WickSpikeParams, snap: WickBarSnapshot) -> bool:
     return snap.vol_now >= snap.vol_sma * params.volume_mult
 
 
+def enrich_snap_with_trades(
+    snap: WickBarSnapshot,
+    *,
+    trade_vol: float = 0.0,
+    trade_high: float = 0.0,
+    trade_low: float = 0.0,
+) -> WickBarSnapshot:
+    """用成交流累计的量/高低补强 K 线快照（解决 K 线 WS 量能滞后）。"""
+    vol = max(float(snap.vol_now or 0), float(trade_vol or 0))
+    hi = float(snap.kline_high or 0)
+    lo = float(snap.kline_low or 0)
+    if trade_high > 0:
+        hi = max(hi, trade_high) if hi > 0 else trade_high
+    if trade_low > 0:
+        lo = min(lo, trade_low) if lo > 0 else trade_low
+    if vol == snap.vol_now and hi == snap.kline_high and lo == snap.kline_low:
+        return snap
+    return replace(snap, vol_now=vol, kline_high=hi, kline_low=lo)
+
+
+def near_miss_diag(
+    params: WickSpikeParams,
+    snap: WickBarSnapshot,
+    state: WickSymbolState,
+    last_price: float,
+) -> Optional[str]:
+    """近阈值诊断文案（仅供服务器 logger，勿写入前端策略日志）。
+
+    量能达到所需一半，或价格/极值已走过刺破距离的一半时返回说明，否则 None。
+    """
+    if last_price <= 0 or snap.bar_open <= 0 or snap.atr <= 0:
+        return None
+    if state.triggered_bar_ts == snap.bar_open_ts:
+        return None
+
+    vol_need = snap.vol_sma * params.volume_mult if params.volume_mult > 0 else 0.0
+    vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
+    vol_hot = _volume_hot(params, snap)
+    n = snap.atr * params.atr_mult
+    if n <= 0:
+        return None
+
+    direction = (params.direction or "").lower()
+    hi = state.bar_high if state.bar_high is not None else max(last_price, snap.kline_high)
+    lo = state.bar_low if state.bar_low is not None else min(last_price, snap.kline_low)
+
+    if direction == "short":
+        thr = snap.bar_open + n
+        extreme = max(hi, last_price)
+        pierced = extreme >= thr
+        progress = (extreme - snap.bar_open) / n if n > 0 else 0.0
+    elif direction == "long":
+        thr = snap.bar_open - n
+        extreme = min(lo, last_price)
+        pierced = extreme <= thr
+        progress = (snap.bar_open - extreme) / n if n > 0 else 0.0
+    else:
+        return None
+
+    vol_near = params.volume_mult <= 0 or vol_ratio >= params.volume_mult * 0.5
+    px_near = progress >= 0.5
+    if not (vol_near or px_near):
+        return None
+
+    return (
+        f"dir={direction} px={last_price:.6g} open={snap.bar_open:.6g} "
+        f"ext={extreme:.6g} thr={thr:.6g} pierce={pierced} "
+        f"atrN={n:.6g} progress={progress:.2f} "
+        f"vol×={vol_ratio:.2f} need×={params.volume_mult:g} vol_hot={vol_hot}"
+    )
+
+
 def release_bar_trigger(state: WickSymbolState) -> None:
     """开仓未真正执行时回滚本根触发标记，允许同根 K 再次尝试。"""
     state.triggered_bar_ts = None
@@ -125,15 +197,15 @@ def on_tick(
     if last_price <= 0 or snap.bar_open <= 0 or snap.atr <= 0:
         return None
 
-    # 新 K：重置本根极值（保留 cooldown / triggered 跨 bar 由 cooldown 控制）
+    # 新 K：用成交价 + K 线 H/L 初始化极值（避免只靠 last 丢掉本根已走出的针）
     if state.bar_open_ts != snap.bar_open_ts:
         state.bar_open_ts = snap.bar_open_ts
-        state.bar_low = last_price
-        state.bar_high = last_price
+        state.bar_low = min(last_price, snap.kline_low) if snap.kline_low > 0 else last_price
+        state.bar_high = max(last_price, snap.kline_high) if snap.kline_high > 0 else last_price
 
     # 极值：成交价 + K 线 H/L 取更极端
-    lo = min(last_price, snap.kline_low)
-    hi = max(last_price, snap.kline_high)
+    lo = min(last_price, snap.kline_low) if snap.kline_low > 0 else last_price
+    hi = max(last_price, snap.kline_high) if snap.kline_high > 0 else last_price
     state.bar_low = lo if state.bar_low is None else min(state.bar_low, lo)
     state.bar_high = hi if state.bar_high is None else max(state.bar_high, hi)
 
