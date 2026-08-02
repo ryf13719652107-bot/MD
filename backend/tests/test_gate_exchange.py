@@ -107,6 +107,22 @@ def test_gate_order_params_clean():
     assert "dual_side" not in p
 
 
+@pytest.mark.asyncio
+async def test_gate_ensure_dual_mode_accepts_no_change():
+    """交易所已是双向时 Gate 返回 NO_CHANGE，应视为成功而非阻断开仓。"""
+    svc = GateService(api_key="k", secret="s", hedge_mode=True)
+    svc._pinned = True
+    svc._created_at = __import__("time").time()
+
+    class FakeEx:
+        async def set_position_mode(self, hedged):
+            raise Exception('gate {"label":"NO_CHANGE"}')
+
+    svc._exchange = FakeEx()
+    await svc.ensure_dual_mode()
+    assert svc._dual_mode_ensured is True
+
+
 def test_gate_dual_mode_side_and_normalize():
     svc = GateService()
     svc._markets_loaded = True

@@ -204,16 +204,16 @@ class GateService:
             await self.exchange.set_position_mode(True)
             self._dual_mode_ensured = True
         except Exception as e:
-            msg = str(e).lower()
-            # 仅在明确「已是双向/无需变更」时放行；勿用裸 dual/hedge（会误吞失败）
+            msg = str(e).lower().replace("-", "_").replace(" ", "_")
+            # Gate 已是双向时常返回 label=NO_CHANGE；视为成功，勿阻断开仓
             if any(
                 k in msg
                 for k in (
                     "already",
-                    "no change",
-                    "same mode",
-                    "position mode is already",
-                    "dual_plus is already",
+                    "no_change",
+                    "same_mode",
+                    "position_mode_is_already",
+                    "dual_plus_is_already",
                 )
             ):
                 self._dual_mode_ensured = True
