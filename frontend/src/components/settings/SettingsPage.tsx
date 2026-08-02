@@ -1,12 +1,19 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../services/api';
-import type { Account } from '../../types';
+import type { Account, ExchangeId } from '../../types';
 import { Key, Trash2, Plus, Shield, AlertCircle } from 'lucide-react';
 
 export default function SettingsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', api_key: '', api_secret: '', testnet: true, hedge_mode: true });
+  const [form, setForm] = useState({
+    name: '',
+    api_key: '',
+    api_secret: '',
+    exchange: 'binance' as ExchangeId,
+    testnet: true,
+    hedge_mode: true,
+  });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -33,9 +40,21 @@ export default function SettingsPage() {
 
     setSaveError('');
     try {
-      await api.createAccount(form);
+      const payload = {
+        ...form,
+        testnet: form.exchange === 'gate' ? false : form.testnet,
+        hedge_mode: form.exchange === 'gate' ? true : form.hedge_mode,
+      };
+      await api.createAccount(payload);
       setShowForm(false);
-      setForm({ name: '', api_key: '', api_secret: '', testnet: true, hedge_mode: true });
+      setForm({
+        name: '',
+        api_key: '',
+        api_secret: '',
+        exchange: 'binance',
+        testnet: true,
+        hedge_mode: true,
+      });
       await load();
     } catch (e: any) {
       setSaveError(`保存失败: ${e.message}`);
@@ -64,6 +83,8 @@ export default function SettingsPage() {
     }
   };
 
+  const exchangeLabel = (ex?: string) => (ex === 'gate' ? 'GATE' : '币安');
+
   return (
     <div className="space-y-6 max-w-2xl">
       <h2 className="text-xl font-bold">系统设置</h2>
@@ -71,7 +92,7 @@ export default function SettingsPage() {
       <section className="bg-gray-900 border border-gray-800 rounded-lg p-4">
         <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2 mb-3">
           <Key size={16} className="text-yellow-400" />
-          币安API密钥管理
+          交易所API密钥管理
         </h3>
 
         {error && (
@@ -86,6 +107,9 @@ export default function SettingsPage() {
           <div key={a.id} className="flex items-center justify-between py-2 border-b border-gray-800">
             <div>
               <span className="font-medium">{a.name}</span>
+              <span className={`ml-2 text-xs px-2 py-0.5 rounded ${a.exchange === 'gate' ? 'bg-teal-600/20 text-teal-300' : 'bg-amber-600/20 text-amber-300'}`}>
+                {exchangeLabel(a.exchange)}
+              </span>
               <span className={`ml-2 text-xs px-2 py-0.5 rounded ${a.testnet ? 'bg-yellow-600/20 text-yellow-400' : 'bg-green-600/20 text-green-400'}`}>
                 {a.testnet ? '测试网' : '实盘'}
               </span>
@@ -103,7 +127,7 @@ export default function SettingsPage() {
         ))}
 
         {!loading && accounts.length === 0 && !error && (
-          <p className="text-gray-600 text-sm py-2">暂无账户，请添加币安API密钥</p>
+          <p className="text-gray-600 text-sm py-2">暂无账户，请添加交易所 API 密钥</p>
         )}
 
         {!loading && accounts.some((a) => /^(race_|proto_test$|test$|.*\.php$)/i.test(a.name)) && (
@@ -138,6 +162,30 @@ export default function SettingsPage() {
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm"
             />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setForm({ ...form, exchange: 'binance' })}
+                className={`flex-1 px-3 py-1.5 rounded text-sm border ${
+                  form.exchange === 'binance'
+                    ? 'bg-amber-600/30 border-amber-500 text-amber-200'
+                    : 'bg-gray-700 border-gray-600 text-gray-400'
+                }`}
+              >
+                币安
+              </button>
+              <button
+                type="button"
+                onClick={() => setForm({ ...form, exchange: 'gate', testnet: false, hedge_mode: true })}
+                className={`flex-1 px-3 py-1.5 rounded text-sm border ${
+                  form.exchange === 'gate'
+                    ? 'bg-teal-600/30 border-teal-500 text-teal-200'
+                    : 'bg-gray-700 border-gray-600 text-gray-400'
+                }`}
+              >
+                GATE
+              </button>
+            </div>
             <input
               type="password"
               placeholder="API Key"
@@ -152,22 +200,29 @@ export default function SettingsPage() {
               onChange={(e) => setForm({ ...form, api_secret: e.target.value })}
               className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm"
             />
-            <label className="flex items-center gap-2 text-sm text-gray-400">
-              <input
-                type="checkbox"
-                checked={form.testnet}
-                onChange={(e) => setForm({ ...form, testnet: e.target.checked })}
-              />
-              使用测试网 (建议先在测试网验证策略)
-            </label>
-            <label className="flex items-center gap-2 text-sm text-gray-400">
-              <input
-                type="checkbox"
-                checked={form.hedge_mode}
-                onChange={(e) => setForm({ ...form, hedge_mode: e.target.checked })}
-              />
-              双向持仓模式 (Hedge Mode)
-            </label>
+            {form.exchange === 'binance' && (
+              <label className="flex items-center gap-2 text-sm text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={form.testnet}
+                  onChange={(e) => setForm({ ...form, testnet: e.target.checked })}
+                />
+                使用测试网 (建议先在测试网验证策略)
+              </label>
+            )}
+            {form.exchange === 'gate' && (
+              <p className="text-xs text-gray-500">GATE 仅支持 USDT 永续主网，双向持仓默认开启。</p>
+            )}
+            {form.exchange === 'binance' && (
+              <label className="flex items-center gap-2 text-sm text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={form.hedge_mode}
+                  onChange={(e) => setForm({ ...form, hedge_mode: e.target.checked })}
+                />
+                双向持仓模式 (Hedge Mode)
+              </label>
+            )}
             <div className="flex gap-2">
               <button onClick={handleAdd} className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm">保存</button>
               <button onClick={() => { setShowForm(false); setSaveError(''); }} className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm">取消</button>
@@ -184,7 +239,7 @@ export default function SettingsPage() {
         <p className="text-sm text-gray-500">
           API密钥使用AES-128-CBC Fernet加密后存储，前端仅展示脱敏后的密钥。
           所有敏感操作（删除策略、紧急平仓等）均需要二次确认。
-          建议先使用币安测试网验证所有策略和功能，确认无误后再切换到实盘环境。
+          账户绑定交易所后，策略交易与选币池均走该交易所数据。
         </p>
       </section>
     </div>

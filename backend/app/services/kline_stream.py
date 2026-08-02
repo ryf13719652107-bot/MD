@@ -26,7 +26,11 @@ _RECONNECT_MAX_BACKOFF = 30.0
 
 
 def _norm_sym(s: str) -> str:
-    return (s or "").replace("/", "").replace(":USDT", "").upper()
+    return (s or "").replace("/", "").replace(":USDT", "").replace("_", "").upper()
+
+
+def _client_exchange_id(client) -> str:
+    return getattr(client, "exchange_id", None) or "binance"
 
 
 def _timeframe_ms(timeframe: str) -> int:
@@ -84,17 +88,17 @@ class KlineStreamManager:
 
     def __init__(self, max_bars: int = _DEFAULT_MAX_BARS):
         self._max_bars = max_bars
-        self._buffers: dict[tuple[str, str], list[list]] = {}
-        self._tasks: dict[tuple[str, str], asyncio.Task] = {}
-        self._seed_tasks: dict[tuple[str, str], asyncio.Task] = {}
-        self._ready: dict[tuple[str, str], asyncio.Event] = {}
-        self._last_access: dict[tuple[str, str], float] = {}
+        self._buffers: dict[tuple, list[list]] = {}
+        self._tasks: dict[tuple, asyncio.Task] = {}
+        self._seed_tasks: dict[tuple, asyncio.Task] = {}
+        self._ready: dict[tuple, asyncio.Event] = {}
+        self._last_access: dict[tuple, float] = {}
         self._lock = asyncio.Lock()
         self._janitor_task: Optional[asyncio.Task] = None
 
     @staticmethod
-    def _key(symbol: str, timeframe: str) -> tuple[str, str]:
-        return (_norm_sym(symbol), timeframe)
+    def _key(client, symbol: str, timeframe: str) -> tuple:
+        return (_client_exchange_id(client), _norm_sym(symbol), timeframe)
 
     def _merge(self, key: tuple[str, str], rows) -> None:
         rows = _normalize_candles(rows)
@@ -120,21 +124,21 @@ class KlineStreamManager:
             buf = buf[-self._max_bars :]
         self._buffers[key] = buf
 
-    async def _seed_via_rest(self, public_binance, symbol: str, timeframe: str, limit: int) -> None:
-        key = self._key(symbol, timeframe)
+    async def _seed_via_rest(self, public_client, symbol: str, timeframe: str, limit: int) -> None:
+        key = self._key(public_client, symbol, timeframe)
         try:
-            data = await public_binance.fetch_klines(symbol, timeframe, limit=limit)
+            data = await public_client.fetch_klines(symbol, timeframe, limit=limit)
             if data:
                 self._merge(key, data)
         except Exception as e:
             logger.warning("kline_stream seed REST failed for %s %s: %s", symbol, timeframe, e)
 
-    async def _run_subscription(self, public_binance, symbol: str, timeframe: str) -> None:
-        key = self._key(symbol, timeframe)
+    async def _run_subscription(self, public_client, symbol: str, timeframe: str) -> None:
+        key = self._key(public_client, symbol, timeframe)
         backoff = _RECONNECT_INITIAL_BACKOFF
         while True:
             try:
-                ohlcv = await public_binance.watch_klines(symbol, timeframe)
+                ohlcv = await public_client.watch_klines(symbol, timeframe)
                 self._merge(key, ohlcv)
                 ev = self._ready.get(key)
                 if ev is not None and not ev.is_set():
@@ -153,8 +157,8 @@ class KlineStreamManager:
                     raise
                 backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF)
 
-    async def _ensure_started(self, public_binance, symbol: str, timeframe: str, min_bars: int) -> None:
-        key = self._key(symbol, timeframe)
+    async def _ensure_started(self, public_client, symbol: str, timeframe: str, min_bars: int) -> None:
+        key = self._key(public_client, symbol, timeframe)
         seed_limit = max(min_bars, self._max_bars)
         seed_task: asyncio.Task | None = None
         async with self._lock:
@@ -165,8 +169,8 @@ class KlineStreamManager:
                 seed_task = self._seed_tasks.get(key)
                 if seed_task is None or seed_task.done():
                     seed_task = asyncio.create_task(
-                        self._seed_via_rest(public_binance, symbol, timeframe, seed_limit),
-                        name=f"kline_seed:{key[0]}:{key[1]}",
+                        self._seed_via_rest(public_client, symbol, timeframe, seed_limit),
+                        name=f"kline_seed:{key[0]}:{key[1]}:{key[2]}",
                     )
                     self._seed_tasks[key] = seed_task
         if seed_task is not None:
@@ -177,8 +181,8 @@ class KlineStreamManager:
                 task2 = self._tasks.get(key)
                 if task2 is None or task2.done():
                     self._tasks[key] = asyncio.create_task(
-                        self._run_subscription(public_binance, symbol, timeframe),
-                        name=f"kline_ws:{key[0]}:{key[1]}",
+                        self._run_subscription(public_client, symbol, timeframe),
+                        name=f"kline_ws:{key[0]}:{key[1]}:{key[2]}",
                     )
                 if self._janitor_task is None or self._janitor_task.done():
                     self._janitor_task = asyncio.create_task(
@@ -187,7 +191,7 @@ class KlineStreamManager:
 
     async def get(
         self,
-        public_binance,
+        public_client,
         symbol: str,
         timeframe: str,
         min_bars: int,
@@ -198,15 +202,15 @@ class KlineStreamManager:
         - 若缓冲够新且条数足：直接返回（减少 REST）。
         - 条数不足或 K 线时间停滞：REST 拉取合并（防止 WS 挂了后永远停在种子数据上不开仓）。
         """
-        key = self._key(symbol, timeframe)
-        await self._ensure_started(public_binance, symbol, timeframe, min_bars)
+        key = self._key(public_client, symbol, timeframe)
+        await self._ensure_started(public_client, symbol, timeframe, min_bars)
         self._last_access[key] = time.time()
         buf = self._buffers.get(key) or []
         need_rest = len(buf) < min_bars or _buffer_stale_for_timeframe(buf, timeframe)
         if not need_rest:
             return list(buf[-self._max_bars :])
         try:
-            data = await public_binance.fetch_klines(
+            data = await public_client.fetch_klines(
                 symbol, timeframe, limit=max(min_bars, self._max_bars)
             )
             if data:
@@ -217,7 +221,7 @@ class KlineStreamManager:
             )
         return list((self._buffers.get(key) or [])[-self._max_bars :])
 
-    async def _stop_subscription(self, key: tuple[str, str]) -> None:
+    async def _stop_subscription(self, key: tuple) -> None:
         task = self._tasks.pop(key, None)
         self._ready.pop(key, None)
         if task and not task.done():
@@ -234,7 +238,7 @@ class KlineStreamManager:
             while True:
                 await asyncio.sleep(60)
                 now = time.time()
-                idle_keys: list[tuple[str, str]] = []
+                idle_keys: list[tuple] = []
                 async with self._lock:
                     for key, ts in list(self._last_access.items()):
                         if now - ts > _IDLE_STOP_AFTER_SEC:
@@ -243,7 +247,8 @@ class KlineStreamManager:
                             self._buffers.pop(key, None)
                 for key in idle_keys:
                     logger.info(
-                        "kline_stream stop idle subscription %s %s", key[0], key[1]
+                        "kline_stream stop idle subscription %s %s %s",
+                        key[0], key[1], key[2],
                     )
                     await self._stop_subscription(key)
                 if not self._tasks:

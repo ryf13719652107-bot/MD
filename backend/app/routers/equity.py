@@ -11,6 +11,11 @@ from ..models.account import Account
 from ..models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline, AccountCashflow
 from ..schemas.equity import EquityPointOut, EquitySeriesResponse, EquitySummaryOut
 from ..services.encryption import decrypt
+from ..services.exchange_factory import (
+    account_exchange_id,
+    extract_wallet_balance,
+    get_exchange_for_account,
+)
 from ..services.binance_service import get_binance_service
 from ..services.equity_cashflow import (
     build_adjusted_points,
@@ -170,15 +175,19 @@ async def reset_equity_baseline(
 
     hour_floor = now_beijing().replace(minute=0, second=0, microsecond=0)
     try:
-        api_key = decrypt(account.api_key_encrypted)
-        api_secret = decrypt(account.api_secret_encrypted)
-        binance = await get_binance_service(
-            api_key, api_secret, account.testnet, account.hedge_mode
-        )
-        # 仅补当前整点对应的前一小时，不回溯更早
-        await sync_account_cashflows_for_hour(db, account, binance, hour_floor)
-        balance = await binance.fetch_balance()
-        cur_total = float(balance.get("total", {}).get("USDT", 0) or 0)
+        client = await get_exchange_for_account(account)
+        # 仅币安同步划转现金流
+        if account_exchange_id(account) == "binance":
+            api_key = decrypt(account.api_key_encrypted)
+            api_secret = decrypt(account.api_secret_encrypted)
+            binance = await get_binance_service(
+                api_key, api_secret, account.testnet, account.hedge_mode
+            )
+            await sync_account_cashflows_for_hour(db, account, binance, hour_floor)
+        balance = await client.fetch_balance()
+        cur_total = extract_wallet_balance(client, balance)
+        if cur_total <= 0:
+            cur_total = float(balance.get("total", {}).get("USDT", 0) or 0)
     except Exception as e:
         logger.warning("baseline-reset live balance/cashflow failed account %s: %s", account_id, e)
         last = (

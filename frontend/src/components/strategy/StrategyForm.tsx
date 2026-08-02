@@ -229,7 +229,11 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <div>
               <label className={labelClass}>交易账户</label>
               <select {...register('account_id', { valueAsNumber: true })} className={inputClass}>
-                {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} {a.testnet ? '(测试网)' : '(实盘)'}</option>)}
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} [{a.exchange === 'gate' ? 'GATE' : '币安'}] {a.testnet ? '(测试网)' : '(实盘)'}
+                  </option>
+                ))}
               </select>
               {errors.account_id && <p className={errorClass}>{errors.account_id.message}</p>}
             </div>

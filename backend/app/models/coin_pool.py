@@ -8,10 +8,11 @@ from ..config import now_beijing
 class CoinPool(Base):
     __tablename__ = "coin_pool"
     __table_args__ = (
-        UniqueConstraint("symbol", "source", name="uq_coinpool_symbol_source"),
+        UniqueConstraint("exchange", "symbol", "source", name="uq_coinpool_exchange_symbol_source"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance", server_default="binance")
     symbol: Mapped[str] = mapped_column(String(50), nullable=False)
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
     price_change_pct: Mapped[float] = mapped_column(Float, nullable=False)
@@ -23,3 +24,4 @@ class CoinPool(Base):
 
 Index("idx_coinpool_source", CoinPool.source)
 Index("idx_coinpool_rank", CoinPool.rank)
+Index("idx_coinpool_exchange", CoinPool.exchange)

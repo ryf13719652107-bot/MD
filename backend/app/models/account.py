@@ -10,6 +10,8 @@ class Account(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # binance | gate — 账户绑定交易所，交易与选币池均走该所
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance", server_default="binance")
     api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     api_secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     testnet: Mapped[bool] = mapped_column(Boolean, default=True)

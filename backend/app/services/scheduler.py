@@ -15,13 +15,15 @@ from ..models.position import Position
 from ..models.strategy_blacklist import StrategySymbolBlacklist
 from ..config import now_beijing, BEIJING_TZ
 from .binance_service import (
-    BinanceService,
-    get_binance_service,
-    get_public_binance,
     get_strategy_pool_exclude_symbols,
     filter_pool_symbols_by_funding,
     get_cached_last_funding_rates_pct,
-    extract_usdt_wallet_balance,
+)
+from .exchange_factory import (
+    account_exchange_id,
+    extract_wallet_balance,
+    get_exchange_for_account,
+    get_public_exchange,
 )
 from .strategy_flags import (
     exclude_delisting_enabled,
@@ -30,7 +32,6 @@ from .strategy_flags import (
     funding_rate_threshold_pct,
     normalize_coin_pool_source,
 )
-from .encryption import decrypt
 from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
 from .sync_service import PositionSyncService
@@ -135,7 +136,7 @@ class StrategyScheduler:
     def __init__(self):
         self._scheduler = AsyncIOScheduler(timezone=BEIJING_TZ)
         self._strategy_tasks: dict[int, str] = {}
-        self._binance_services: dict[int, BinanceService] = {}
+        self._exchange_services: dict[int, object] = {}
         self._syncer = PositionSyncService()
         self._position_mgr = PositionManager()
         self._strategy_locks: dict[int, asyncio.Lock] = {}
@@ -249,19 +250,22 @@ class StrategyScheduler:
                 await session.commit()
         logger.info("Strategy %d stopped", strategy_id)
 
-    async def _get_binance_for_strategy(self, strategy: Strategy):
-        if strategy.account_id in self._binance_services:
-            return self._binance_services[strategy.account_id]
+    async def _get_exchange_for_strategy(self, strategy: Strategy):
+        if strategy.account_id in self._exchange_services:
+            return self._exchange_services[strategy.account_id]
         async with async_session() as session:
             account = await session.get(Account, strategy.account_id)
             if not account:
                 logger.warning("Strategy %d: account %d not found", strategy.id, strategy.account_id)
                 return None
-            api_key = decrypt(account.api_key_encrypted)
-            api_secret = decrypt(account.api_secret_encrypted)
-            service = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
-            self._binance_services[strategy.account_id] = service
+            service = await get_exchange_for_account(account)
+            self._exchange_services[strategy.account_id] = service
             return service
+
+    async def _account_exchange_id(self, account_id: int) -> str:
+        async with async_session() as session:
+            account = await session.get(Account, account_id)
+            return account_exchange_id(account) if account else "binance"
 
     def _get_strategy_lock(self, strategy_id: int) -> asyncio.Lock:
         if strategy_id not in self._strategy_locks:
@@ -287,7 +291,7 @@ class StrategyScheduler:
             async with _STRATEGY_SEMAPHORE:
                 await self._execute_strategy_impl(strategy_id, mid_candle=True)
 
-    async def _sync_account_background(self, auth_binance: BinanceService, account_id: int):
+    async def _sync_account_background(self, auth_binance, account_id: int):
         lock = account_sync_lock(account_id)
         async with lock:
             try:
@@ -314,11 +318,12 @@ class StrategyScheduler:
                 "中段执行开始" if mid_candle else "执行周期开始",
             )
 
-            auth_binance = await self._get_binance_for_strategy(strategy)
-            public_binance = await get_public_binance()
+            auth_binance = await self._get_exchange_for_strategy(strategy)
+            exchange_id = await self._account_exchange_id(sync_account_id)
+            public_binance = await get_public_exchange(exchange_id)
 
             if not auth_binance:
-                logger.warning("Strategy %d: no auth_binance (account %d)", strategy_id, sync_account_id)
+                logger.warning("Strategy %d: no exchange client (account %d)", strategy_id, sync_account_id)
                 strategy_log_service.warning(strategy_id, "无法获取API连接 — 请检查账户配置")
                 return
 
@@ -343,7 +348,7 @@ class StrategyScheduler:
                     if isinstance(_prefetch_balance, Exception):
                         raise _prefetch_balance
                     balance = _prefetch_balance
-                    total_margin = extract_usdt_wallet_balance(balance)
+                    total_margin = extract_wallet_balance(auth_binance, balance)
                     if not math.isfinite(total_margin) or total_margin <= 0:
                         raise ValueError("USDT wallet balance missing or non-positive")
                     wallet_balance_valid = True
@@ -580,7 +585,7 @@ class StrategyScheduler:
                 if strategy.use_coin_pool:
                     try:
                         await coin_pool_service.ensure_scheduled_pool_if_due(
-                            public_binance, strategy
+                            public_binance, strategy, exchange=exchange_id
                         )
                         min_vol = float(getattr(strategy, "coin_pool_min_volume_24h", 0) or 0)
                         excluded = await get_strategy_pool_exclude_symbols(
@@ -599,6 +604,7 @@ class StrategyScheduler:
                             min_volume_24h=min_vol,
                             exclude_symbols_norm=set(pool_exclude_norm) if pool_exclude_norm else None,
                             strategy=strategy,
+                            exchange=exchange_id,
                         )
                         if exclude_funding_enabled(strategy):
                             pool_symbols = await filter_pool_symbols_by_funding(
@@ -614,11 +620,11 @@ class StrategyScheduler:
                                 min_vol,
                             )
                         if not pool_symbols:
-                            pool_count = await coin_pool_service.get_pool_count()
+                            pool_count = await coin_pool_service.get_pool_count(exchange=exchange_id)
                             pool_status = coin_pool_service.status
                             logger.warning(
-                                "Strategy %d: coin pool returned 0 symbols (total=%d, ok=%s)",
-                                strategy_id, pool_count, pool_status["last_refresh_ok"],
+                                "Strategy %d: coin pool [%s] returned 0 symbols (total=%d, ok=%s)",
+                                strategy_id, exchange_id, pool_count, pool_status["last_refresh_ok"],
                             )
                     except Exception as e:
                         logger.error("Strategy %d: coin pool query failed: %s", strategy_id, e)

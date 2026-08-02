@@ -2,17 +2,16 @@
 
 from ..schemas.coin_pool import CoinPoolResponse
 from .binance_service import (
-    BinanceService,
     get_cached_last_funding_rates_pct,
     _normalize_symbol_for_tradefi,
 )
 
 
 async def coin_pool_responses_with_funding(
-    binance: BinanceService,
+    client,
     coins: list,
 ) -> list[CoinPoolResponse]:
-    rates = await get_cached_last_funding_rates_pct(binance)
+    rates = await get_cached_last_funding_rates_pct(client)
     out: list[CoinPoolResponse] = []
     for c in coins:
         resp = CoinPoolResponse.model_validate(c)

@@ -11,7 +11,13 @@ def exchange_legs_from_positions(raw_positions: list) -> dict[tuple[str, str], f
         contracts = float(ep.get("contracts", 0) or 0)
         if contracts <= 0:
             continue
-        sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "").upper()
+        sym = (
+            (ep.get("symbol") or "")
+            .replace("/", "")
+            .replace(":USDT", "")
+            .replace("_", "")
+            .upper()
+        )
         side = (ep.get("side") or "").lower()
         leg_map[(sym, side)] = leg_map.get((sym, side), 0) + contracts
     return leg_map

@@ -11,6 +11,7 @@ class CoinPoolConfig(BaseModel):
 
 class CoinPoolResponse(BaseModel):
     id: int
+    exchange: str = "binance"
     symbol: str
     rank: int
     price_change_pct: float

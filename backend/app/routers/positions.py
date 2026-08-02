@@ -7,8 +7,7 @@ from ..config import now_beijing
 from ..models.position import Position
 from ..models.account import Account
 from ..schemas.position import PositionResponse
-from ..services.encryption import decrypt
-from ..services.binance_service import get_binance_service
+from ..services.exchange_factory import get_exchange_for_account
 from ..services.backup_service import backup_trade
 
 router = APIRouter(prefix="/api/positions", tags=["positions"])
@@ -53,9 +52,7 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    api_key = decrypt(account.api_key_encrypted)
-    api_secret = decrypt(account.api_secret_encrypted)
-    binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+    binance = await get_exchange_for_account(account)
 
     # Cancel existing TP limit order before closing
     if position.tp_limit_order_id:

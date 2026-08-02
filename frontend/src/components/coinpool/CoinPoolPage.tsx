@@ -8,24 +8,25 @@ import { poolSourceBadgeClass, poolSourceLabel, poolSourceTextClass } from '../.
 export default function CoinPoolPage() {
   const [coins, setCoins] = useState<CoinPoolEntry[]>([]);
   const [source, setSource] = useState<string>('');
+  const [exchange, setExchange] = useState<'binance' | 'gate'>('binance');
   const [config, setConfig] = useState({ refresh_interval_seconds: 3600, pool_source: 'both', max_symbols: 20 });
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; data: any[] } | null>(null);
   const [testing, setTesting] = useState(false);
 
   const load = useCallback(async () => {
     const [c, cfg] = await Promise.all([
-      api.getCoinPool(source || undefined),
+      api.getCoinPool(source || undefined, undefined, exchange),
       api.getCoinPoolConfig(),
     ]);
     setCoins(c);
     setConfig(cfg);
-  }, [source]);
+  }, [source, exchange]);
 
   useEffect(() => { load(); }, [load]);
 
   const handleRefresh = async () => {
     try {
-      const result = await api.refreshCoinPool();
+      const result = await api.refreshCoinPool(exchange);
       setTestResult({
         success: result.status === 'ok',
         message: result.message,
@@ -46,7 +47,7 @@ export default function CoinPoolPage() {
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await api.testFetchCoinPool();
+      const result = await api.testFetchCoinPool(exchange);
       setTestResult(result);
     } catch (e: any) {
       setTestResult({ success: false, message: `请求失败: ${e.message}`, data: [] });
@@ -59,6 +60,22 @@ export default function CoinPoolPage() {
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">选币池</h2>
         <div className="flex items-center gap-2">
+          <div className="flex rounded-lg overflow-hidden border border-gray-700">
+            <button
+              type="button"
+              onClick={() => setExchange('binance')}
+              className={`px-3 py-1.5 text-sm ${exchange === 'binance' ? 'bg-amber-700 text-white' : 'bg-gray-800 text-gray-400'}`}
+            >
+              币安
+            </button>
+            <button
+              type="button"
+              onClick={() => setExchange('gate')}
+              className={`px-3 py-1.5 text-sm ${exchange === 'gate' ? 'bg-teal-700 text-white' : 'bg-gray-800 text-gray-400'}`}
+            >
+              GATE
+            </button>
+          </div>
           <button
             onClick={handleTestFetch}
             disabled={testing}

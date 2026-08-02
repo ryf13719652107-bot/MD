@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 def _norm_sym(s: str) -> str:
     """Canonical perp key (e.g. BTCUSDT). Uppercase so DB/exchange format differences still match."""
-    return (s or "").upper().replace("/", "").replace(":USDT", "")
+    return (s or "").upper().replace("/", "").replace(":USDT", "").replace("_", "")
 
 
 def _open_signal_log_suffix(signal_label: str, rsi: float) -> str:
@@ -42,6 +42,13 @@ def _open_signal_log_suffix(signal_label: str, rsi: float) -> str:
     if signal_label == "基础马丁":
         return "基础马丁"
     return f"{signal_label}={round(rsi, 1)}"
+
+
+async def _fetch_order(client, order_id: str, symbol: str) -> dict:
+    """查订单：币安保持原 exchange.fetch_order；GATE 走服务层（settle + 张→币）。"""
+    if getattr(client, "exchange_id", None) == "gate":
+        return await client.fetch_order(order_id, symbol)
+    return await client.exchange.fetch_order(order_id, client._format_symbol(symbol))
 
 
 def _position_opened_at_from_exchange(ep: dict) -> Optional[datetime]:
@@ -154,7 +161,11 @@ class PositionManager:
         close_side = "sell" if position_side == "long" else "buy"
         ps_need = "LONG" if position_side == "long" else "SHORT"
         try:
-            orders = await auth_binance.exchange.fetch_open_orders(formatted)
+            # 币安：原链路 exchange.fetch_open_orders；GATE：服务层（张→币）
+            if getattr(auth_binance, "exchange_id", None) == "gate":
+                orders = await auth_binance.fetch_open_orders(symbol)
+            else:
+                orders = await auth_binance.exchange.fetch_open_orders(formatted)
         except Exception as e:
             logger.debug("Strategy %s: fetch_open_orders for bind TP failed: %s", symbol, e)
             return
@@ -171,6 +182,8 @@ class PositionManager:
                 ro = o.get("reduce_only")
             if ro is None and isinstance(info, dict):
                 ro = info.get("reduceOnly")
+                if ro is None and getattr(auth_binance, "exchange_id", None) == "gate":
+                    ro = info.get("is_reduce_only")
             reduce_only = bool(ro) if isinstance(ro, bool) else str(ro).lower() in ("true", "1")
             if not reduce_only:
                 continue
@@ -807,8 +820,9 @@ class PositionManager:
             tp_placed = False
             for attempt in range(2):
                 try:
+                    # reduce_only=True：币安双向挂平仓腿；GATE 双向必须只减仓，否则会开反向仓
                     tp_order = await auth_binance.create_limit_order(
-                        symbol, close_side, filled_qty, tp_price, reduce_only=False, position_side=ps
+                        symbol, close_side, filled_qty, tp_price, reduce_only=True, position_side=ps
                     )
                     oid = tp_order.get("id", "")
                     if oid:
@@ -1202,7 +1216,7 @@ class PositionManager:
                 if p.tp_limit_order_id:
                     try:
                         order_info = await asyncio.wait_for(
-                            auth_binance.exchange.fetch_order(p.tp_limit_order_id, auth_binance._format_symbol(symbol)),
+                            _fetch_order(auth_binance, p.tp_limit_order_id, symbol),
                             timeout=2.0,
                         )
                         status = order_info.get("status", "")
@@ -1254,9 +1268,7 @@ class PositionManager:
                 continue
             try:
                 order_info = await asyncio.wait_for(
-                    auth_binance.exchange.fetch_order(
-                        p.tp_limit_order_id, auth_binance._format_symbol(p.symbol)
-                    ),
+                    _fetch_order(auth_binance, p.tp_limit_order_id, p.symbol),
                     timeout=2.0,
                 )
                 status = order_info.get("status", "")
@@ -1305,9 +1317,7 @@ class PositionManager:
                     if p.tp_limit_order_id:
                         try:
                             fill_order = await asyncio.wait_for(
-                                auth_binance.exchange.fetch_order(
-                                    p.tp_limit_order_id, auth_binance._format_symbol(symbol)
-                                ),
+                                _fetch_order(auth_binance, p.tp_limit_order_id, symbol),
                                 timeout=3.0,
                             )
                         except (Exception, asyncio.TimeoutError):
@@ -1329,9 +1339,7 @@ class PositionManager:
                 if tp_order_id:
                     try:
                         order_info = await asyncio.wait_for(
-                            auth_binance.exchange.fetch_order(
-                                tp_order_id, auth_binance._format_symbol(symbol)
-                            ),
+                            _fetch_order(auth_binance, tp_order_id, symbol),
                             timeout=3.0,
                         )
                         order_status = order_info.get("status", "")
@@ -1382,9 +1390,7 @@ class PositionManager:
                 if p.tp_limit_order_id:
                     try:
                         order_info = await asyncio.wait_for(
-                            auth_binance.exchange.fetch_order(
-                                p.tp_limit_order_id, auth_binance._format_symbol(symbol)
-                            ),
+                            _fetch_order(auth_binance, p.tp_limit_order_id, symbol),
                             timeout=2.0,
                         )
                         order_status = order_info.get("status", "")
@@ -1585,7 +1591,9 @@ class PositionManager:
             close_side = "sell" if pos_side == "long" else "buy"
             for attempt in range(2):
                 try:
-                    tp_order = await auth_binance.create_limit_order(symbol, close_side, new_total, tp_price, reduce_only=False, position_side=ps)
+                    tp_order = await auth_binance.create_limit_order(
+                        symbol, close_side, new_total, tp_price, reduce_only=True, position_side=ps
+                    )
                     tp_order_id = tp_order.get("id", "")
                     if tp_order_id:
                         pos.tp_limit_order_id = tp_order_id

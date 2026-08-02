@@ -4,15 +4,24 @@ from unittest.mock import AsyncMock, MagicMock
 from app.services.binance_service import BinanceService
 
 
-@pytest.mark.asyncio
-async def test_set_symbol_leverage_uses_ccxt():
+def _svc() -> BinanceService:
     svc = BinanceService.__new__(BinanceService)
     svc.hedge_mode = True
-    svc.exchange = MagicMock()
+    ex = MagicMock()
+    svc._exchange = ex
+    svc._ws_exchange = ex
+    svc._pinned = True
+    svc._created_at = 0
     svc._leverage_cache = {}
-    svc.exchange.load_markets = AsyncMock()
-    svc.exchange.set_leverage = AsyncMock()
-    svc.exchange.fapiPrivatePostLeverage = AsyncMock()
+    ex.load_markets = AsyncMock()
+    ex.set_leverage = AsyncMock()
+    ex.fapiPrivatePostLeverage = AsyncMock()
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_set_symbol_leverage_uses_ccxt():
+    svc = _svc()
 
     lev, cache_hit = await svc.set_symbol_leverage("BTCUSDT", 25)
 
@@ -24,13 +33,8 @@ async def test_set_symbol_leverage_uses_ccxt():
 
 @pytest.mark.asyncio
 async def test_set_symbol_leverage_fallback_raw_api():
-    svc = BinanceService.__new__(BinanceService)
-    svc.hedge_mode = True
-    svc.exchange = MagicMock()
-    svc._leverage_cache = {}
-    svc.exchange.load_markets = AsyncMock()
+    svc = _svc()
     svc.exchange.set_leverage = AsyncMock(side_effect=Exception("ccxt fail"))
-    svc.exchange.fapiPrivatePostLeverage = AsyncMock()
 
     lev, cache_hit = await svc.set_symbol_leverage("ETHUSDT", 10)
 
@@ -43,15 +47,10 @@ async def test_set_symbol_leverage_fallback_raw_api():
 
 @pytest.mark.asyncio
 async def test_set_symbol_leverage_already_set_treated_ok():
-    svc = BinanceService.__new__(BinanceService)
-    svc.hedge_mode = True
-    svc.exchange = MagicMock()
-    svc._leverage_cache = {}
-    svc.exchange.load_markets = AsyncMock()
+    svc = _svc()
     svc.exchange.set_leverage = AsyncMock(
         side_effect=Exception('{"code":-4028,"msg":"Leverage 10 already exist with 10"}')
     )
-    svc.exchange.fapiPrivatePostLeverage = AsyncMock()
 
     lev, cache_hit = await svc.set_symbol_leverage("BTCUSDT", 10)
     assert lev == 10
@@ -61,12 +60,8 @@ async def test_set_symbol_leverage_already_set_treated_ok():
 
 @pytest.mark.asyncio
 async def test_set_symbol_leverage_reports_cache_hit():
-    svc = BinanceService.__new__(BinanceService)
-    svc.hedge_mode = True
-    svc.exchange = MagicMock()
+    svc = _svc()
     svc._leverage_cache = {"BTCUSDT": 10}
-    svc.exchange.set_leverage = AsyncMock()
-    svc.exchange.fapiPrivatePostLeverage = AsyncMock()
 
     assert await svc.set_symbol_leverage("BTCUSDT", 10) == (10, True)
     svc.exchange.set_leverage.assert_not_awaited()
@@ -75,12 +70,8 @@ async def test_set_symbol_leverage_reports_cache_hit():
 
 @pytest.mark.asyncio
 async def test_set_symbol_leverage_clamps():
-    svc = BinanceService.__new__(BinanceService)
+    svc = _svc()
     svc.hedge_mode = False
-    svc.exchange = MagicMock()
-    svc._leverage_cache = {}
-    svc.exchange.load_markets = AsyncMock()
-    svc.exchange.set_leverage = AsyncMock()
 
     assert await svc.set_symbol_leverage("BTCUSDT", 0) == (1, False)
     svc.exchange.set_leverage.assert_awaited_with(1, "BTC/USDT:USDT")

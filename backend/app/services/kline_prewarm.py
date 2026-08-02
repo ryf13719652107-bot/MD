@@ -6,8 +6,9 @@ from collections import defaultdict
 from sqlalchemy import select
 
 from ..database import async_session
+from ..models.account import Account
 from ..models.strategy import Strategy
-from .binance_service import BinanceService, get_public_binance
+from .exchange_factory import account_exchange_id, get_public_exchange
 from .kline_stream import kline_stream_manager
 from .leverage_prewarm import (
     _dedupe_symbols,
@@ -36,7 +37,6 @@ def _strategy_kline_timeframes(strategy: Strategy) -> list[tuple[str, int]]:
         ):
             if tf != strategy.timeframe:
                 pairs.append((tf, st_bars))
-    # dedupe by timeframe (keep first / larger bars)
     seen: dict[str, int] = {}
     for tf, bars in pairs:
         seen[tf] = max(seen.get(tf, 0), bars)
@@ -44,7 +44,7 @@ def _strategy_kline_timeframes(strategy: Strategy) -> list[tuple[str, int]]:
 
 
 async def prewarm_symbols_klines(
-    public_binance: BinanceService,
+    public_client,
     symbols: list[str],
     timeframe: str,
     min_bars: int,
@@ -60,7 +60,7 @@ async def prewarm_symbols_klines(
         async with sem:
             try:
                 rows = await kline_stream_manager.get(
-                    public_binance, sym, timeframe, min_bars=min_bars
+                    public_client, sym, timeframe, min_bars=min_bars
                 )
                 return len(rows) >= min_bars
             except Exception as e:
@@ -73,11 +73,16 @@ async def prewarm_symbols_klines(
 
 async def prewarm_strategy_klines(
     strategy: Strategy,
-    public_binance: BinanceService | None = None,
+    public_client=None,
 ) -> None:
-    if public_binance is None:
-        public_binance = await get_public_binance()
-    pool_syms = await resolve_strategy_pool_symbols(strategy, public_binance)
+    async with async_session() as session:
+        account = await session.get(Account, strategy.account_id)
+        exchange = account_exchange_id(account) if account else "binance"
+    if public_client is None:
+        public_client = await get_public_exchange(exchange)
+    pool_syms = await resolve_strategy_pool_symbols(
+        strategy, public_client, exchange=exchange
+    )
     open_syms = await _open_position_symbols(strategy.id)
     symbols = _dedupe_symbols(pool_syms + open_syms)
     if not symbols:
@@ -85,7 +90,7 @@ async def prewarm_strategy_klines(
 
     for timeframe, min_bars in _strategy_kline_timeframes(strategy):
         ok, total = await prewarm_symbols_klines(
-            public_binance, symbols, timeframe, min_bars
+            public_client, symbols, timeframe, min_bars
         )
         logger.info(
             "Strategy %d: prewarmed K-lines %s %d/%d symbols",
@@ -109,27 +114,40 @@ async def prewarm_running_strategies_klines() -> None:
     async with async_session() as session:
         result = await session.execute(select(Strategy).where(Strategy.status == "running"))
         strategies = list(result.scalars().all())
+        accounts = {
+            a.id: a
+            for a in (
+                await session.execute(select(Account))
+            ).scalars().all()
+        }
     if not strategies:
         return
 
-    public_binance = await get_public_binance()
-    groups: dict[tuple[str, int], list[str]] = defaultdict(list)
+    # Group by (exchange, timeframe, min_bars)
+    groups: dict[tuple[str, str, int], list[str]] = defaultdict(list)
     for strategy in strategies:
         try:
-            pool_syms = await resolve_strategy_pool_symbols(strategy, public_binance)
+            account = accounts.get(strategy.account_id)
+            exchange = account_exchange_id(account) if account else "binance"
+            public_client = await get_public_exchange(exchange)
+            pool_syms = await resolve_strategy_pool_symbols(
+                strategy, public_client, exchange=exchange
+            )
             open_syms = await _open_position_symbols(strategy.id)
             syms = pool_syms + open_syms
             for timeframe, min_bars in _strategy_kline_timeframes(strategy):
-                groups[(timeframe, min_bars)].extend(syms)
+                groups[(exchange, timeframe, min_bars)].extend(syms)
         except Exception as e:
             logger.warning("Strategy %d K-line prewarm resolve failed: %s", strategy.id, e)
 
-    for (timeframe, min_bars), symbols in groups.items():
+    for (exchange, timeframe, min_bars), symbols in groups.items():
+        public_client = await get_public_exchange(exchange)
         ok, total = await prewarm_symbols_klines(
-            public_binance, symbols, timeframe, min_bars
+            public_client, symbols, timeframe, min_bars
         )
         logger.info(
-            "Running strategies: prewarmed K-lines %s %d/%d symbols",
+            "Running strategies [%s]: prewarmed K-lines %s %d/%d symbols",
+            exchange,
             timeframe,
             ok,
             total,

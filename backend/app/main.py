@@ -90,8 +90,14 @@ async def lifespan(app: FastAPI):
 
     logger.info("Step 3/6: resume_running_strategies...")
     await strategy_scheduler.resume_running_strategies()
-    logger.info("Step 4/6: get_public_binance...")
+    logger.info("Step 4/6: get_public_binance (warmup)...")
     public_binance = await get_public_binance()
+    try:
+        from .services.exchange_factory import get_public_exchange
+
+        await get_public_exchange("gate")
+    except Exception as e:
+        logger.warning("Gate public client warmup skipped: %s", e)
 
     logger.info("Step 5/6: coin pool config...")
     await coin_pool_service.sync_config_from_running_strategies()

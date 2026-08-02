@@ -14,8 +14,7 @@ from ..models.trade import Trade
 from ..models.bot_config import BotConfig
 from ..models.account import Account
 from ..schemas.dashboard import DashboardSnapshot
-from ..services.encryption import decrypt
-from ..services.binance_service import get_binance_service
+from ..services.exchange_factory import extract_wallet_balance, get_exchange_for_account
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -51,8 +50,12 @@ async def _fetch_dashboard_exchange_slice(binance) -> dict[str, Any]:
     exchange_positions: list[dict] = []
     try:
         balance = await asyncio.wait_for(binance.fetch_balance(), timeout=8.0)
-        total_balance = float(balance.get("total", {}).get("USDT", 0) or 0)
+        total_balance = extract_wallet_balance(binance, balance)
+        if total_balance <= 0:
+            total_balance = float(balance.get("total", {}).get("USDT", 0) or 0)
         available_balance = float(balance.get("free", {}).get("USDT", 0) or 0)
+        if available_balance <= 0 and total_balance > 0:
+            available_balance = total_balance
         balance_status = "ok"
     except asyncio.TimeoutError:
         balance_status = "error"
@@ -70,7 +73,13 @@ async def _fetch_dashboard_exchange_slice(binance) -> dict[str, Any]:
                     entry_price = float(p.get("entryPrice", 0) or 0)
                     mark_price = float(p.get("markPrice", 0) or 0)
                     side = (p.get("side") or "").lower()
-                    symbol = (p.get("symbol") or "").replace("/", "").replace(":USDT", "")
+                    symbol = (
+                        (p.get("symbol") or "")
+                        .replace("/", "")
+                        .replace(":USDT", "")
+                        .replace("_", "")
+                        .upper()
+                    )
                     upnl = float(p.get("unrealizedPnl", 0) or 0)
                     unrealized_pnl += upnl
                     if side == "short":
@@ -150,9 +159,7 @@ async def get_dashboard(
             account_name = account.name
             filter_account_id = account.id
             try:
-                api_key = decrypt(account.api_key_encrypted)
-                api_secret = decrypt(account.api_secret_encrypted)
-                binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+                binance = await get_exchange_for_account(account)
                 cached = (
                     _dashboard_exchange_cache_get(filter_account_id)
                     if filter_account_id is not None

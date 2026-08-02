@@ -9,14 +9,15 @@ from ..models.account import Account
 from ..models.position import Position
 from ..models.strategy import Strategy
 from .binance_service import (
-    BinanceService,
-    get_binance_service,
-    get_public_binance,
     get_strategy_pool_exclude_symbols,
     filter_pool_symbols_by_funding,
 )
+from .exchange_factory import (
+    account_exchange_id,
+    get_exchange_for_account,
+    get_public_exchange,
+)
 from .coin_pool_service import coin_pool_service
-from .encryption import decrypt
 from .position_manager import _norm_sym
 from .strategy_flags import (
     exclude_delisting_enabled,
@@ -47,14 +48,16 @@ def _dedupe_symbols(symbols: list[str]) -> list[str]:
 
 async def resolve_strategy_pool_symbols(
     strategy: Strategy,
-    public_binance: BinanceService,
+    public_client,
+    *,
+    exchange: str = "binance",
 ) -> list[str]:
     """Pool or fixed symbol list with the same filters as scheduler tick."""
     if strategy.use_coin_pool:
         min_vol = float(getattr(strategy, "coin_pool_min_volume_24h", 0) or 0)
         mainstream_exclude = bool(exclude_mainstream_enabled(strategy))
         exclude_norm = await get_strategy_pool_exclude_symbols(
-            public_binance,
+            public_client,
             exclude_tradefi=bool(getattr(strategy, "exclude_tradefi", False)),
             exclude_delisting=exclude_delisting_enabled(strategy),
             exclude_mainstream=mainstream_exclude,
@@ -65,10 +68,11 @@ async def resolve_strategy_pool_symbols(
             min_volume_24h=min_vol,
             exclude_symbols_norm=set(exclude_norm) if exclude_norm else None,
             strategy=strategy,
+            exchange=exchange,
         )
         if exclude_funding_enabled(strategy):
             pool_symbols = await filter_pool_symbols_by_funding(
-                public_binance,
+                public_client,
                 pool_symbols,
                 direction=strategy.direction,
                 threshold_pct=funding_rate_threshold_pct(strategy),
@@ -90,20 +94,20 @@ async def _open_position_symbols(strategy_id: int) -> list[str]:
         return [s for s in rows if s]
 
 
-async def auth_binance_for_strategy(strategy: Strategy) -> BinanceService | None:
+async def auth_exchange_for_strategy(strategy: Strategy):
     async with async_session() as session:
         account = await session.get(Account, strategy.account_id)
         if not account:
             return None
-        api_key = decrypt(account.api_key_encrypted)
-        api_secret = decrypt(account.api_secret_encrypted)
-        return await get_binance_service(
-            api_key, api_secret, account.testnet, account.hedge_mode
-        )
+        return await get_exchange_for_account(account)
+
+
+# backward-compatible alias
+auth_binance_for_strategy = auth_exchange_for_strategy
 
 
 async def prewarm_symbols_leverage(
-    auth_binance: BinanceService,
+    auth_client,
     symbols: list[str],
     leverage: int,
 ) -> tuple[int, int]:
@@ -113,7 +117,7 @@ async def prewarm_symbols_leverage(
         return 0, 0
     lev = max(1, min(125, int(leverage or 10)))
     try:
-        await auth_binance.ensure_markets_loaded()
+        await auth_client.ensure_markets_loaded()
     except Exception as e:
         logger.warning("prewarm ensure_markets_loaded failed: %s", e)
         return 0, len(symbols)
@@ -123,7 +127,7 @@ async def prewarm_symbols_leverage(
     async def one(sym: str) -> bool:
         async with sem:
             try:
-                await auth_binance.set_symbol_leverage(sym, lev)
+                await auth_client.set_symbol_leverage(sym, lev)
                 return True
             except Exception as e:
                 logger.debug("prewarm leverage %s %sx failed: %s", sym, lev, e)
@@ -135,21 +139,26 @@ async def prewarm_symbols_leverage(
 
 async def prewarm_strategy_leverage(
     strategy: Strategy,
-    auth_binance: BinanceService | None = None,
+    auth_client=None,
 ) -> None:
-    public_binance = await get_public_binance()
-    pool_syms = await resolve_strategy_pool_symbols(strategy, public_binance)
+    async with async_session() as session:
+        account = await session.get(Account, strategy.account_id)
+        exchange = account_exchange_id(account) if account else "binance"
+    public_client = await get_public_exchange(exchange)
+    pool_syms = await resolve_strategy_pool_symbols(
+        strategy, public_client, exchange=exchange
+    )
     open_syms = await _open_position_symbols(strategy.id)
     symbols = _dedupe_symbols(pool_syms + open_syms)
     if not symbols:
         return
-    if auth_binance is None:
-        auth_binance = await auth_binance_for_strategy(strategy)
-    if auth_binance is None:
+    if auth_client is None:
+        auth_client = await auth_exchange_for_strategy(strategy)
+    if auth_client is None:
         logger.warning("Strategy %d: leverage prewarm skipped — no auth", strategy.id)
         return
     lev = int(strategy.leverage or 10)
-    ok, total = await prewarm_symbols_leverage(auth_binance, symbols, lev)
+    ok, total = await prewarm_symbols_leverage(auth_client, symbols, lev)
     logger.info(
         "Strategy %d: prewarmed leverage %dx for %d/%d symbols",
         strategy.id, lev, ok, total,
@@ -169,15 +178,15 @@ async def prewarm_running_strategies_leverage() -> None:
     async with async_session() as session:
         result = await session.execute(select(Strategy).where(Strategy.status == "running"))
         strategies = list(result.scalars().all())
-    auth_cache: dict[int, BinanceService] = {}
+    auth_cache: dict[int, object] = {}
     for strategy in strategies:
         try:
             if strategy.account_id not in auth_cache:
-                auth = await auth_binance_for_strategy(strategy)
+                auth = await auth_exchange_for_strategy(strategy)
                 if auth:
                     auth_cache[strategy.account_id] = auth
-            auth_binance = auth_cache.get(strategy.account_id)
-            if auth_binance:
-                await prewarm_strategy_leverage(strategy, auth_binance)
+            auth_client = auth_cache.get(strategy.account_id)
+            if auth_client:
+                await prewarm_strategy_leverage(strategy, auth_client)
         except Exception as e:
             logger.warning("Strategy %d leverage prewarm failed: %s", strategy.id, e)

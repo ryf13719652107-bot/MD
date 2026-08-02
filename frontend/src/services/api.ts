@@ -53,7 +53,14 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   // Accounts
-  createAccount: (data: { name: string; api_key: string; api_secret: string; testnet: boolean; hedge_mode: boolean }): Promise<Account> =>
+  createAccount: (data: {
+    name: string;
+    api_key: string;
+    api_secret: string;
+    exchange?: 'binance' | 'gate';
+    testnet: boolean;
+    hedge_mode: boolean;
+  }): Promise<Account> =>
     request<Account>('/accounts', { method: 'POST', body: JSON.stringify(data) }),
   listAccounts: (): Promise<Account[]> => request<Account[]>('/accounts'),
   deleteAccount: (id: number): Promise<void> => request<void>(`/accounts/${id}`, { method: 'DELETE' }),
@@ -153,24 +160,29 @@ export const api = {
     request(`/ticker?symbol=${symbol}`),
 
   // Coin pool
-  getCoinPool: (source?: string, strategyId?: number): Promise<CoinPoolEntry[]> => {
+  getCoinPool: (source?: string, strategyId?: number, exchange?: string): Promise<CoinPoolEntry[]> => {
     const params = new URLSearchParams();
     if (source) params.set('source', source);
     if (strategyId != null) params.set('strategy_id', String(strategyId));
+    if (exchange) params.set('exchange', exchange);
     const query = params.toString();
     return request<CoinPoolEntry[]>(`/coin-pool${query ? `?${query}` : ''}`);
   },
   /** 与调度器一致：按该策略成交量 / top_n / TradFi 过滤后的可开仓列表 */
   getStrategyEffectiveCoinPool: (strategyId: number): Promise<CoinPoolEntry[]> =>
     request<CoinPoolEntry[]>(`/strategies/${strategyId}/effective-coin-pool`),
-  refreshCoinPool: (): Promise<{ status: string; message: string }> =>
-    request('/coin-pool/refresh', { method: 'POST' }),
+  refreshCoinPool: (exchange?: string): Promise<{ status: string; message: string }> => {
+    const q = exchange ? `?exchange=${encodeURIComponent(exchange)}` : '';
+    return request(`/coin-pool/refresh${q}`, { method: 'POST' });
+  },
   getCoinPoolConfig: (): Promise<{ refresh_interval_seconds: number; pool_source: string; max_symbols: number }> =>
     request('/coin-pool/config'),
   updateCoinPoolConfig: (data: any): Promise<{ refresh_interval_seconds: number; pool_source: string; max_symbols: number }> =>
     request('/coin-pool/config', { method: 'PUT', body: JSON.stringify(data) }),
-  testFetchCoinPool: (): Promise<{ success: boolean; count: number; data: any[]; message: string }> =>
-    request('/coin-pool/test-fetch', { method: 'POST' }),
+  testFetchCoinPool: (exchange?: string): Promise<{ success: boolean; count: number; data: any[]; message: string }> => {
+    const q = exchange ? `?exchange=${encodeURIComponent(exchange)}` : '';
+    return request(`/coin-pool/test-fetch${q}`, { method: 'POST' });
+  },
 
   // Bot toggle
   toggleBot: (enabled: boolean): Promise<{ master_switch: boolean }> =>

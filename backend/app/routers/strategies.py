@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
 
 def _panic_symbol_key(sym: str) -> str:
-    return (sym or "").upper().replace("/", "").replace(":USDT", "")
+    return (sym or "").upper().replace("/", "").replace(":USDT", "").replace("_", "")
 
 
 async def _load_blacklist_map(db: AsyncSession, strategy_ids: list[int]) -> dict[int, list[str]]:
@@ -128,13 +128,16 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
     if not strategy.use_coin_pool:
         return []
 
+    from ..models.account import Account
     from ..services.binance_service import (
-        get_public_binance,
         get_strategy_pool_exclude_symbols,
         filter_pool_symbols_by_funding,
     )
+    from ..services.exchange_factory import account_exchange_id, get_public_exchange
 
-    public = await get_public_binance()
+    account = await db.get(Account, strategy.account_id)
+    exchange = account_exchange_id(account)
+    public = await get_public_exchange(exchange)
     exclude_norm = await get_strategy_pool_exclude_symbols(
         public,
         exclude_tradefi=bool(strategy.exclude_tradefi),
@@ -158,6 +161,7 @@ async def get_strategy_effective_coin_pool(strategy_id: int, db: AsyncSession = 
         min_volume_24h=float(strategy.coin_pool_min_volume_24h or 0),
         exclude_symbols_norm=merged_exclude if merged_exclude else None,
         strategy=strategy,
+        exchange=exchange,
     )
     if exclude_funding_enabled(strategy):
         allowed = await filter_pool_symbols_by_funding(
@@ -304,18 +308,22 @@ async def start_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Strategy not found")
 
     from ..services.coin_pool_service import coin_pool_service
-    from ..services.binance_service import get_public_binance
+    from ..models.account import Account
+    from ..services.exchange_factory import account_exchange_id, get_public_exchange
 
     await coin_pool_service.sync_config_from_running_strategies()
     coin_pool_service.wake_refresh_loop()
 
     if strategy.use_coin_pool and strategy.coin_pool_fetch_mode == "immediate":
         try:
-            public_binance = await get_public_binance()
+            account = await db.get(Account, strategy.account_id)
+            exchange = account_exchange_id(account)
+            public_client = await get_public_exchange(exchange)
             await coin_pool_service.refresh_pool(
-                public_binance,
+                public_client,
                 source=normalize_coin_pool_source(strategy.coin_pool_source),
                 limit=strategy.coin_pool_top_n,
+                exchange=exchange,
             )
         except Exception:
             pass
@@ -339,8 +347,7 @@ async def stop_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/{strategy_id}/panic-close")
 async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
     """Emergency close: close exchange positions belonging to THIS strategy only."""
-    from ..services.binance_service import get_binance_service
-    from ..services.encryption import decrypt
+    from ..services.exchange_factory import get_exchange_for_account
     from ..models.account import Account
     from ..models.trade import Trade
     from ..config import now_beijing
@@ -354,9 +361,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    api_key = decrypt(account.api_key_encrypted)
-    api_secret = decrypt(account.api_secret_encrypted)
-    binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+    binance = await get_exchange_for_account(account)
 
     stmt_open = select(Position).where(
         Position.strategy_id == strategy_id,
@@ -485,8 +490,7 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
 
 @router.get("/{strategy_id}/exchange-positions")
 async def get_exchange_positions(strategy_id: int, db: AsyncSession = Depends(get_db)):
-    from ..services.binance_service import get_binance_service
-    from ..services.encryption import decrypt
+    from ..services.exchange_factory import get_exchange_for_account
     from ..models.account import Account
 
     strategy = await db.get(Strategy, strategy_id)
@@ -497,9 +501,7 @@ async def get_exchange_positions(strategy_id: int, db: AsyncSession = Depends(ge
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    api_key = decrypt(account.api_key_encrypted)
-    api_secret = decrypt(account.api_secret_encrypted)
-    binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+    binance = await get_exchange_for_account(account)
 
     try:
         positions = await binance.fetch_positions()
@@ -510,7 +512,13 @@ async def get_exchange_positions(strategy_id: int, db: AsyncSession = Depends(ge
     for p in positions:
         contracts = float(p.get("contracts", 0) or 0)
         if contracts > 0:
-            symbol = (p.get("symbol") or "").replace("/", "").replace(":USDT", "")
+            symbol = (
+                (p.get("symbol") or "")
+                .replace("/", "")
+                .replace(":USDT", "")
+                .replace("_", "")
+                .upper()
+            )
             side = (p.get("side") or "").lower()
             entry_price = float(p.get("entryPrice", 0) or 0)
             mark_price = float(p.get("markPrice", 0) or 0)

@@ -102,6 +102,13 @@ export default function StatusBar() {
                   <>
                     {selectedAccount.name}
                     <span className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] ${
+                      selectedAccount.exchange === 'gate'
+                        ? 'bg-teal-600/20 text-teal-300'
+                        : 'bg-amber-600/20 text-amber-300'
+                    }`}>
+                      {selectedAccount.exchange === 'gate' ? 'GATE' : '币安'}
+                    </span>
+                    <span className={`ml-1 px-1.5 py-0.5 rounded text-[10px] ${
                       selectedAccount.testnet
                         ? 'bg-yellow-600/20 text-yellow-400'
                         : 'bg-green-600/20 text-green-400'
@@ -124,7 +131,16 @@ export default function StatusBar() {
                       selectedAccountId === account.id ? 'bg-gray-700/50' : ''
                     }`}
                   >
-                    <span>{account.name}</span>
+                    <span className="flex items-center gap-1">
+                      <span>{account.name}</span>
+                      <span className={`px-1 py-0.5 rounded text-[10px] ${
+                        account.exchange === 'gate'
+                          ? 'bg-teal-600/20 text-teal-300'
+                          : 'bg-amber-600/20 text-amber-300'
+                      }`}>
+                        {account.exchange === 'gate' ? 'GATE' : '币安'}
+                      </span>
+                    </span>
                     <span className={`px-1.5 py-0.5 rounded text-[10px] ${
                       account.testnet
                         ? 'bg-yellow-600/20 text-yellow-400'

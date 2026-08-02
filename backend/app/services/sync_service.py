@@ -18,7 +18,7 @@ _POSITION_SYNC_INTERVAL = 60  # 1 minute
 
 
 def _norm_leg_symbol(sym: str) -> str:
-    return (sym or "").replace("/", "").replace(":USDT", "")
+    return (sym or "").replace("/", "").replace(":USDT", "").replace("_", "").upper()
 
 
 def _order_filled(oi: dict) -> bool:
@@ -56,7 +56,11 @@ async def _exit_from_tp_orders(
         if not oid:
             continue
         try:
-            oi = await binance_service.exchange.fetch_order(oid, formatted)
+            # GATE：服务层带 settle + 张→币；币安保持原 exchange.fetch_order
+            if getattr(binance_service, "exchange_id", None) == "gate":
+                oi = await binance_service.fetch_order(oid, symbol)
+            else:
+                oi = await binance_service.exchange.fetch_order(oid, formatted)
             if not _order_filled(oi):
                 continue
             px = _parse_order_exit_price(oi)

@@ -32,10 +32,17 @@ def _client_ip(request: Request) -> str:
 
 @router.post("", response_model=AccountResponse)
 async def create_account(data: AccountCreate, request: Request, db: AsyncSession = Depends(get_db)):
+    exchange = data.exchange
+    testnet = data.testnet
+    hedge_mode = data.hedge_mode
+    if exchange == "gate":
+        testnet = False
+        hedge_mode = True
     logger.info(
-        "创建账户 name=%s testnet=%s ip=%s",
+        "创建账户 name=%s exchange=%s testnet=%s ip=%s",
         data.name,
-        data.testnet,
+        exchange,
+        testnet,
         _client_ip(request),
     )
     try:
@@ -46,10 +53,11 @@ async def create_account(data: AccountCreate, request: Request, db: AsyncSession
 
     account = Account(
         name=data.name,
+        exchange=exchange,
         api_key_encrypted=encrypted_key,
         api_secret_encrypted=encrypted_secret,
-        testnet=data.testnet,
-        hedge_mode=data.hedge_mode,
+        testnet=testnet,
+        hedge_mode=hedge_mode,
     )
     db.add(account)
     await db.commit()
@@ -58,6 +66,7 @@ async def create_account(data: AccountCreate, request: Request, db: AsyncSession
     return AccountResponse(
         id=account.id,
         name=account.name,
+        exchange=account.exchange or "binance",
         masked_key=mask_key(data.api_key),
         testnet=account.testnet,
         hedge_mode=account.hedge_mode,
@@ -81,6 +90,7 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
             AccountResponse(
                 id=a.id,
                 name=a.name,
+                exchange=getattr(a, "exchange", None) or "binance",
                 masked_key=mk,
                 testnet=a.testnet,
                 hedge_mode=a.hedge_mode,
@@ -112,25 +122,31 @@ async def _delete_account_record(account_id: int, db: AsyncSession) -> None:
     api_key: str | None = None
     api_secret: str | None = None
     try:
-        from ..services.binance_service import get_binance_service
+        from ..services.exchange_factory import get_exchange_for_account
 
         api_key = decrypt(account.api_key_encrypted)
         api_secret = decrypt(account.api_secret_encrypted)
-        binance = await get_binance_service(api_key, api_secret, account.testnet, account.hedge_mode)
+        client = await get_exchange_for_account(account)
 
-        eps = await binance.fetch_positions()
+        eps = await client.fetch_positions()
         legs: dict[tuple[str, str], float] = {}
         for ep in eps:
             contracts = float(ep.get("contracts", 0) or 0)
             if contracts <= 0:
                 continue
-            sym = (ep.get("symbol") or "").replace("/", "").replace(":USDT", "")
+            sym = (
+                (ep.get("symbol") or "")
+                .replace("/", "")
+                .replace(":USDT", "")
+                .replace("_", "")
+                .upper()
+            )
             side = (ep.get("side") or "").lower()
             legs[(sym, side)] = legs.get((sym, side), 0) + contracts
 
         for (sym, side) in legs:
             try:
-                await binance.close_position(sym, side)
+                await client.close_position(sym, side)
             except Exception as e:
                 exchange_close_errors.append(f"{sym} {side}: {e}")
     except Exception as e:
@@ -164,13 +180,11 @@ async def _delete_account_record(account_id: int, db: AsyncSession) -> None:
 
     if api_key and api_secret:
         try:
-            from ..services.binance_service import clear_private_binance_service
+            from ..services.exchange_factory import clear_private_exchange_for_account
 
-            await clear_private_binance_service(
-                api_key, api_secret, account.testnet, account.hedge_mode
-            )
+            await clear_private_exchange_for_account(account)
         except Exception as e:
-            logger.warning("账户 %d 删除后清理 Binance 缓存失败: %s", account_id, e)
+            logger.warning("账户 %d 删除后清理交易所缓存失败: %s", account_id, e)
 
 
 @router.post("/purge-spam")

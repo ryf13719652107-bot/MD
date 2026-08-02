@@ -6,8 +6,8 @@ from ..database import async_session
 from ..models.coin_pool import CoinPool
 from ..models.strategy import Strategy
 from ..config import now_beijing
-from .binance_service import BinanceService
 from .position_manager import _norm_sym
+from .exchange_factory import normalize_exchange_id
 
 logger = logging.getLogger(__name__)
 
@@ -31,21 +31,26 @@ def sort_coin_pool_by_price_change(coins: list[CoinPool], source: str | None = N
     return gainers + losers + other
 
 
+_DEFAULT_POOL_CONFIG = {
+    "refresh_interval_seconds": 3600,
+    "pool_source": "both",
+    "max_symbols": 30,
+    "fetch_mode": "interval",
+    "anchor_hour": 8,
+    "anchor_minute": 0,
+    "schedule_started_at": None,
+}
+
+
 class CoinPoolService:
     def __init__(self):
         self._refresh_task: asyncio.Task | None = None
         self._bg_tasks: set[asyncio.Task] = set()
         self._wake_event = asyncio.Event()
         self._refresh_lock = asyncio.Lock()
-        self._config = {
-            "refresh_interval_seconds": 3600,
-            "pool_source": "both",
-            "max_symbols": 30,
-            "fetch_mode": "interval",
-            "anchor_hour": 8,
-            "anchor_minute": 0,
-            "schedule_started_at": None,
-        }
+        # _config：API/单测兼容；_configs_by_exchange：按交易所隔离，避免 GATE 改币安节奏
+        self._config = dict(_DEFAULT_POOL_CONFIG)
+        self._configs_by_exchange: dict[str, dict] = {}
         self._last_refresh_ok: bool = False
         self._last_refresh_time: float = 0.0
         self._last_error: str = ""
@@ -54,6 +59,12 @@ class CoinPoolService:
     @property
     def config(self) -> dict:
         return self._config
+
+    def config_for(self, exchange: str) -> dict:
+        ex = normalize_exchange_id(exchange)
+        if ex not in self._configs_by_exchange:
+            self._configs_by_exchange[ex] = dict(_DEFAULT_POOL_CONFIG)
+        return self._configs_by_exchange[ex]
 
     @property
     def status(self) -> dict:
@@ -85,7 +96,7 @@ class CoinPoolService:
             pass
 
     async def ensure_scheduled_pool_if_due(
-        self, binance_service: BinanceService, strategy: Strategy
+        self, exchange_service, strategy: Strategy, *, exchange: str = "binance"
     ) -> None:
         """Refresh at anchor time when the background loop has not run yet (e.g. tick vs loop race)."""
         if not strategy.use_coin_pool:
@@ -94,32 +105,24 @@ class CoinPoolService:
             return
         from .strategy_flags import normalize_coin_pool_source
 
+        ex = normalize_exchange_id(exchange)
         source = normalize_coin_pool_source(strategy.coin_pool_source)
-        coins = await self.get_pool(source)
+        coins = await self.get_pool(source, exchange=ex)
         if self._coin_pool_valid_for_strategy(strategy, coins):
             return
-        last_dt = await self._last_refresh_datetime_from_db()
-        delay = self._seconds_until_next_refresh(last_dt)
+        last_dt = await self._last_refresh_datetime_from_db(exchange=ex)
+        delay = self._seconds_until_next_refresh(last_dt, exchange=ex)
         if delay > 30:
             return
         async with self._refresh_lock:
-            coins = await self.get_pool(source)
+            coins = await self.get_pool(source, exchange=ex)
             if self._coin_pool_valid_for_strategy(strategy, coins):
                 return
-            await self.refresh_pool_sources(binance_service)
+            await self.refresh_pool_sources(exchange_service, exchange=ex)
 
-    async def sync_config_from_running_strategies(self) -> None:
-        """鎸夎繍琛屼腑绛栫暐姹囨€诲埛鏂板懆鏈熶笌鍏ュ簱鏉℃暟锛涗粎涓€鏉＄瓥鐣ユ椂鍚屾娴嬭瘯鐢?pool_source銆?"""
-        async with async_session() as session:
-            r = await session.execute(
-                select(Strategy).where(
-                    Strategy.use_coin_pool.is_(True),
-                    Strategy.status == "running",
-                )
-            )
-            strategies = list(r.scalars().all())
-        if not strategies:
-            return
+    @staticmethod
+    def _patch_from_strategies(strategies: list[Strategy], base: dict) -> dict:
+        """从同一交易所的运行策略聚合刷新配置。"""
         max_top = max(s.coin_pool_top_n for s in strategies)
         min_refresh = min(s.coin_pool_refresh_seconds for s in strategies)
         scheduled = [
@@ -127,7 +130,7 @@ class CoinPoolService:
             if getattr(s, "coin_pool_fetch_mode", "interval") == "scheduled"
         ]
         patch: dict = {
-            "max_symbols": max(max_top, self._config.get("max_symbols", 30)),
+            "max_symbols": max(max_top, base.get("max_symbols", 30)),
             "refresh_interval_seconds": min_refresh,
         }
         if scheduled:
@@ -150,14 +153,57 @@ class CoinPoolService:
             patch["pool_source"] = normalize_coin_pool_source(
                 strategies[0].coin_pool_source
             )
-        self.update_config(**patch)
+        return patch
 
-    async def _limit_for_source(self, source: str) -> int:
-        """璇ユ潵婧愪笅杩愯绛栫暐鎵€闇€鐨勬渶澶?top_n锛涙棤杩愯绛栫暐鏃剁敤 max_symbols銆?"""
+    async def sync_config_from_running_strategies(self) -> None:
+        """按交易所分别聚合运行中策略的选币配置（币安/GATE 互不影响）。"""
+        from collections import defaultdict
+
+        from ..models.account import Account
+
         async with async_session() as session:
-            stmt = select(Strategy.coin_pool_top_n).where(
-                Strategy.use_coin_pool.is_(True),
-                Strategy.status == "running",
+            r = await session.execute(
+                select(Strategy, Account)
+                .join(Account, Account.id == Strategy.account_id)
+                .where(
+                    Strategy.use_coin_pool.is_(True),
+                    Strategy.status == "running",
+                )
+            )
+            rows = list(r.all())
+        if not rows:
+            return
+
+        by_ex: dict[str, list[Strategy]] = defaultdict(list)
+        for strategy, account in rows:
+            by_ex[normalize_exchange_id(getattr(account, "exchange", None))].append(
+                strategy
+            )
+
+        for ex, strategies in by_ex.items():
+            cfg = self.config_for(ex)
+            cfg.update(self._patch_from_strategies(strategies, cfg))
+
+        # API 兼容：全局 _config 跟随币安侧（仅币安策略时行为与改前一致）
+        if "binance" in by_ex:
+            self._config.update(self.config_for("binance"))
+
+    async def _limit_for_source(self, source: str, *, exchange: str = "binance") -> int:
+        """该来源下运行策略所需的最大 top_n；无运行策略时用 max_symbols。"""
+        from ..models.account import Account
+
+        ex = normalize_exchange_id(exchange)
+        async with async_session() as session:
+            from sqlalchemy import func
+
+            stmt = (
+                select(Strategy.coin_pool_top_n)
+                .join(Account, Account.id == Strategy.account_id)
+                .where(
+                    Strategy.use_coin_pool.is_(True),
+                    Strategy.status == "running",
+                    func.coalesce(Account.exchange, "binance") == ex,
+                )
             )
             if source == "both":
                 stmt = stmt.where(Strategy.coin_pool_source == "both")
@@ -168,20 +214,29 @@ class CoinPoolService:
             tops = [row[0] for row in (await session.execute(stmt)).all()]
         if tops:
             return max(tops)
-        return int(self._config.get("max_symbols", 30))
+        return int(self.config_for(ex).get("max_symbols", 30))
 
-    async def _running_pool_sources(self) -> list[str]:
-        """杩愯涓瓥鐣ラ渶瑕佺殑閫夊竵姹犳潵婧愶紙鍘婚噸锛夛紱鏃犺繍琛岀瓥鐣ユ椂鐢ㄥ叏灞€閰嶇疆銆?"""
+    async def _running_pool_sources(self, *, exchange: str = "binance") -> list[str]:
+        """运行中策略需要的选币池来源（去重）；无运行策略时用该交易所配置。"""
+        from ..models.account import Account
+
+        ex = normalize_exchange_id(exchange)
         async with async_session() as session:
+            from sqlalchemy import func
+
             r = await session.execute(
-                select(Strategy.coin_pool_source).where(
+                select(Strategy.coin_pool_source)
+                .join(Account, Account.id == Strategy.account_id)
+                .where(
                     Strategy.use_coin_pool.is_(True),
                     Strategy.status == "running",
-                ).distinct()
+                    func.coalesce(Account.exchange, "binance") == ex,
+                )
+                .distinct()
             )
             rows = [row[0] for row in r.all() if row[0]]
         if not rows:
-            return [self._config["pool_source"]]
+            return [self.config_for(ex)["pool_source"]]
         out: list[str] = []
         for s in rows:
             if s == "both":
@@ -193,92 +248,122 @@ class CoinPoolService:
             out = ["both"]
         return out
 
+    async def _running_exchanges(self) -> list[str]:
+        from ..models.account import Account
+
+        async with async_session() as session:
+            r = await session.execute(
+                select(Account.exchange)
+                .join(Strategy, Strategy.account_id == Account.id)
+                .where(
+                    Strategy.use_coin_pool.is_(True),
+                    Strategy.status == "running",
+                )
+                .distinct()
+            )
+            rows = [normalize_exchange_id(row[0]) for row in r.all()]
+        return sorted(set(rows)) or ["binance"]
+
     async def refresh_pool(
         self,
-        binance_service: BinanceService,
+        exchange_service,
         source: str | None = None,
         *,
         limit: int | None = None,
+        exchange: str = "binance",
     ):
-        """鎷夊彇骞跺啓鍏ユ寚瀹氭潵婧愮殑閫夊竵姹狅紱鍙浛鎹㈣鏉ユ簮琛岋紝涓庡叾瀹冩潵婧愪簰涓嶅奖鍝嶃€?"""
-        source = source or self._config["pool_source"]
+        """拉取并写入指定交易所+来源的选币池。"""
+        ex = normalize_exchange_id(exchange)
+        source = source or self.config_for(ex)["pool_source"]
         from .strategy_flags import normalize_coin_pool_source
 
         source = normalize_coin_pool_source(source)
         if limit is None:
-            limit = await self._limit_for_source(source)
-        movers = await binance_service.fetch_top_movers(
-            source=source,
-            limit=limit,
-        )
+            limit = await self._limit_for_source(source, exchange=ex)
+        movers = await exchange_service.fetch_top_movers(source=source, limit=limit)
         if not movers:
             self._last_refresh_ok = False
-            self._last_error = f"选币池[{source}]返回空列表"
-            logger.warning(
-                "閫夊竵姹燵%s]鎷夊彇缁撴灉涓虹┖锛屼繚鐣欒鏉ユ簮鏃ф暟鎹笌鍏跺畠鏉ユ簮",
-                source,
-            )
+            self._last_error = f"选币池[{ex}/{source}]返回空列表"
+            logger.warning("选币池[%s/%s]拉取结果为空，保留该来源旧数据", ex, source)
             return
         async with async_session() as session:
             if source == "both":
                 await session.execute(
-                    delete(CoinPool).where(CoinPool.source.in_(["gainers", "losers"]))
+                    delete(CoinPool).where(
+                        CoinPool.exchange == ex,
+                        CoinPool.source.in_(["gainers", "losers"]),
+                    )
                 )
             else:
-                await session.execute(delete(CoinPool).where(CoinPool.source == source))
-            for item in movers:
-                coin = CoinPool(
-                    symbol=item["symbol"],
-                    rank=item["rank"],
-                    price_change_pct=item["price_change_pct"],
-                    volume_24h=item.get("volume_24h", 0),
-                    source=item["source"],
-                    added_at=now_beijing(),
-                    last_updated=now_beijing(),
+                await session.execute(
+                    delete(CoinPool).where(
+                        CoinPool.exchange == ex,
+                        CoinPool.source == source,
+                    )
                 )
-                session.add(coin)
+            for item in movers:
+                session.add(
+                    CoinPool(
+                        exchange=ex,
+                        symbol=item["symbol"],
+                        rank=item["rank"],
+                        price_change_pct=item["price_change_pct"],
+                        volume_24h=item.get("volume_24h", 0),
+                        source=item["source"],
+                        added_at=now_beijing(),
+                        last_updated=now_beijing(),
+                    )
+                )
             await session.commit()
         self._last_refresh_ok = True
         self._last_refresh_time = now_beijing().timestamp()
         self._last_error = ""
-        logger.info("Coin pool refreshed [%s]: %d symbols", source, len(movers))
+        logger.info("Coin pool refreshed [%s/%s]: %d symbols", ex, source, len(movers))
 
     async def refresh_pool_sources(
-        self, binance_service: BinanceService, sources: list[str] | None = None
+        self,
+        exchange_service,
+        sources: list[str] | None = None,
+        *,
+        exchange: str = "binance",
     ) -> None:
-        """鍙埛鏂板綋鍓嶈繍琛岀瓥鐣ョ敤鍒扮殑鏉ユ簮锛坓ainers / losers / both锛夈€?"""
+        ex = normalize_exchange_id(exchange)
         await self.sync_config_from_running_strategies()
-        sources = sources or await self._running_pool_sources()
+        sources = sources or await self._running_pool_sources(exchange=ex)
         for src in sources:
             timeout = 90.0
             try:
                 await asyncio.wait_for(
-                    self.refresh_pool(binance_service, source=src),
+                    self.refresh_pool(exchange_service, source=src, exchange=ex),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
                 self._last_refresh_ok = False
-                self._last_error = f"閫夊竵姹燵{src}]鍒锋柊瓒呮椂({int(timeout)}s)"
-                logger.error("Coin pool refresh timed out for source=%s", src)
+                self._last_error = f"选币池[{ex}/{src}]刷新超时({int(timeout)}s)"
+                logger.error("Coin pool refresh timed out for exchange=%s source=%s", ex, src)
             except Exception as e:
                 self._last_refresh_ok = False
                 self._last_error = str(e)[:200]
-                logger.error("Coin pool refresh error source=%s: %s", src, e)
+                logger.error("Coin pool refresh error exchange=%s source=%s: %s", ex, src, e)
         from .kline_prewarm import prewarm_running_strategies_klines
         from .leverage_prewarm import prewarm_running_strategies_leverage
 
         self._fire_background(prewarm_running_strategies_leverage())
         self._fire_background(prewarm_running_strategies_klines())
 
-    async def get_pool(self, source: str | None = None) -> list[CoinPool]:
-        """Get current coin pool from database.
+    async def refresh_all_running_exchanges(self) -> None:
+        from .exchange_factory import get_public_exchange
 
-        Args:
-            source: 'gainers', 'losers', 'both', or None (all).
-                    'both' returns all coins without source filtering.
-        """
+        for ex in await self._running_exchanges():
+            client = await get_public_exchange(ex)
+            await self.refresh_pool_sources(client, exchange=ex)
+
+    async def get_pool(
+        self, source: str | None = None, *, exchange: str = "binance"
+    ) -> list[CoinPool]:
+        ex = normalize_exchange_id(exchange)
         async with async_session() as session:
-            stmt = select(CoinPool).order_by(CoinPool.rank)
+            stmt = select(CoinPool).where(CoinPool.exchange == ex).order_by(CoinPool.rank)
             if source == "both":
                 stmt = stmt.where(CoinPool.source.in_(["gainers", "losers"]))
             elif source:
@@ -292,13 +377,17 @@ class CoinPoolService:
         *,
         source: str | None = None,
         strategy: Strategy,
+        exchange: str | None = None,
     ) -> list[CoinPool]:
-        """Raw pool for a strategy page: respect scheduled validity + cap at the strategy's top_n.
+        from ..models.account import Account
 
-        "鏈繃婊? 浠呮寚鏈簲鐢ㄦ垚浜ら噺/TradFi/涓嬫灦/涓绘祦/璐圭巼绛夎繃婊わ紝浣嗕粛闄愬畾鍦ㄦ鍗曞墠 top_n 鍐咃紝
-        涓庣瓥鐣ャ€屾姄鍙栨鍗曞墠 N銆嶈缃竴鑷达紝閬垮厤鍑虹幇澶氫簬 N 涓殑鍥版儜銆?
-        """
-        coins = await self.get_pool(source)
+        if exchange is None:
+            async with async_session() as session:
+                acc = await session.get(Account, strategy.account_id)
+                ex = normalize_exchange_id(getattr(acc, "exchange", None) if acc else None)
+        else:
+            ex = normalize_exchange_id(exchange)
+        coins = await self.get_pool(source, exchange=ex)
         if not self._coin_pool_valid_for_strategy(strategy, coins):
             return []
         top_n = int(getattr(strategy, "coin_pool_top_n", 0) or 0)
@@ -385,9 +474,11 @@ class CoinPoolService:
         min_volume_24h: float = 0,
         exclude_symbols_norm: set[str] | None = None,
         strategy: Strategy | None = None,
+        exchange: str = "binance",
     ) -> list[CoinPool]:
-        """Strategy-facing pool: leaderboard top N 鈫?volume floor 鈫?optional symbol exclude."""
-        coins = await self.get_pool(source)
+        """Strategy-facing pool: top N -> volume -> exclude."""
+        ex = normalize_exchange_id(exchange)
+        coins = await self.get_pool(source, exchange=ex)
         if strategy is not None and not self._coin_pool_valid_for_strategy(strategy, coins):
             return []
         if limit > 0:
@@ -405,27 +496,34 @@ class CoinPoolService:
         min_volume_24h: float = 0,
         exclude_symbols_norm: set[str] | None = None,
         strategy: Strategy | None = None,
+        exchange: str = "binance",
     ) -> list[str]:
-        """Symbol list for scheduler 鈥?same rules as get_effective_pool_entries."""
         coins = await self.get_effective_pool_entries(
             source=source,
             limit=limit,
             min_volume_24h=min_volume_24h,
             exclude_symbols_norm=exclude_symbols_norm,
             strategy=strategy,
+            exchange=exchange,
         )
         return [c.symbol for c in coins]
 
-    async def get_pool_count(self) -> int:
-        """Get total number of symbols in pool."""
+    async def get_pool_count(self, *, exchange: str | None = None) -> int:
         async with async_session() as session:
-            result = await session.execute(select(func.count(CoinPool.id)))
+            stmt = select(func.count(CoinPool.id))
+            if exchange is not None:
+                stmt = stmt.where(CoinPool.exchange == normalize_exchange_id(exchange))
+            result = await session.execute(stmt)
             return result.scalar() or 0
 
-    async def _last_refresh_datetime_from_db(self) -> datetime | None:
-        """涓婁竴娆℃暣姹犲啓鍏ユ椂闂达紙鍚勮 last_updated 鍦?refresh 鏃朵竴鑷达紝鍙?max 鍗冲彲锛夈€?"""
+    async def _last_refresh_datetime_from_db(
+        self, *, exchange: str | None = None
+    ) -> datetime | None:
         async with async_session() as session:
-            r = await session.execute(select(func.max(CoinPool.last_updated)))
+            stmt = select(func.max(CoinPool.last_updated))
+            if exchange is not None:
+                stmt = stmt.where(CoinPool.exchange == normalize_exchange_id(exchange))
+            r = await session.execute(stmt)
             return r.scalar()
 
     async def _has_running_pool_strategies(self) -> bool:
@@ -438,15 +536,24 @@ class CoinPoolService:
             )
             return r.scalar() is not None
 
-    async def has_running_scheduled_strategies(self) -> bool:
+    async def has_running_scheduled_strategies(
+        self, *, exchange: str | None = None
+    ) -> bool:
+        """是否存在 scheduled 运行策略；可按交易所过滤，避免跨所拦截手动刷新。"""
+        from ..models.account import Account
+
         async with async_session() as session:
-            r = await session.execute(
-                select(Strategy.id).where(
-                    Strategy.use_coin_pool.is_(True),
-                    Strategy.status == "running",
-                    Strategy.coin_pool_fetch_mode == "scheduled",
-                ).limit(1)
+            stmt = select(Strategy.id).where(
+                Strategy.use_coin_pool.is_(True),
+                Strategy.status == "running",
+                Strategy.coin_pool_fetch_mode == "scheduled",
             )
+            if exchange is not None:
+                ex = normalize_exchange_id(exchange)
+                stmt = stmt.join(Account, Account.id == Strategy.account_id).where(
+                    func.coalesce(Account.exchange, "binance") == ex
+                )
+            r = await session.execute(stmt.limit(1))
             return r.scalar() is not None
 
     def _next_anchor_slot_after(
@@ -462,19 +569,21 @@ class CoinPoolService:
         n = int(elapsed // interval) + 1
         return base + timedelta(seconds=n * interval)
 
-    def _seconds_until_next_refresh(self, last_dt: datetime | None) -> float:
-        """璺濅笅涓€娆℃寜璁″垝鍒锋柊搴旂瓑寰呯殑绉掓暟锛涙湁鍘嗗彶璁板綍鏃朵笌涓婃閫夊竵鏃堕棿瀵归綈锛岄噸鍚笉绔嬪嵆閲嶉€夈€?"""
-        interval = float(self._config["refresh_interval_seconds"])
+    def _seconds_until_next_refresh(
+        self, last_dt: datetime | None, *, exchange: str | None = None
+    ) -> float:
+        """距下次按计划刷新应等待的秒数；exchange 指定时用该所独立配置。"""
+        cfg = self.config_for(exchange) if exchange is not None else self._config
+        interval = float(cfg["refresh_interval_seconds"])
         now = now_beijing()
-        mode = self._config.get("fetch_mode", "interval")
+        mode = cfg.get("fetch_mode", "interval")
 
         if last_dt is None:
             if mode == "scheduled":
-                anchor = int(self._config.get("anchor_hour", 8))
-                anchor_minute = int(self._config.get("anchor_minute", 0))
-                started = self._config.get("schedule_started_at")
+                anchor = int(cfg.get("anchor_hour", 8))
+                anchor_minute = int(cfg.get("anchor_minute", 0))
+                started = cfg.get("schedule_started_at")
                 if started is not None:
-                    # 鎸囧畾鏃堕棿寮€閫変笖灏氭棤鍘嗗彶姹狅細绛夊埌璁″垝鐢熸晥鍚庣殑棣栦釜閿氱偣鍐嶉娆￠€夊竵
                     first_slot = self._first_anchor_at_or_after(
                         started,
                         anchor,
@@ -494,11 +603,10 @@ class CoinPoolService:
             elapsed = (now - last_dt).total_seconds()
             return max(0.0, interval - elapsed)
 
-        anchor = int(self._config.get("anchor_hour", 8))
-        anchor_minute = int(self._config.get("anchor_minute", 0))
-        started = self._config.get("schedule_started_at")
+        anchor = int(cfg.get("anchor_hour", 8))
+        anchor_minute = int(cfg.get("anchor_minute", 0))
+        started = cfg.get("schedule_started_at")
         if started is not None:
-            # 鎸囧畾鏃堕棿寮€閫夛細棣栦釜閫夊竵鏃跺埢涓鸿鍒掔敓鏁堝悗鐨勭涓€涓敋鐐癸紝涔嬪墠涓嶅埛鏂?
             first_slot = self._first_anchor_at_or_after(
                 started,
                 anchor,
@@ -522,39 +630,59 @@ class CoinPoolService:
         )
         return max(0.0, (next_slot - now).total_seconds())
 
-    async def start_auto_refresh(self, binance_service: BinanceService):
-        """鎸夎鍒掗棿闅斿惊鐜埛鏂帮紱閲嶅惎/鏀瑰弬鍚庢牴鎹簱鍐呬笂娆￠€夊竵鏃堕棿琛ラ綈绛夊緟锛屼笉绔嬪嵆閲嶉€夈€?"""
+    async def start_auto_refresh(self, _legacy_public_client=None):
+        """按计划间隔循环刷新各运行中交易所的选币池（各交易所独立计时）。"""
 
         async def _loop():
+            from .exchange_factory import get_public_exchange
+
             while True:
                 await self.sync_config_from_running_strategies()
                 if not await self._has_running_pool_strategies():
                     await self._interruptible_sleep(60)
                     continue
-                last_dt = await self._last_refresh_datetime_from_db()
-                delay = self._seconds_until_next_refresh(last_dt)
-                if delay > 0:
-                    if last_dt is not None:
-                        self._last_refresh_time = last_dt.timestamp()
-                    mode = self._config.get("fetch_mode", "interval")
+
+                exchanges = await self._running_exchanges()
+                due: list[str] = []
+                next_wait: float | None = None
+                wait_ex: str | None = None
+                for ex in exchanges:
+                    last_dt = await self._last_refresh_datetime_from_db(exchange=ex)
+                    delay = self._seconds_until_next_refresh(last_dt, exchange=ex)
+                    if delay <= 0:
+                        due.append(ex)
+                    elif next_wait is None or delay < next_wait:
+                        next_wait = delay
+                        wait_ex = ex
+
+                if not due:
+                    wait = next_wait if next_wait is not None else 60.0
+                    cfg = self.config_for(wait_ex or "binance")
+                    mode = cfg.get("fetch_mode", "interval")
                     if mode == "scheduled":
                         logger.info(
-                            "选币池将在 %.0f 秒后刷新（scheduled 锚点=%02d:%02d 周期=%ds）",
-                            delay,
-                            int(self._config.get("anchor_hour", 8)),
-                            int(self._config.get("anchor_minute", 0)),
-                            int(self._config["refresh_interval_seconds"]),
+                            "选币池[%s]将在 %.0f 秒后刷新（scheduled 锚点=%02d:%02d 周期=%ds）",
+                            wait_ex or "?",
+                            wait,
+                            int(cfg.get("anchor_hour", 8)),
+                            int(cfg.get("anchor_minute", 0)),
+                            int(cfg["refresh_interval_seconds"]),
                         )
                     else:
                         logger.info(
-                            "选币池将在 %.0f 秒后刷新（与上次选币对齐，周期=%ds）",
-                            delay,
-                            int(self._config["refresh_interval_seconds"]),
+                            "选币池[%s]将在 %.0f 秒后刷新（交易所独立配置，周期=%ds）",
+                            wait_ex or "?",
+                            wait,
+                            int(cfg["refresh_interval_seconds"]),
                         )
-                    await self._interruptible_sleep(delay)
+                    await self._interruptible_sleep(wait)
+                    continue
+
                 try:
                     async with self._refresh_lock:
-                        await self.refresh_pool_sources(binance_service)
+                        for ex in due:
+                            client = await get_public_exchange(ex)
+                            await self.refresh_pool_sources(client, exchange=ex)
                 except Exception as e:
                     self._last_refresh_ok = False
                     self._last_error = str(e)[:200]

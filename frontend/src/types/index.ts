@@ -1,6 +1,9 @@
+export type ExchangeId = 'binance' | 'gate';
+
 export interface Account {
   id: number;
   name: string;
+  exchange: ExchangeId;
   masked_key: string;
   testnet: boolean;
   hedge_mode: boolean;
@@ -85,6 +88,7 @@ export interface DashboardData {
 
 export interface CoinPoolEntry {
   id: number;
+  exchange?: ExchangeId | string;
   symbol: string;
   rank: number;
   price_change_pct: number;

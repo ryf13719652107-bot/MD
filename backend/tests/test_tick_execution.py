@@ -17,9 +17,15 @@ from app.services.tick_context import TickContext, SignalCandidate, exchange_leg
 def _make_binance_svc() -> BinanceService:
     svc = BinanceService.__new__(BinanceService)
     svc.hedge_mode = True
-    svc.exchange = MagicMock()
+    ex = MagicMock()
+    svc._exchange = ex
+    svc._ws_exchange = ex
+    svc._pinned = True
+    svc._created_at = 0
     svc._markets_loaded = False
     svc._leverage_cache = {}
+    ex.load_markets = AsyncMock()
+    ex.set_leverage = AsyncMock()
     return svc
 
 

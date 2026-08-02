@@ -75,6 +75,7 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN st_timeframe_2 VARCHAR(10) DEFAULT '30m'",
             "ALTER TABLE strategies ADD COLUMN martingale_st_filter_enabled BOOLEAN DEFAULT 0",
             "ALTER TABLE accounts ADD COLUMN cashflow_sync_cursor_ms INTEGER",
+            "ALTER TABLE accounts ADD COLUMN exchange VARCHAR(20) DEFAULT 'binance'",
         ]
         for sql in migrations:
             try:
@@ -92,12 +93,37 @@ async def init_db():
         except Exception:
             pass
 
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE accounts SET exchange='binance' WHERE exchange IS NULL OR exchange=''"
+                )
+            )
+        except Exception:
+            pass
+
         from .db_migrations.coin_pool_unique import migrate_coin_pool_symbol_source_unique
+        from .db_migrations.coin_pool_exchange import migrate_coin_pool_exchange_unique
 
         try:
             await conn.run_sync(migrate_coin_pool_symbol_source_unique)
         except Exception as e:
             logger.warning("coin_pool (symbol, source) migration skipped or failed: %s", e)
+
+        try:
+            await conn.run_sync(migrate_coin_pool_exchange_unique)
+        except Exception as e:
+            logger.warning("coin_pool (exchange, symbol, source) migration skipped or failed: %s", e)
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE coin_pool SET exchange='binance' "
+                    "WHERE exchange IS NULL OR exchange=''"
+                )
+            )
+        except Exception:
+            pass
 
         try:
             await conn.run_sync(

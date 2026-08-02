@@ -8,9 +8,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_TRADEFI_SYMBOLS_CACHE: tuple[float, frozenset[str]] | None = None
-_DELISTING_SOON_CACHE: tuple[float, frozenset[str]] | None = None
-_LAST_FUNDING_RATES_CACHE: tuple[float, dict[str, float]] | None = None
+# 按 exchange_id 分片缓存，避免多交易所互相覆盖
+_TRADEFI_SYMBOLS_CACHE: dict[str, tuple[float, frozenset[str]]] = {}
+_DELISTING_SOON_CACHE: dict[str, tuple[float, frozenset[str]]] = {}
+_LAST_FUNDING_RATES_CACHE: dict[str, tuple[float, dict[str, float]]] = {}
 _TRADEFI_CACHE_TTL = 3600.0
 _FUNDING_CACHE_TTL = 300.0
 DELIST_LOOKAHEAD_DAYS = 14
@@ -18,10 +19,13 @@ DELIST_LOOKAHEAD_MS = DELIST_LOOKAHEAD_DAYS * 24 * 3600 * 1000
 
 
 def tradefi_cache_clear():
-    global _TRADEFI_SYMBOLS_CACHE, _DELISTING_SOON_CACHE, _LAST_FUNDING_RATES_CACHE
-    _TRADEFI_SYMBOLS_CACHE = None
-    _DELISTING_SOON_CACHE = None
-    _LAST_FUNDING_RATES_CACHE = None
+    _TRADEFI_SYMBOLS_CACHE.clear()
+    _DELISTING_SOON_CACHE.clear()
+    _LAST_FUNDING_RATES_CACHE.clear()
+
+
+def _client_exchange_id(client) -> str:
+    return getattr(client, "exchange_id", None) or "binance"
 
 
 def _float_or_zero(value) -> float:
@@ -53,7 +57,7 @@ def extract_usdt_wallet_balance(balance: dict) -> float:
 
 
 def _normalize_symbol_for_tradefi(s: str) -> str:
-    return (s or "").replace("/", "").replace(":USDT", "").upper()
+    return (s or "").replace("/", "").replace(":USDT", "").replace("_", "").upper()
 
 
 # 币安 USDT-M 上的黄金/白银/原油等（含 TRADIFI 与部分永续命名）
@@ -149,54 +153,57 @@ def _symbol_delisting_soon(info: dict, now_ms: int) -> bool:
     return (dms - now_ms) <= DELIST_LOOKAHEAD_MS
 
 
-async def get_cached_delisting_soon_symbols(binance: "BinanceService") -> frozenset[str]:
-    """14 天内下架或非 TRADING 的 USDT 永续（normalized），缓存 1h。"""
-    global _DELISTING_SOON_CACHE
+async def get_cached_delisting_soon_symbols(client) -> frozenset[str]:
+    """14 天内下架或非 TRADING 的 USDT 永续（normalized），缓存 1h。GATE 返回空集。"""
+    eid = _client_exchange_id(client)
+    if eid == "gate":
+        return frozenset()
     now = time.time()
-    if _DELISTING_SOON_CACHE is not None and now - _DELISTING_SOON_CACHE[0] < _TRADEFI_CACHE_TTL:
-        return _DELISTING_SOON_CACHE[1]
-    raw = await binance.fetch_delisting_soon_symbols_raw()
+    hit = _DELISTING_SOON_CACHE.get(eid)
+    if hit is not None and now - hit[0] < _TRADEFI_CACHE_TTL:
+        return hit[1]
+    raw = await client.fetch_delisting_soon_symbols_raw()
     norm = frozenset(_normalize_symbol_for_tradefi(s) for s in raw)
-    _DELISTING_SOON_CACHE = (now, norm)
-    logger.info("Delisting-soon symbols (<%dd): %d", DELIST_LOOKAHEAD_DAYS, len(norm))
+    _DELISTING_SOON_CACHE[eid] = (now, norm)
+    logger.info("Delisting-soon symbols [%s] (<%dd): %d", eid, DELIST_LOOKAHEAD_DAYS, len(norm))
     return norm
 
 
 async def get_strategy_pool_exclude_symbols(
-    binance: "BinanceService",
+    client,
     *,
     exclude_tradefi: bool = False,
     exclude_delisting: bool = True,
     exclude_mainstream: bool = False,
 ) -> frozenset[str] | None:
     """策略选币/开仓用排除集合（normalized）。"""
+    eid = _client_exchange_id(client)
     merged: set[str] = set()
     if exclude_tradefi:
-        merged |= set(await get_cached_tradefi_symbols(binance))
-    if exclude_delisting:
-        merged |= set(await get_cached_delisting_soon_symbols(binance))
+        merged |= set(await get_cached_tradefi_symbols(client))
+    # GATE 首期不做下架过滤
+    if exclude_delisting and eid != "gate":
+        merged |= set(await get_cached_delisting_soon_symbols(client))
     if exclude_mainstream:
         merged |= set(EXCLUDED_MAINSTREAM_SYMBOLS)
     return frozenset(merged) if merged else None
 
 
-async def get_cached_last_funding_rates_pct(binance: "BinanceService") -> dict[str, float]:
+async def get_cached_last_funding_rates_pct(client) -> dict[str, float]:
     """最近一次已结算资金费率(%，normalized symbol → pct)，缓存 5min。"""
-    global _LAST_FUNDING_RATES_CACHE
+    eid = _client_exchange_id(client)
     now = time.time()
-    if (
-        _LAST_FUNDING_RATES_CACHE is not None
-        and now - _LAST_FUNDING_RATES_CACHE[0] < _FUNDING_CACHE_TTL
-    ):
-        return _LAST_FUNDING_RATES_CACHE[1]
-    raw = await binance.fetch_last_funding_rates_pct_raw()
-    _LAST_FUNDING_RATES_CACHE = (now, raw)
-    logger.info("Last funding rates cached: %d symbols", len(raw))
+    hit = _LAST_FUNDING_RATES_CACHE.get(eid)
+    if hit is not None and now - hit[0] < _FUNDING_CACHE_TTL:
+        return hit[1]
+    raw = await client.fetch_last_funding_rates_pct_raw()
+    _LAST_FUNDING_RATES_CACHE[eid] = (now, raw)
+    logger.info("Last funding rates cached [%s]: %d symbols", eid, len(raw))
     return raw
 
 
 async def filter_pool_symbols_by_funding(
-    binance: "BinanceService",
+    client,
     symbols: list[str],
     *,
     direction: str,
@@ -206,7 +213,7 @@ async def filter_pool_symbols_by_funding(
 
     if not symbols:
         return symbols
-    rates = await get_cached_last_funding_rates_pct(binance)
+    rates = await get_cached_last_funding_rates_pct(client)
     out: list[str] = []
     for sym in symbols:
         key = _normalize_symbol_for_tradefi(sym)
@@ -216,22 +223,24 @@ async def filter_pool_symbols_by_funding(
     return out
 
 
-async def get_cached_tradefi_symbols(binance: "BinanceService") -> frozenset[str]:
-    """TRADIFI_PERPETUAL + 黄金白银原油等；normalized，缓存 1h。"""
-    global _TRADEFI_SYMBOLS_CACHE
+async def get_cached_tradefi_symbols(client) -> frozenset[str]:
+    """TradFi + 黄金白银原油等；normalized，按交易所缓存 1h。"""
+    eid = _client_exchange_id(client)
     now = time.time()
-    if _TRADEFI_SYMBOLS_CACHE is not None and now - _TRADEFI_SYMBOLS_CACHE[0] < _TRADEFI_CACHE_TTL:
-        return _TRADEFI_SYMBOLS_CACHE[1]
-    raw = await binance.fetch_tradefi_perpetual_symbols_raw()
+    hit = _TRADEFI_SYMBOLS_CACHE.get(eid)
+    if hit is not None and now - hit[0] < _TRADEFI_CACHE_TTL:
+        return hit[1]
+    raw = await client.fetch_tradefi_perpetual_symbols_raw()
     norm = frozenset(_normalize_symbol_for_tradefi(s) for s in raw)
     norm = norm | EXCLUDED_COMMODITY_SYMBOLS
-    _TRADEFI_SYMBOLS_CACHE = (now, norm)
+    _TRADEFI_SYMBOLS_CACHE[eid] = (now, norm)
     return norm
 
 
 class BinanceService:
     """Wrapper around ccxt binanceusdm (USD-M Futures) with TTL cache."""
 
+    exchange_id = "binance"
     _TTL_SECONDS = 7200  # 2 hours; avoid frequent market/leverage/K-line cold starts
 
     def __init__(self, api_key: str = "", secret: str = "", testnet: bool = True, hedge_mode: bool = True):
