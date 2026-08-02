@@ -54,14 +54,19 @@ async def refresh_coin_pool(exchange: str = Query(default="binance")):
 
 
 @router.get("/config", response_model=CoinPoolConfig)
-async def get_coin_pool_config():
-    return CoinPoolConfig(**coin_pool_service.config)
+async def get_coin_pool_config(exchange: str = Query(default="binance")):
+    ex = normalize_exchange_id(exchange)
+    return CoinPoolConfig(**coin_pool_service.config_for(ex))
 
 
 @router.put("/config", response_model=CoinPoolConfig)
-async def update_coin_pool_config(data: CoinPoolConfig):
-    coin_pool_service.update_config(**data.model_dump())
-    return CoinPoolConfig(**coin_pool_service.config)
+async def update_coin_pool_config(
+    data: CoinPoolConfig,
+    exchange: str = Query(default="binance"),
+):
+    ex = normalize_exchange_id(exchange)
+    coin_pool_service.update_config(exchange=ex, **data.model_dump())
+    return CoinPoolConfig(**coin_pool_service.config_for(ex))
 
 
 @router.post("/test-fetch")
@@ -70,7 +75,7 @@ async def test_fetch_coin_pool(exchange: str = Query(default="binance")):
     ex = normalize_exchange_id(exchange)
     try:
         client = await get_public_exchange(ex)
-        src = coin_pool_service.config.get("pool_source", "both")
+        src = coin_pool_service.config_for(ex).get("pool_source", "both")
         movers = await client.fetch_top_movers(source=src, limit=20)
         return {
             "success": True,
@@ -94,16 +99,16 @@ async def test_fetch_coin_pool(exchange: str = Query(default="binance")):
 
 
 @router.get("/status")
-async def coin_pool_status(exchange: str | None = Query(default=None)):
-    """Get coin pool diagnostic status."""
-    ex = normalize_exchange_id(exchange) if exchange else None
+async def coin_pool_status(exchange: str = Query(default="binance")):
+    """Get coin pool diagnostic status (per exchange)."""
+    ex = normalize_exchange_id(exchange)
     count = await coin_pool_service.get_pool_count(exchange=ex)
-    status = coin_pool_service.status
+    status = coin_pool_service.status_for(ex)
     return {
         "total_symbols": count,
         "exchange": ex,
         "last_refresh_ok": status["last_refresh_ok"],
         "last_refresh_time": status["last_refresh_time"],
         "last_error": status["last_error"],
-        "config": coin_pool_service.config,
+        "config": coin_pool_service.config_for(ex),
     }

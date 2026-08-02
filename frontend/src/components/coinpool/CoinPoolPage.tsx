@@ -16,7 +16,7 @@ export default function CoinPoolPage() {
   const load = useCallback(async () => {
     const [c, cfg] = await Promise.all([
       api.getCoinPool(source || undefined, undefined, exchange),
-      api.getCoinPoolConfig(),
+      api.getCoinPoolConfig(exchange),
     ]);
     setCoins(c);
     setConfig(cfg);
@@ -39,7 +39,7 @@ export default function CoinPoolPage() {
   };
 
   const handleConfigUpdate = async () => {
-    await api.updateCoinPoolConfig(config);
+    await api.updateCoinPoolConfig(config, exchange);
     load();
   };
 
@@ -58,7 +58,12 @@ export default function CoinPoolPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-bold">选币池</h2>
+        <h2 className="text-xl font-bold">
+          选币池
+          <span className={`ml-2 text-sm font-medium ${exchange === 'gate' ? 'text-teal-400' : 'text-amber-400'}`}>
+            {exchange === 'gate' ? 'GATE' : '币安'}
+          </span>
+        </h2>
         <div className="flex items-center gap-2">
           <div className="flex rounded-lg overflow-hidden border border-gray-700">
             <button

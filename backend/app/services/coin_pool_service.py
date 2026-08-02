@@ -48,34 +48,60 @@ class CoinPoolService:
         self._bg_tasks: set[asyncio.Task] = set()
         self._wake_event = asyncio.Event()
         self._refresh_lock = asyncio.Lock()
-        # _config：API/单测兼容；_configs_by_exchange：按交易所隔离，避免 GATE 改币安节奏
+        # _config：兼容旧 API（=币安侧）；真正刷新用 _configs_by_exchange
         self._config = dict(_DEFAULT_POOL_CONFIG)
         self._configs_by_exchange: dict[str, dict] = {}
-        self._last_refresh_ok: bool = False
-        self._last_refresh_time: float = 0.0
-        self._last_error: str = ""
+        self._status_by_exchange: dict[str, dict] = {}
         self._schedule_tolerance_seconds: float = 300.0
 
     @property
     def config(self) -> dict:
-        return self._config
+        return self.config_for("binance")
 
     def config_for(self, exchange: str) -> dict:
         ex = normalize_exchange_id(exchange)
         if ex not in self._configs_by_exchange:
-            self._configs_by_exchange[ex] = dict(_DEFAULT_POOL_CONFIG)
+            # 币安侧与遗留 _config 共用同一 dict，避免两份漂移
+            if ex == "binance":
+                self._configs_by_exchange[ex] = self._config
+            else:
+                self._configs_by_exchange[ex] = dict(_DEFAULT_POOL_CONFIG)
         return self._configs_by_exchange[ex]
 
     @property
     def status(self) -> dict:
-        return {
-            "last_refresh_ok": self._last_refresh_ok,
-            "last_refresh_time": self._last_refresh_time,
-            "last_error": self._last_error,
+        return self.status_for("binance")
+
+    def status_for(self, exchange: str) -> dict:
+        ex = normalize_exchange_id(exchange)
+        st = self._status_by_exchange.get(ex)
+        if not st:
+            return {
+                "last_refresh_ok": False,
+                "last_refresh_time": 0.0,
+                "last_error": "",
+            }
+        return dict(st)
+
+    def _set_refresh_status(
+        self, exchange: str, *, ok: bool, error: str = ""
+    ) -> None:
+        ex = normalize_exchange_id(exchange)
+        prev = self._status_by_exchange.get(ex) or {}
+        self._status_by_exchange[ex] = {
+            "last_refresh_ok": ok,
+            "last_refresh_time": (
+                now_beijing().timestamp() if ok else float(prev.get("last_refresh_time") or 0.0)
+            ),
+            "last_error": error or "",
         }
 
-    def update_config(self, **kwargs):
-        self._config.update(kwargs)
+    def update_config(self, *, exchange: str = "binance", **kwargs):
+        """按交易所更新选币配置；默认 binance 以兼容旧调用。"""
+        cfg = self.config_for(exchange)
+        cfg.update(kwargs)
+        if normalize_exchange_id(exchange) == "binance":
+            self._config.update(cfg)
 
     def _fire_background(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -274,6 +300,16 @@ class CoinPoolService:
     ):
         """拉取并写入指定交易所+来源的选币池。"""
         ex = normalize_exchange_id(exchange)
+        client_ex = normalize_exchange_id(
+            getattr(exchange_service, "exchange_id", None) or exchange
+        )
+        if client_ex != ex:
+            logger.error(
+                "Coin pool refresh exchange mismatch: param=%s client=%s — using client",
+                ex,
+                client_ex,
+            )
+            ex = client_ex
         source = source or self.config_for(ex)["pool_source"]
         from .strategy_flags import normalize_coin_pool_source
 
@@ -282,8 +318,9 @@ class CoinPoolService:
             limit = await self._limit_for_source(source, exchange=ex)
         movers = await exchange_service.fetch_top_movers(source=source, limit=limit)
         if not movers:
-            self._last_refresh_ok = False
-            self._last_error = f"选币池[{ex}/{source}]返回空列表"
+            self._set_refresh_status(
+                ex, ok=False, error=f"选币池[{ex}/{source}]返回空列表"
+            )
             logger.warning("选币池[%s/%s]拉取结果为空，保留该来源旧数据", ex, source)
             return
         async with async_session() as session:
@@ -315,9 +352,7 @@ class CoinPoolService:
                     )
                 )
             await session.commit()
-        self._last_refresh_ok = True
-        self._last_refresh_time = now_beijing().timestamp()
-        self._last_error = ""
+        self._set_refresh_status(ex, ok=True)
         logger.info("Coin pool refreshed [%s/%s]: %d symbols", ex, source, len(movers))
 
     async def refresh_pool_sources(
@@ -338,12 +373,12 @@ class CoinPoolService:
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
-                self._last_refresh_ok = False
-                self._last_error = f"选币池[{ex}/{src}]刷新超时({int(timeout)}s)"
+                self._set_refresh_status(
+                    ex, ok=False, error=f"选币池[{ex}/{src}]刷新超时({int(timeout)}s)"
+                )
                 logger.error("Coin pool refresh timed out for exchange=%s source=%s", ex, src)
             except Exception as e:
-                self._last_refresh_ok = False
-                self._last_error = str(e)[:200]
+                self._set_refresh_status(ex, ok=False, error=str(e)[:200])
                 logger.error("Coin pool refresh error exchange=%s source=%s: %s", ex, src, e)
         from .kline_prewarm import prewarm_running_strategies_klines
         from .leverage_prewarm import prewarm_running_strategies_leverage
@@ -684,8 +719,8 @@ class CoinPoolService:
                             client = await get_public_exchange(ex)
                             await self.refresh_pool_sources(client, exchange=ex)
                 except Exception as e:
-                    self._last_refresh_ok = False
-                    self._last_error = str(e)[:200]
+                    for ex in due:
+                        self._set_refresh_status(ex, ok=False, error=str(e)[:200])
                     logger.error("Coin pool refresh error: %s", e)
 
         if self._refresh_task is None or self._refresh_task.done():

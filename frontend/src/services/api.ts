@@ -175,10 +175,17 @@ export const api = {
     const q = exchange ? `?exchange=${encodeURIComponent(exchange)}` : '';
     return request(`/coin-pool/refresh${q}`, { method: 'POST' });
   },
-  getCoinPoolConfig: (): Promise<{ refresh_interval_seconds: number; pool_source: string; max_symbols: number }> =>
-    request('/coin-pool/config'),
-  updateCoinPoolConfig: (data: any): Promise<{ refresh_interval_seconds: number; pool_source: string; max_symbols: number }> =>
-    request('/coin-pool/config', { method: 'PUT', body: JSON.stringify(data) }),
+  getCoinPoolConfig: (exchange?: string): Promise<{ refresh_interval_seconds: number; pool_source: string; max_symbols: number }> => {
+    const q = exchange ? `?exchange=${encodeURIComponent(exchange)}` : '';
+    return request(`/coin-pool/config${q}`);
+  },
+  updateCoinPoolConfig: (
+    data: any,
+    exchange?: string,
+  ): Promise<{ refresh_interval_seconds: number; pool_source: string; max_symbols: number }> => {
+    const q = exchange ? `?exchange=${encodeURIComponent(exchange)}` : '';
+    return request(`/coin-pool/config${q}`, { method: 'PUT', body: JSON.stringify(data) });
+  },
   testFetchCoinPool: (exchange?: string): Promise<{ success: boolean; count: number; data: any[]; message: string }> => {
     const q = exchange ? `?exchange=${encodeURIComponent(exchange)}` : '';
     return request(`/coin-pool/test-fetch${q}`, { method: 'POST' });

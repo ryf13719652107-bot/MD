@@ -1,4 +1,8 @@
-"""SQLite: coin_pool.symbol 全局唯一 → (symbol, source) 联合唯一。"""
+"""SQLite: coin_pool.symbol 全局唯一 → (symbol, source) 联合唯一。
+
+注意：若表已含 exchange 列或 (exchange, symbol, source) 约束，必须直接跳过，
+否则会拆掉 exchange、把 GATE 行误标为 binance。
+"""
 
 from sqlalchemy import inspect, text
 
@@ -13,15 +17,33 @@ def migrate_coin_pool_symbol_source_unique(sync_conn) -> None:
     if "coin_pool" not in insp.get_table_names():
         return
 
+    cols = {c["name"] for c in insp.get_columns("coin_pool")}
+    # 已按交易所隔离的新表：绝不能再重建成无 exchange 的旧结构
+    if "exchange" in cols:
+        return
+
+    row = sync_conn.execute(
+        text("SELECT sql FROM sqlite_master WHERE type='table' AND name='coin_pool'")
+    ).fetchone()
+    ddl = (row[0] or "") if row else ""
+    if "uq_coinpool_exchange_symbol_source" in ddl:
+        return
+
     has_composite = False
     symbol_only_unique = False
     for idx in insp.get_indexes("coin_pool"):
         if not idx.get("unique"):
             continue
-        cols = idx.get("column_names") or []
-        if cols == ["symbol", "source"]:
+        cols_idx = idx.get("column_names") or []
+        if cols_idx == ["symbol", "source"]:
             has_composite = True
-        elif cols == ["symbol"]:
+        elif cols_idx == ["symbol"]:
+            symbol_only_unique = True
+    for uc in insp.get_unique_constraints("coin_pool"):
+        cols_uc = uc.get("column_names") or []
+        if cols_uc == ["symbol", "source"]:
+            has_composite = True
+        elif cols_uc == ["symbol"]:
             symbol_only_unique = True
 
     if has_composite and not symbol_only_unique:
