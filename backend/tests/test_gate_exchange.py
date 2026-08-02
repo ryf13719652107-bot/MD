@@ -107,6 +107,20 @@ def test_gate_order_params_clean():
     assert "dual_side" not in p
 
 
+def test_tp_limit_reduce_only_only_for_gate():
+    from app.services.position_manager import _tp_limit_reduce_only
+
+    class BinanceLike:
+        exchange_id = "binance"
+
+    class GateLike:
+        exchange_id = "gate"
+
+    assert _tp_limit_reduce_only(BinanceLike()) is False
+    assert _tp_limit_reduce_only(GateLike()) is True
+    assert _tp_limit_reduce_only(object()) is False
+
+
 @pytest.mark.asyncio
 async def test_gate_ensure_dual_mode_accepts_no_change():
     """交易所已是双向时 Gate 返回 NO_CHANGE，应视为成功而非阻断开仓。"""

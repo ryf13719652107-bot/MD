@@ -51,6 +51,15 @@ async def _fetch_order(client, order_id: str, symbol: str) -> dict:
     return await client.exchange.fetch_order(order_id, client._format_symbol(symbol))
 
 
+def _tp_limit_reduce_only(client) -> bool:
+    """止盈限价是否带 reduceOnly。
+
+    币安双向：原链路只用 positionSide，勿带 reduceOnly（否则易 -1106）。
+    GATE 双向：必须 reduceOnly，否则会开反向仓。
+    """
+    return getattr(client, "exchange_id", None) == "gate"
+
+
 def _position_opened_at_from_exchange(ep: dict) -> Optional[datetime]:
     ts = ep.get("timestamp")
     dt = naive_beijing_from_ms_or_s(ts)
@@ -820,9 +829,13 @@ class PositionManager:
             tp_placed = False
             for attempt in range(2):
                 try:
-                    # reduce_only=True：币安双向挂平仓腿；GATE 双向必须只减仓，否则会开反向仓
                     tp_order = await auth_binance.create_limit_order(
-                        symbol, close_side, filled_qty, tp_price, reduce_only=True, position_side=ps
+                        symbol,
+                        close_side,
+                        filled_qty,
+                        tp_price,
+                        reduce_only=_tp_limit_reduce_only(auth_binance),
+                        position_side=ps,
                     )
                     oid = tp_order.get("id", "")
                     if oid:
@@ -1592,7 +1605,12 @@ class PositionManager:
             for attempt in range(2):
                 try:
                     tp_order = await auth_binance.create_limit_order(
-                        symbol, close_side, new_total, tp_price, reduce_only=True, position_side=ps
+                        symbol,
+                        close_side,
+                        new_total,
+                        tp_price,
+                        reduce_only=_tp_limit_reduce_only(auth_binance),
+                        position_side=ps,
                     )
                     tp_order_id = tp_order.get("id", "")
                     if tp_order_id:
