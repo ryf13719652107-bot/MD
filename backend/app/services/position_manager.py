@@ -221,6 +221,87 @@ class PositionManager:
         if opx > 0:
             pos.take_profit_price = opx
 
+    async def _ensure_tp_limit_orders(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        symbol: str,
+        auth_binance: BinanceService,
+        open_positions: list,
+        eng: MartingaleEngine,
+        avg_entry: float,
+        total_qty: float,
+        pos_side: str,
+    ) -> None:
+        """限价止盈开启时：无 tp_limit_order_id 则先关联交易所挂单，否则补挂。"""
+        if not getattr(strategy, "take_profit_limit_order", False):
+            return
+        if total_qty <= 0 or not open_positions:
+            return
+        if any((p.tp_limit_order_id or "").strip() for p in open_positions):
+            return
+
+        strategy_id = strategy.id
+        anchor = max(open_positions, key=lambda p: p.layer)
+        await self._bind_tp_limit_from_open_orders(
+            auth_binance, symbol, pos_side, anchor, total_qty
+        )
+        if (anchor.tp_limit_order_id or "").strip():
+            oid = str(anchor.tp_limit_order_id)
+            for p in open_positions:
+                p.tp_limit_order_id = oid
+                if anchor.take_profit_price:
+                    p.take_profit_price = anchor.take_profit_price
+            strategy_log_service.info(
+                strategy_id, f"{symbol} 补关联交易所止盈限价单 id={oid}"
+            )
+            await session.flush()
+            return
+
+        tp_price = eng.get_take_profit_price(avg_entry, pos_side)
+        if tp_price <= 0:
+            return
+        close_side = "sell" if pos_side == "long" else "buy"
+        ps = "LONG" if pos_side == "long" else "SHORT"
+        for attempt in range(2):
+            try:
+                tp_order = await auth_binance.create_limit_order(
+                    symbol,
+                    close_side,
+                    total_qty,
+                    tp_price,
+                    reduce_only=_tp_limit_reduce_only(auth_binance),
+                    position_side=ps,
+                )
+                oid = tp_order.get("id", "")
+                if oid:
+                    oid_s = str(oid)
+                    for p in open_positions:
+                        p.tp_limit_order_id = oid_s
+                        p.take_profit_price = tp_price
+                    await session.flush()
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{symbol} 补挂止盈限价单 @{tp_price:.6f} qty={total_qty:.4f} id={oid_s}",
+                    )
+                    return
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 补挂止盈单异常 — 返回无id: {tp_order}"
+                )
+            except Exception as tp_err:
+                logger.error(
+                    "Strategy %d: TP re-place failed for %s (attempt %d): %s",
+                    strategy_id,
+                    symbol,
+                    attempt + 1,
+                    tp_err,
+                )
+                if attempt == 0:
+                    await asyncio.sleep(0.5)
+        strategy_log_service.warning(
+            strategy_id, f"{symbol} 补挂止盈失败(已重试) — 仍可用市价止盈兜底"
+        )
+
     async def _reconcile_orphan_from_exchange(
         self,
         session: AsyncSession,
@@ -1260,6 +1341,19 @@ class PositionManager:
                         pass
             if tp_filled:
                 return
+
+        # --- 补挂/补关联止盈限价单（重启丢单等）---
+        await self._ensure_tp_limit_orders(
+            session,
+            strategy,
+            symbol,
+            auth_binance,
+            open_positions,
+            eng,
+            avg_entry,
+            total_qty,
+            pos_side,
+        )
 
         # --- Check martingale add ---
         last_entry = max(open_positions, key=lambda p: p.layer).entry_price
