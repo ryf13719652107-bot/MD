@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { Trade } from '../../types';
-import { TrendingDown, Layers, BarChart3, Activity, Target, Wallet, PiggyBank, Gauge } from 'lucide-react';
+import { TrendingDown, Layers, BarChart3, Target, Wallet, PiggyBank, Gauge } from 'lucide-react';
 import StrategyEquityPanel from './StrategyEquityPanel';
 
 function PanelRow({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
@@ -36,9 +36,11 @@ export default function DashboardPage() {
 
   const leverageColor = data.leverage_multiplier > 5 ? 'text-red-400' : data.leverage_multiplier > 2 ? 'text-yellow-400' : 'text-green-400';
 
+  const walletBal = data.wallet_balance ?? data.total_balance;
+  const marginBal = data.margin_balance ?? data.total_balance;
   const mainStats = [
-    { label: '保证金余额', value: `${data.total_balance.toFixed(2)} USDT`, icon: Wallet, color: 'text-blue-400' },
-    { label: '可用余额', value: `${data.available_balance.toFixed(2)} USDT`, icon: PiggyBank, color: 'text-green-400' },
+    { label: '钱包余额', value: `${walletBal.toFixed(2)} USDT`, icon: Wallet, color: 'text-blue-400' },
+    { label: '保证金余额', value: `${marginBal.toFixed(2)} USDT`, icon: PiggyBank, color: 'text-green-400' },
     { label: '杠杆倍数', value: `${data.leverage_multiplier.toFixed(2)}x`, icon: Gauge, color: leverageColor },
     {
       label: '未实现盈亏',
@@ -46,7 +48,6 @@ export default function DashboardPage() {
       icon: TrendingDown,
       color: data.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400',
     },
-    { label: '活跃策略', value: String(data.active_strategies), icon: Activity, color: 'text-yellow-400' },
     { label: '当前持仓', value: String(data.open_positions), icon: Layers, color: 'text-purple-400' },
   ];
 
@@ -60,7 +61,7 @@ export default function DashboardPage() {
 
       <div className="flex flex-col xl:flex-row gap-4 items-start">
         <div className="flex-1 min-w-0 space-y-4 w-full">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             {mainStats.map(({ label, value, icon: Icon, color }) => (
               <div key={label} className="bg-gray-900 border border-gray-800 rounded-lg p-3">
                 <div className="flex items-center gap-2 text-gray-500 text-xs mb-1">

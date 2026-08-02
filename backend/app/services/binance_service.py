@@ -35,41 +35,69 @@ def _float_or_zero(value) -> float:
         return 0.0
 
 
-def extract_usdt_wallet_balance(balance: dict) -> float:
-    """USDT-M 账户权益（随未实现盈亏变动）。
-
-    优先 totalMarginBalance（保证金余额 = 钱包 + 未实现），与币安 App 大字余额、
-    Gate 权益口径一致。禁止用 max()：浮亏时 wallet>margin 会冻在钱包余额上，
-    看起来像「余额不更新」。
-    """
+def extract_usdt_pure_wallet_balance(balance: dict) -> float:
+    """币安 App「钱包余额」= totalWalletBalance（不含未实现盈亏）。"""
     if not isinstance(balance, dict):
         return 0.0
-
     info = balance.get("info")
     if isinstance(info, dict):
-        for key in ("totalMarginBalance", "totalWalletBalance"):
-            v = _float_or_zero(info.get(key))
-            if v > 0:
-                return v
-
-    for section in ("total", "free"):
+        v = _float_or_zero(info.get("totalWalletBalance"))
+        if v > 0:
+            return v
+    for section in ("total",):
         data = balance.get(section) or {}
         if isinstance(data, dict):
             v = _float_or_zero(data.get("USDT"))
             if v > 0:
                 return v
-
     usdt_row = balance.get("USDT") or {}
     if isinstance(usdt_row, dict):
-        for key in ("total", "free"):
-            v = _float_or_zero(usdt_row.get(key))
-            if v > 0:
-                return v
-
-    if isinstance(info, dict):
-        v = _float_or_zero(info.get("availableBalance"))
+        v = _float_or_zero(usdt_row.get("total"))
         if v > 0:
             return v
+    return 0.0
+
+
+def extract_usdt_margin_balance(balance: dict) -> float:
+    """币安 App「保证金余额」= totalMarginBalance（钱包 + 未实现盈亏）。
+
+    曲线快照 / 保证金止损 / 单币止损均以此为准（非 totalWalletBalance）。
+    """
+    if not isinstance(balance, dict):
+        return 0.0
+    info = balance.get("info")
+    if isinstance(info, dict):
+        raw = info.get("totalMarginBalance")
+        if raw is not None and raw != "":
+            return _float_or_zero(raw)
+        # 缺字段时用 钱包 + 未实现 推导（与 App 保证金余额一致）
+        wallet = _float_or_zero(info.get("totalWalletBalance"))
+        upnl = _float_or_zero(info.get("totalUnrealizedProfit"))
+        if wallet > 0 or abs(upnl) > 1e-12:
+            derived = wallet + upnl
+            if derived > 0 or abs(upnl) > 1e-12:
+                return derived
+    return extract_usdt_pure_wallet_balance(balance)
+
+
+def extract_usdt_wallet_balance(balance: dict) -> float:
+    """策略/风控用账户权益：= 保证金余额（随浮盈亏变动）。"""
+    v = extract_usdt_margin_balance(balance)
+    if v > 0:
+        return v
+    if not isinstance(balance, dict):
+        return 0.0
+    for section in ("total", "free"):
+        data = balance.get(section) or {}
+        if isinstance(data, dict):
+            x = _float_or_zero(data.get("USDT"))
+            if x > 0:
+                return x
+    info = balance.get("info")
+    if isinstance(info, dict):
+        x = _float_or_zero(info.get("availableBalance"))
+        if x > 0:
+            return x
     return 0.0
 
 

@@ -3,7 +3,9 @@ from typing import Optional
 
 
 class DashboardSnapshot(BaseModel):
-    total_balance: float = 0.0
+    total_balance: float = 0.0  # 保证金余额（兼容旧字段 / 顶栏）
+    wallet_balance: float = 0.0  # 交易所钱包余额（不含未实现）
+    margin_balance: float = 0.0  # 保证金余额（含未实现）
     available_balance: float = 0.0
     unrealized_pnl: float = 0.0
     unrealized_pnl_long: float = 0.0

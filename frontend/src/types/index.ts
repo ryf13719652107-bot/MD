@@ -48,6 +48,10 @@ export interface Trade {
 
 export interface DashboardData {
   total_balance: number;
+  /** 交易所钱包余额（不含未实现盈亏） */
+  wallet_balance: number;
+  /** 保证金余额（含未实现盈亏） */
+  margin_balance: number;
   available_balance: number;
   unrealized_pnl: number;
   unrealized_pnl_long: number;

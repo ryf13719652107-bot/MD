@@ -12,6 +12,8 @@ interface DashboardState {
 
 const defaultData: DashboardData = {
   total_balance: 0,
+  wallet_balance: 0,
+  margin_balance: 0,
   available_balance: 0,
   unrealized_pnl: 0,
   unrealized_pnl_long: 0,

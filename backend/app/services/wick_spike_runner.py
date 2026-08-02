@@ -27,7 +27,7 @@ from .binance_service import (
 )
 from .exchange_factory import (
     account_exchange_id,
-    extract_wallet_balance,
+    extract_margin_balance,
     get_exchange_for_account,
     get_public_exchange,
 )
@@ -297,7 +297,7 @@ class WickSpikeRunner:
 
         try:
             bal = await auth.fetch_balance()
-            total_margin = float(extract_wallet_balance(bal, "binance") or 0)
+            total_margin = float(extract_margin_balance(auth, bal) or 0)
         except Exception as e:
             logger.warning("wick_spike balance %d: %s", strategy_id, e)
             total_margin = 0.0

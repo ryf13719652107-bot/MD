@@ -1223,7 +1223,8 @@ class PositionManager:
             strategy_log_service.warning(
                 strategy_id,
                 f"{symbol} 单币止损触发 — 浮亏 {symbol_floating_loss:.2f}U / "
-                f"钱包 {wallet_balance:.2f}U / 阈值 {wallet_balance * (threshold_pct / 100.0):.2f}U",
+                f"保证金余额 {wallet_balance:.2f}U / "
+                f"阈值 {wallet_balance * (threshold_pct / 100.0):.2f}U",
             )
             close_reason = "single_symbol_stop_loss"
         elif strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):

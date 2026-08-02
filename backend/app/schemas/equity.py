@@ -9,7 +9,7 @@ class EquityPointOut(BaseModel):
 
 
 class EquitySummaryOut(BaseModel):
-    """total_balance 为真实余额；pnl/return/回撤剔除充值与提现。"""
+    """total_balance 为保证金余额（含未实现）；pnl/return/回撤剔除充提与提现。"""
 
     total_balance: float
     pnl_usdt: float

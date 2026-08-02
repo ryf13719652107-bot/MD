@@ -689,7 +689,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             />
             <span className="text-xs text-gray-600">
               {singleSymbolStopLossEnabled
-                ? '单币浮亏达钱包余额该比例时平仓并拉黑（钱包余额=当前余额+浮亏）'
+                ? '单币浮亏达保证金余额该比例时平仓并拉黑（=币安 App 保证金余额）'
                 : '单币止损已禁用'}
             </span>
           </div>
@@ -709,7 +709,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
           <div>
             <label className={labelClass}>保证金阈值 (USDT)</label>
             <input type="number" step="0.01" {...register('margin_threshold', { valueAsNumber: true })} className={inputClass} />
-            <span className="text-xs text-gray-600">低于此值自动停止策略</span>
+            <span className="text-xs text-gray-600">保证金余额低于此值时停止策略并平仓</span>
           </div>
           <div>
             <label className={labelClass}>合约杠杆</label>

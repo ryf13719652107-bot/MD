@@ -13,7 +13,7 @@ from ..schemas.equity import EquityPointOut, EquitySeriesResponse, EquitySummary
 from ..services.encryption import decrypt
 from ..services.exchange_factory import (
     account_exchange_id,
-    extract_wallet_balance,
+    extract_margin_balance,
     get_exchange_for_account,
 )
 from ..services.binance_service import get_binance_service
@@ -185,7 +185,7 @@ async def reset_equity_baseline(
             )
             await sync_account_cashflows_for_hour(db, account, binance, hour_floor)
         balance = await client.fetch_balance()
-        cur_total = extract_wallet_balance(client, balance)
+        cur_total = extract_margin_balance(client, balance)
         if cur_total <= 0:
             cur_total = float(balance.get("total", {}).get("USDT", 0) or 0)
     except Exception as e:

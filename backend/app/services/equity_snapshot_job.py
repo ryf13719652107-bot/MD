@@ -1,4 +1,4 @@
-"""每小时写入账户 total USDT 快照；币安账户额外同步合约划转流水。"""
+"""每小时写入账户「保证金余额」快照；币安账户额外同步合约划转流水。"""
 import asyncio
 import logging
 from sqlalchemy import select
@@ -9,7 +9,7 @@ from ..models.account import Account
 from ..models.equity_curve import AccountBalanceSnapshot
 from ..services.exchange_factory import (
     account_exchange_id,
-    extract_wallet_balance,
+    extract_margin_balance,
     get_exchange_for_account,
 )
 from ..services.equity_cashflow import sync_account_cashflows_for_hour
@@ -27,7 +27,8 @@ async def run_hourly_equity_snapshots() -> None:
         try:
             client = await get_exchange_for_account(account)
             balance = await asyncio.wait_for(client.fetch_balance(), timeout=15.0)
-            total = extract_wallet_balance(client, balance)
+            # 币安 = totalMarginBalance（App 保证金余额），非钱包余额
+            total = extract_margin_balance(client, balance)
             if total <= 0:
                 # fallback ccxt total.USDT
                 total = float(balance.get("total", {}).get("USDT", 0) or 0)

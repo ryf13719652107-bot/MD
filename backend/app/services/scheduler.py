@@ -21,7 +21,7 @@ from .binance_service import (
 )
 from .exchange_factory import (
     account_exchange_id,
-    extract_wallet_balance,
+    extract_margin_balance,
     get_exchange_for_account,
     get_public_exchange,
 )
@@ -421,11 +421,16 @@ class StrategyScheduler:
                     if isinstance(_prefetch_balance, Exception):
                         raise _prefetch_balance
                     balance = _prefetch_balance
-                    total_margin = extract_wallet_balance(auth_binance, balance)
+                    # 保证金止损 / 单币止损分母 = App「保证金余额」
+                    total_margin = extract_margin_balance(auth_binance, balance)
                     if not math.isfinite(total_margin) or total_margin <= 0:
-                        raise ValueError("USDT wallet balance missing or non-positive")
+                        raise ValueError("USDT margin balance missing or non-positive")
                     wallet_balance_valid = True
-                    logger.info("Strategy %d: balance fetched — total=%.2f USDT", strategy_id, total_margin)
+                    logger.info(
+                        "Strategy %d: margin balance=%.2f USDT",
+                        strategy_id,
+                        total_margin,
+                    )
                     if strategy.margin_threshold > 0 and total_margin < strategy.margin_threshold:
                         strategy.status = "stopped"
                         await session.commit()

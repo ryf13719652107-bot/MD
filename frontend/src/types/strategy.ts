@@ -153,7 +153,7 @@ export function formatSingleSymbolStopLoss(
   pct?: number,
 ): string {
   if (enabled !== true) return '已禁用';
-  return `钱包余额 ${pct ?? 10}%（触发后拉黑）`;
+  return `保证金余额 ${pct ?? 10}%（触发后拉黑）`;
 }
 
 export function formatCoinPoolRefreshHours(seconds: number): string {

@@ -108,15 +108,56 @@ async def get_exchange_for_account(account: Any) -> ExchangeClient:
     )
 
 
-def extract_wallet_balance(client: Any, balance: dict) -> float:
-    """按交易所解析 USDT 钱包/权益余额。"""
+def extract_margin_balance(client: Any, balance: dict) -> float:
+    """币安 App「保证金余额」/ Gate 合约权益（含未实现盈亏）。
+
+    用于：收益曲线小时快照、保证金阈值止损、单币止损分母。
+    """
     if getattr(client, "exchange_id", None) == "gate":
         from .gate_service import extract_gate_usdt_wallet_balance
 
         return extract_gate_usdt_wallet_balance(balance)
-    from .binance_service import extract_usdt_wallet_balance
+    from .binance_service import extract_usdt_margin_balance
 
-    return extract_usdt_wallet_balance(balance)
+    return extract_usdt_margin_balance(balance)
+
+
+def extract_wallet_balance(client: Any, balance: dict) -> float:
+    """兼容旧名：等同 extract_margin_balance（非 App「钱包余额」）。"""
+    return extract_margin_balance(client, balance)
+
+
+def extract_dashboard_balances(
+    client: Any, balance: dict, *, unrealized_pnl: float = 0.0
+) -> tuple[float, float]:
+    """仪表盘用：(钱包余额, 保证金余额)。
+
+    币安：totalWalletBalance / totalMarginBalance。
+    Gate：无独立钱包字段时，钱包 ≈ 权益 - 未实现盈亏，保证金 = 权益。
+    """
+    if getattr(client, "exchange_id", None) == "gate":
+        from .gate_service import extract_gate_usdt_wallet_balance
+
+        margin = extract_gate_usdt_wallet_balance(balance)
+        wallet = margin - float(unrealized_pnl or 0.0)
+        if wallet <= 0 and margin > 0:
+            wallet = margin
+        return float(wallet), float(margin)
+
+    from .binance_service import (
+        extract_usdt_margin_balance,
+        extract_usdt_pure_wallet_balance,
+    )
+
+    wallet = extract_usdt_pure_wallet_balance(balance)
+    margin = extract_usdt_margin_balance(balance)
+    if wallet <= 0 and margin > 0:
+        wallet = margin - float(unrealized_pnl or 0.0)
+        if wallet <= 0:
+            wallet = margin
+    if margin <= 0 and wallet > 0:
+        margin = wallet + float(unrealized_pnl or 0.0)
+    return float(wallet), float(margin)
 
 
 async def clear_private_exchange_for_account(account: Any) -> None:

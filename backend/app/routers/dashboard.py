@@ -14,7 +14,10 @@ from ..models.trade import Trade
 from ..models.bot_config import BotConfig
 from ..models.account import Account
 from ..schemas.dashboard import DashboardSnapshot
-from ..services.exchange_factory import extract_wallet_balance, get_exchange_for_account
+from ..services.exchange_factory import (
+    extract_dashboard_balances,
+    get_exchange_for_account,
+)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -39,7 +42,8 @@ def _dashboard_exchange_cache_set(account_id: int, payload: dict[str, Any]) -> N
 
 async def _fetch_dashboard_exchange_slice(binance) -> dict[str, Any]:
     """REST: balance + positions for dashboard header. Does not touch DB."""
-    total_balance = 0.0
+    wallet_balance = 0.0
+    margin_balance = 0.0
     available_balance = 0.0
     balance_status = "error"
     open_positions = 0
@@ -48,14 +52,10 @@ async def _fetch_dashboard_exchange_slice(binance) -> dict[str, Any]:
     unrealized_pnl_short = 0.0
     total_notional = 0.0
     exchange_positions: list[dict] = []
+    raw_balance: dict | None = None
     try:
-        balance = await asyncio.wait_for(binance.fetch_balance(), timeout=8.0)
-        total_balance = extract_wallet_balance(binance, balance)
-        if total_balance <= 0:
-            total_balance = float(balance.get("total", {}).get("USDT", 0) or 0)
-        available_balance = float(balance.get("free", {}).get("USDT", 0) or 0)
-        if available_balance <= 0 and total_balance > 0:
-            available_balance = total_balance
+        raw_balance = await asyncio.wait_for(binance.fetch_balance(), timeout=8.0)
+        available_balance = float(raw_balance.get("free", {}).get("USDT", 0) or 0)
         balance_status = "ok"
     except asyncio.TimeoutError:
         balance_status = "error"
@@ -110,12 +110,27 @@ async def _fetch_dashboard_exchange_slice(binance) -> dict[str, Any]:
         except Exception as e:
             logging.error("Position fetch error for dashboard: %s", e)
 
+    if balance_status == "ok" and isinstance(raw_balance, dict):
+        wallet_balance, margin_balance = extract_dashboard_balances(
+            binance, raw_balance, unrealized_pnl=unrealized_pnl
+        )
+        if margin_balance <= 0:
+            margin_balance = float(raw_balance.get("total", {}).get("USDT", 0) or 0)
+        if wallet_balance <= 0:
+            wallet_balance = margin_balance
+        if available_balance <= 0 and margin_balance > 0:
+            available_balance = margin_balance
+
+    # total_balance = 保证金余额（顶栏 / 杠杆分母 / 日盈亏%）
+    total_balance = margin_balance
     leverage_multiplier = 0.0
     if total_balance > 0 and total_notional > 0:
         leverage_multiplier = round(total_notional / total_balance, 2)
 
     return {
         "total_balance": total_balance,
+        "wallet_balance": wallet_balance,
+        "margin_balance": margin_balance,
         "available_balance": available_balance,
         "balance_status": balance_status,
         "open_positions": open_positions,
@@ -133,6 +148,8 @@ async def get_dashboard(
     db: AsyncSession = Depends(get_db),
 ):
     total_balance = 0.0
+    wallet_balance = 0.0
+    margin_balance = 0.0
     available_balance = 0.0
     leverage_multiplier = 0.0
     account_name = ""
@@ -146,7 +163,7 @@ async def get_dashboard(
     unrealized_pnl_short = 0.0
     exchange_positions: list[dict] = []
 
-    # Fetch balance and positions from Binance
+    # Fetch balance and positions from exchange
     try:
         if filter_account_id:
             result = await db.execute(select(Account).where(Account.id == filter_account_id))
@@ -167,6 +184,8 @@ async def get_dashboard(
                 )
                 if cached is not None:
                     total_balance = float(cached["total_balance"])
+                    wallet_balance = float(cached.get("wallet_balance", total_balance))
+                    margin_balance = float(cached.get("margin_balance", total_balance))
                     available_balance = float(cached["available_balance"])
                     balance_status = str(cached["balance_status"])
                     open_positions = int(cached["open_positions"])
@@ -178,6 +197,8 @@ async def get_dashboard(
                 else:
                     ex = await _fetch_dashboard_exchange_slice(binance)
                     total_balance = float(ex["total_balance"])
+                    wallet_balance = float(ex["wallet_balance"])
+                    margin_balance = float(ex["margin_balance"])
                     available_balance = float(ex["available_balance"])
                     balance_status = str(ex["balance_status"])
                     open_positions = int(ex["open_positions"])
@@ -266,6 +287,8 @@ async def get_dashboard(
 
     return DashboardSnapshot(
         total_balance=round(total_balance, 2),
+        wallet_balance=round(wallet_balance, 2),
+        margin_balance=round(margin_balance, 2),
         available_balance=round(available_balance, 2),
         unrealized_pnl=round(unrealized_pnl, 2),
         unrealized_pnl_long=round(unrealized_pnl_long, 2),

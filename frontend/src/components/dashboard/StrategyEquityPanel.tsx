@@ -206,7 +206,7 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
     if (accountId == null) return;
     if (
       !window.confirm(
-        '将清空该账户收益曲线的历史小时快照，并以当前校正权益（余额减去累计划转）设为新基准。划转流水保留。确认？',
+        '将清空该账户收益曲线的历史小时快照，并以当前校正权益（保证金余额减去累计划转）设为新基准。划转流水保留。确认？',
       )
     )
       return;
@@ -248,7 +248,7 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
                     mode === m ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                   }`}
                 >
-                  {m === 'return' ? '回报率' : m === 'balance' ? '余额' : '盈亏'}
+                  {m === 'return' ? '回报率' : m === 'balance' ? '保证金余额' : '盈亏'}
                 </button>
               ))}
             </div>
@@ -287,7 +287,7 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3 mb-4 text-sm">
             <div>
-              <div className="text-gray-500 text-xs mb-0.5">余额</div>
+              <div className="text-gray-500 text-xs mb-0.5">保证金余额</div>
               <div className="font-mono font-medium text-gray-100">{s.total_balance.toLocaleString('en-US', { maximumFractionDigits: 2 })}</div>
             </div>
             <div>

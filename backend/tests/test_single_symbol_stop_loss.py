@@ -1,4 +1,8 @@
-from app.services.binance_service import extract_usdt_wallet_balance
+from app.services.binance_service import (
+    extract_usdt_margin_balance,
+    extract_usdt_pure_wallet_balance,
+    extract_usdt_wallet_balance,
+)
 from app.services.position_manager import (
     _single_symbol_stop_loss_trigger,
     _symbol_unrealized_pnl_from_exchange,
@@ -39,7 +43,7 @@ def test_single_symbol_stop_loss_600_wallet_boundary():
 
 
 def test_extract_usdt_wallet_balance_prefers_margin_equity_over_wallet():
-    """浮亏时 margin < wallet；必须取保证金余额，否则仪表盘余额看似冻结。"""
+    """浮亏时 margin < wallet；策略权益/曲线/止损必须取保证金余额。"""
     balance = {
         "free": {"USDT": 12},
         "total": {"USDT": 20},
@@ -51,6 +55,19 @@ def test_extract_usdt_wallet_balance_prefers_margin_equity_over_wallet():
         },
     }
     assert extract_usdt_wallet_balance(balance) == 244.1
+    assert extract_usdt_pure_wallet_balance(balance) == 248.5
+    assert extract_usdt_margin_balance(balance) == 244.1
+
+
+def test_extract_usdt_margin_derives_from_wallet_plus_upnl():
+    """缺 totalMarginBalance 时用钱包+未实现推导（204.45-37.16=167.29）。"""
+    balance = {
+        "info": {
+            "totalWalletBalance": "204.45",
+            "totalUnrealizedProfit": "-37.16",
+        },
+    }
+    assert abs(extract_usdt_margin_balance(balance) - 167.29) < 1e-9
 
 
 def test_extract_usdt_wallet_balance_falls_back_to_wallet_when_no_margin():
@@ -60,6 +77,8 @@ def test_extract_usdt_wallet_balance_falls_back_to_wallet_when_no_margin():
         "info": {"totalWalletBalance": "248"},
     }
     assert extract_usdt_wallet_balance(balance) == 248.0
+    assert extract_usdt_pure_wallet_balance(balance) == 248.0
+    assert extract_usdt_margin_balance(balance) == 248.0
 
 
 def test_single_symbol_stop_loss_uses_wallet_not_small_available_balance():
