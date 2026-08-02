@@ -140,10 +140,16 @@ async def get_equity_series(
         balances_for_dd.append(adj)
 
     max_dd = _max_drawdown_pct(balances_for_dd)
-    cur_bal = float(adjusted[-1][1]) if adjusted else 0.0
-    cur_adj = float(adjusted[-1][2]) if adjusted else 0.0
-    pnl = cur_adj - baseline
-    ret_pct = round((pnl / baseline * 100.0) if baseline > 1e-12 else 0.0, 2)
+    if adjusted:
+        cur_bal = float(adjusted[-1][1])
+        cur_adj = float(adjusted[-1][2])
+        pnl = cur_adj - baseline
+        ret_pct = round((pnl / baseline * 100.0) if baseline > 1e-12 else 0.0, 2)
+    else:
+        # 重置后尚无快照：视为从基准起算，盈亏/回报归零（勿用 0−baseline 显示 -100%）
+        cur_bal = round(baseline, 2) if baseline_row else 0.0
+        pnl = 0.0
+        ret_pct = 0.0
     ratio = round(ret_pct / max_dd, 2) if max_dd > 1e-6 else None
 
     summary = EquitySummaryOut(
@@ -220,6 +226,28 @@ async def reset_equity_baseline(
     )
     deleted_snaps = int(r_snaps.rowcount or 0)
 
+    # 立刻写入/更新一条当前快照，避免「无点位时 cur_adj=0 − baseline → -100%」
+    if cur_total > 0 or abs(adjusted_baseline) > 1e-12:
+        snap_at = now.replace(second=0, microsecond=0)
+        existing_snap = (
+            await db.execute(
+                select(AccountBalanceSnapshot).where(
+                    AccountBalanceSnapshot.account_id == account_id,
+                    AccountBalanceSnapshot.snapshot_at == snap_at,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_snap:
+            existing_snap.total_usdt = cur_total
+        else:
+            db.add(
+                AccountBalanceSnapshot(
+                    account_id=account_id,
+                    snapshot_at=snap_at,
+                    total_usdt=cur_total,
+                )
+            )
+
     existing_bl = (
         await db.execute(select(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
     ).scalar_one_or_none()
@@ -241,5 +269,6 @@ async def reset_equity_baseline(
         "ok": True,
         "deleted_snapshots": deleted_snaps,
         "baseline_total_usdt": round(adjusted_baseline, 2),
-        "message": "已清空历史快照，并以当前校正权益设为新基准；划转仅由整点任务按前一小时继续记录。",
+        "current_total_usdt": round(cur_total, 2),
+        "message": "已清空历史快照，并以当前校正权益设为新基准；已写入当前余额作为曲线起点。",
     }

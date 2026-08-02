@@ -330,7 +330,7 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
           </div>
           {!data?.points.length ? (
             <p className="text-gray-500 text-sm py-6 text-center">
-              尚无小时快照数据；服务启动或整点任务会写入。也可「重置收益」清空历史后，等下一整点再记第一条。
+              尚无小时快照；服务启动或整点会写入。点「重置收益」会清空历史并以当前余额作为新起点（盈亏归零）。
             </p>
           ) : (
             <div className="relative w-full">
