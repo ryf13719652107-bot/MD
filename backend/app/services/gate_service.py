@@ -683,26 +683,94 @@ class GateService:
 
     @staticmethod
     def _is_usdt_perp_symbol(sym: str) -> bool:
-        """仅 USDT 永续：BTC/USDT:USDT；排除交割 BTC/USDT:USDT-240628。"""
-        s = str(sym or "")
-        if s.endswith(":USDT"):
-            return True
+        """仅 USDT 永续：BTC/USDT:USDT 或 BTC_USDT；排除现货/交割。"""
+        s = str(sym or "").strip()
+        if not s:
+            return False
+        if ":" in s:
+            # ccxt：BTC/USDT:USDT；交割 BTC/USDT:USDT-240628
+            return s.rsplit(":", 1)[-1] == "USDT"
         su = s.upper()
+        if "/" in su:
+            return False  # 现货 BTC/USDT
         return su.endswith("_USDT") and "-" not in su
 
-    async def fetch_top_movers(self, source: str = "both", limit: int = 20) -> list[dict]:
-        tickers = await self.exchange.fetch_tickers()
-        usdt_pairs = []
-        for sym, t in tickers.items():
+    async def _fetch_futures_usdt_tickers_raw(self) -> list[dict]:
+        """Gate 官方合约 ticker（含 change_percentage），与 App 涨幅榜同源。"""
+        ex = self.exchange
+        if hasattr(ex, "publicFuturesGetSettleTickers"):
+            rows = await ex.publicFuturesGetSettleTickers({"settle": "usdt"})
+            return list(rows) if isinstance(rows, list) else []
+        # 无原生方法时：从 ccxt ticker.info 拼出同源字段
+        tickers = await ex.fetch_tickers()
+        out: list[dict] = []
+        for sym, t in (tickers or {}).items():
             if not self._is_usdt_perp_symbol(sym):
                 continue
-            if t.get("percentage") is None:
-                continue
-            usdt_pairs.append({
-                "symbol": normalize_gate_symbol(sym),
-                "price_change_pct": t["percentage"],
-                "volume_24h": t.get("quoteVolume", 0) or 0,
+            info = t.get("info") if isinstance(t.get("info"), dict) else {}
+            contract = info.get("contract") or sym
+            out.append({
+                "contract": contract,
+                "change_percentage": info.get("change_percentage", t.get("percentage")),
+                "volume_24h_quote": info.get("volume_24h_quote") or t.get("quoteVolume"),
+                "volume_24h_settle": info.get("volume_24h_settle"),
+                "volume_24h": info.get("volume_24h"),
             })
+        return out
+
+    @staticmethod
+    def _ticker_row_to_mover(t: dict) -> dict | None:
+        contract = str(t.get("contract") or t.get("symbol") or "")
+        if not GateService._is_usdt_perp_symbol(contract):
+            return None
+        pct_raw = t.get("change_percentage")
+        if pct_raw is None:
+            return None
+        try:
+            pct = float(pct_raw)
+        except (TypeError, ValueError):
+            return None
+        vol = 0.0
+        for key in ("volume_24h_quote", "volume_24h_settle", "volume_24h"):
+            if t.get(key) is None:
+                continue
+            try:
+                vol = float(t.get(key) or 0)
+                break
+            except (TypeError, ValueError):
+                continue
+        return {
+            "symbol": normalize_gate_symbol(contract),
+            "price_change_pct": pct,
+            "volume_24h": vol,
+        }
+
+    async def fetch_top_movers(self, source: str = "both", limit: int = 20) -> list[dict]:
+        """涨跌榜：用 Gate /futures/usdt/tickers 的 change_percentage（勿用 ccxt.percentage）。"""
+        usdt_pairs: list[dict] = []
+        try:
+            raw = await self._fetch_futures_usdt_tickers_raw()
+            for t in raw:
+                if isinstance(t, dict):
+                    item = self._ticker_row_to_mover(t)
+                    if item:
+                        usdt_pairs.append(item)
+        except Exception as e:
+            logger.warning("Gate futures tickers failed, fallback ccxt fetch_tickers: %s", e)
+            tickers = await self.exchange.fetch_tickers()
+            for sym, t in (tickers or {}).items():
+                if not self._is_usdt_perp_symbol(sym):
+                    continue
+                info = t.get("info") if isinstance(t.get("info"), dict) else {}
+                item = self._ticker_row_to_mover({
+                    "contract": info.get("contract") or sym,
+                    "change_percentage": info.get("change_percentage", t.get("percentage")),
+                    "volume_24h_quote": info.get("volume_24h_quote") or t.get("quoteVolume"),
+                    "volume_24h_settle": info.get("volume_24h_settle"),
+                    "volume_24h": info.get("volume_24h"),
+                })
+                if item:
+                    usdt_pairs.append(item)
 
         gainers = (
             sorted(usdt_pairs, key=lambda x: -x["price_change_pct"])[:limit]

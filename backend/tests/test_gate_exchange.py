@@ -65,15 +65,18 @@ async def test_gate_fetch_top_movers_sort():
     svc = GateService()
 
     class FakeEx:
-        async def fetch_tickers(self):
-            return {
-                "AAA/USDT:USDT": {"percentage": 10.0, "quoteVolume": 100},
-                "BBB/USDT:USDT": {"percentage": -8.0, "quoteVolume": 200},
-                "CCC/USDT:USDT": {"percentage": 5.0, "quoteVolume": 50},
-                "DDD/BTC:BTC": {"percentage": 99.0, "quoteVolume": 1},
+        async def publicFuturesGetSettleTickers(self, params):
+            assert params.get("settle") == "usdt"
+            return [
+                {"contract": "AAA_USDT", "change_percentage": "10.0", "volume_24h_quote": "100"},
+                {"contract": "BBB_USDT", "change_percentage": "-8.0", "volume_24h_quote": "200"},
+                {"contract": "CCC_USDT", "change_percentage": "5.0", "volume_24h_quote": "50"},
+                {"contract": "DDD_BTC", "change_percentage": "99.0", "volume_24h_quote": "1"},
                 # 交割合约应排除
-                "EEE/USDT:USDT-240628": {"percentage": 50.0, "quoteVolume": 999},
-            }
+                {"contract": "EEE_USDT-240628", "change_percentage": "50.0", "volume_24h_quote": "999"},
+                # 模拟 ccxt.percentage 错误、官方 change_percentage 正确
+                {"contract": "BLESS_USDT", "change_percentage": "74.46", "volume_24h_quote": "15573500"},
+            ]
 
     svc._exchange = FakeEx()
     svc._created_at = __import__("time").time()
@@ -82,7 +85,8 @@ async def test_gate_fetch_top_movers_sort():
     movers = await svc.fetch_top_movers("both", limit=2)
     gainers = [m for m in movers if m["source"] == "gainers"]
     losers = [m for m in movers if m["source"] == "losers"]
-    assert [m["symbol"] for m in gainers] == ["AAAUSDT", "CCCUSDT"]
+    assert [m["symbol"] for m in gainers] == ["BLESSUSDT", "AAAUSDT"]
+    assert abs(gainers[0]["price_change_pct"] - 74.46) < 1e-9
     assert losers[0]["symbol"] == "BBBUSDT"
     assert losers[0]["rank"] == 1
     assert all("EEE" not in m["symbol"] for m in movers)
