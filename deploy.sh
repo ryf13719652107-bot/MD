@@ -35,47 +35,21 @@ pip install -r requirements.txt -q
 log "执行数据库迁移..."
 mkdir -p data logs
 alembic upgrade head
+log "后端代码/依赖/迁移已更新 ✓（不启动进程）"
 
-# ---------- 3. 重启后端 ----------
-if systemctl is-active --quiet trading-bot 2>/dev/null; then
-    log "通过 systemd 重启后端..."
-    systemctl restart trading-bot
-    log "后端已重启 ✓"
-
-elif [ -f "/etc/systemd/system/trading-bot.service" ]; then
-    log "启动 systemd 服务..."
-    systemctl daemon-reload
-    systemctl start trading-bot
-    log "后端已启动 ✓"
-
-else
-    log "未检测到 systemd 服务，手动管理进程..."
-    pkill -f "uvicorn app.main:app" 2>/dev/null || true
-    sleep 1
-    nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 \
-        > logs/server.log 2>&1 &
-    log "后端已启动 (PID: $!) ✓"
-fi
-
-# ---------- 4. 前端 ----------
+# ---------- 3. 前端 ----------
 log "===== 更新前端 ====="
 cd "$FRONTEND_DIR"
 
 npm install --silent
 
-# 生产构建
+# 生产构建（FastAPI 托管 frontend/dist/）
 npm run build
+log "前端已构建 ✓（不启动进程）"
 
-# 重启前端 vite preview
-pkill -f "vite preview" 2>/dev/null || true
-sleep 1
-nohup npx vite preview --host 0.0.0.0 --port 5173 \
-    > "$BACKEND_DIR/logs/frontend.log" 2>&1 &
-log "前端已启动 (PID: $!) ✓"
-
-# ---------- 5. 完成 ----------
+# ---------- 4. 完成 ----------
 log "========================================"
-log "  部署完成！"
-log "  前端: http://$(hostname -I | awk '{print $1}'):5173"
-log "  后端: http://$(hostname -I | awk '{print $1}'):8000"
+log "  部署完成（未启动/重启任何进程）"
+log "  请在进程守护中自行重启后端"
+log "  前端产物: $FRONTEND_DIR/dist"
 log "========================================"
