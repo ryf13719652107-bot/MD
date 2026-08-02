@@ -94,12 +94,13 @@ def _is_matching_tp_close_limit(
     contracts: float,
     hedge_mode: bool,
     exchange_id: str | None,
+    require_qty_match: bool = True,
 ) -> bool:
     """是否为平本腿的限价止盈挂单。
 
     Gate：必须 reduceOnly。
-    币安：下单通常不带 reduceOnly，按平仓方向 + positionSide（双向）+ 数量匹配，
-    避免绑不上导致重复挂单。
+    币安：下单通常不带 reduceOnly，按平仓方向 + positionSide（双向）匹配。
+    require_qty_match=False 时忽略数量（用于找加仓后数量已过时的旧单并去重）。
     """
     if (order.get("side") or "").lower() != close_side:
         return False
@@ -118,11 +119,12 @@ def _is_matching_tp_close_limit(
         ips = _order_position_side(order)
         if ips and ips != ps_need:
             return False
-    amt = float(order.get("amount", 0) or 0) or float(order.get("remaining", 0) or 0)
-    if contracts > 0 and amt > 0:
-        rel = abs(amt - contracts) / max(contracts, 1e-12)
-        if rel > 0.02 and abs(amt - contracts) > 1e-5:
-            return False
+    if require_qty_match:
+        amt = float(order.get("amount", 0) or 0) or float(order.get("remaining", 0) or 0)
+        if contracts > 0 and amt > 0:
+            rel = abs(amt - contracts) / max(contracts, 1e-12)
+            if rel > 0.02 and abs(amt - contracts) > 1e-5:
+                return False
     return bool(order.get("id"))
 
 
@@ -242,6 +244,7 @@ class PositionManager:
         position_side: str,
         contracts: float,
         auth_binance: BinanceService,
+        require_qty_match: bool = True,
     ) -> list[dict]:
         close_side = "sell" if position_side == "long" else "buy"
         ps_need = "LONG" if position_side == "long" else "SHORT"
@@ -258,9 +261,34 @@ class PositionManager:
                 contracts=contracts,
                 hedge_mode=hedge,
                 exchange_id=eid,
+                require_qty_match=require_qty_match,
             ):
                 out.append(o)
         return out
+
+    @staticmethod
+    def _order_amount(order: dict) -> float:
+        return float(order.get("amount", 0) or 0) or float(order.get("remaining", 0) or 0)
+
+    @staticmethod
+    def _pick_best_tp_match(matches: list[dict], contracts: float) -> dict | None:
+        """优先数量最接近总仓的止盈单。"""
+        if not matches:
+            return None
+        if contracts <= 0:
+            return matches[0]
+        return min(matches, key=lambda o: abs(PositionManager._order_amount(o) - contracts))
+
+    @staticmethod
+    def _tp_qty_ok(order: dict, contracts: float) -> bool:
+        """挂单数量是否与总仓一致（2% 或绝对 1e-5）。"""
+        if contracts <= 0:
+            return True
+        amt = PositionManager._order_amount(order)
+        if amt <= 0:
+            return False
+        rel = abs(amt - contracts) / max(contracts, 1e-12)
+        return rel <= 0.02 or abs(amt - contracts) <= 1e-5
 
     async def _cancel_tp_order_confirmed(
         self, auth_binance: BinanceService, order_id: str, symbol: str
@@ -321,7 +349,11 @@ class PositionManager:
         strategy_id: int | None = None,
         cancel_duplicates: bool = False,
     ) -> None:
-        """关联交易所平本腿的限价止盈单（币安不强制 reduceOnly）。"""
+        """关联交易所平本腿的限价止盈单（币安不强制 reduceOnly）。
+
+        数量与总仓不一致的同腿旧单：在 cancel_duplicates 时全部撤销且不绑定，
+        交给调用方按新总量重挂，避免加仓后「认旧单 + 再挂一张」重复。
+        """
         if pos.tp_limit_order_id:
             return
         orders = await self._fetch_open_orders_raw(auth_binance, symbol)
@@ -330,17 +362,29 @@ class PositionManager:
             position_side=position_side,
             contracts=contracts,
             auth_binance=auth_binance,
+            require_qty_match=False,
         )
         if not matches:
             return
-        chosen = matches[0]
-        pos.tp_limit_order_id = str(chosen.get("id"))
-        opx = float(chosen.get("price", 0) or 0)
-        if opx > 0:
-            pos.take_profit_price = opx
-        if cancel_duplicates and strategy_id is not None and len(matches) > 1:
+        chosen = self._pick_best_tp_match(matches, contracts) or matches[0]
+        if self._tp_qty_ok(chosen, contracts):
+            pos.tp_limit_order_id = str(chosen.get("id"))
+            opx = float(chosen.get("price", 0) or 0)
+            if opx > 0:
+                pos.take_profit_price = opx
+            if cancel_duplicates and strategy_id is not None and len(matches) > 1:
+                await self._cancel_duplicate_tp_limits(
+                    auth_binance, symbol, matches, pos.tp_limit_order_id, strategy_id
+                )
+            return
+        # 数量过时：有策略上下文则撤干净，留给 ensure/马丁重挂
+        if cancel_duplicates and strategy_id is not None:
             await self._cancel_duplicate_tp_limits(
-                auth_binance, symbol, matches, pos.tp_limit_order_id, strategy_id
+                auth_binance, symbol, matches, keep_id="", strategy_id=strategy_id
+            )
+            strategy_log_service.info(
+                strategy_id,
+                f"{symbol} 同腿止盈数量与仓位不符(≈{contracts:.4f})，已撤销待重挂",
             )
 
     async def _ensure_tp_limit_orders(
@@ -371,7 +415,7 @@ class PositionManager:
             for p in open_positions
             if (p.tp_limit_order_id or "").strip()
         }
-        # 已有本地止盈单号：仍扫一遍，撤掉交易所上同腿多余限价（历史重复挂）
+        # 已有本地止盈单号：扫同腿（含数量过时），数量对则去重；不对则撤干净后重挂
         if existing_ids:
             orders = await self._fetch_open_orders_raw(auth_binance, symbol)
             matches = self._list_matching_tp_close_limits(
@@ -379,22 +423,37 @@ class PositionManager:
                 position_side=pos_side,
                 contracts=total_qty,
                 auth_binance=auth_binance,
+                require_qty_match=False,
             )
-            keep = next(iter(existing_ids))
-            match_ids = {str(o.get("id")) for o in matches if o.get("id")}
-            if keep not in match_ids and matches:
-                keep = str(matches[0].get("id"))
+            keep = sorted(existing_ids)[0]
+            by_id = {str(o.get("id")): o for o in matches if o.get("id")}
+            keep_order = by_id.get(keep)
+            if keep_order is None and matches:
+                keep_order = self._pick_best_tp_match(matches, total_qty) or matches[0]
+                keep = str(keep_order.get("id"))
+            if keep_order is not None and self._tp_qty_ok(keep_order, total_qty):
                 for p in open_positions:
                     p.tp_limit_order_id = keep
-                    px = float(matches[0].get("price", 0) or 0)
+                    px = float(keep_order.get("price", 0) or 0)
                     if px > 0:
                         p.take_profit_price = px
+                if len(matches) > 1:
+                    await self._cancel_duplicate_tp_limits(
+                        auth_binance, symbol, matches, keep, strategy_id
+                    )
                 await session.flush()
-            if len(matches) > 1:
-                await self._cancel_duplicate_tp_limits(
-                    auth_binance, symbol, matches, keep, strategy_id
-                )
-            return
+                return
+            if not matches:
+                # 未见同腿挂单：保留本地 id（可能暂态空列表或已成交由 TP 检测处理），禁止盲挂
+                return
+            # 同腿有单但数量不符 / 本地 id 不在簿：撤干净后重挂
+            await self._cancel_duplicate_tp_limits(
+                auth_binance, symbol, matches, keep_id="", strategy_id=strategy_id
+            )
+            for p in open_positions:
+                p.tp_limit_order_id = None
+            await session.flush()
+            # 落入下方补挂
 
         bot_opened = any((p.exchange_order_id or "").strip() for p in open_positions)
         anchor = max(open_positions, key=lambda p: p.layer)
@@ -423,17 +482,20 @@ class PositionManager:
             # 非策略开仓（无 exchange_order_id）：不挂止盈，避免干预手动单
             return
 
-        # 再扫一次：绑单后仍可能刚出现匹配单，禁止重复下单
+        # 再扫一次：仅数量匹配的才沿用，禁止「认旧偏小单」后仍新挂
         orders = await self._fetch_open_orders_raw(auth_binance, symbol)
         matches = self._list_matching_tp_close_limits(
             orders,
             position_side=pos_side,
             contracts=total_qty,
             auth_binance=auth_binance,
+            require_qty_match=False,
         )
-        if matches:
-            oid = str(matches[0].get("id"))
-            px = float(matches[0].get("price", 0) or 0)
+        qty_ok = [o for o in matches if self._tp_qty_ok(o, total_qty)]
+        if qty_ok:
+            chosen = self._pick_best_tp_match(qty_ok, total_qty) or qty_ok[0]
+            oid = str(chosen.get("id"))
+            px = float(chosen.get("price", 0) or 0)
             for p in open_positions:
                 p.tp_limit_order_id = oid
                 if px > 0:
@@ -446,6 +508,10 @@ class PositionManager:
                 strategy_id, f"{symbol} 补关联交易所止盈限价单 id={oid}"
             )
             return
+        if matches:
+            await self._cancel_duplicate_tp_limits(
+                auth_binance, symbol, matches, keep_id="", strategy_id=strategy_id
+            )
 
         tp_price = eng.get_take_profit_price(avg_entry, pos_side)
         if tp_price <= 0:
@@ -1911,17 +1977,20 @@ class PositionManager:
                     f"{symbol} 加仓后止盈未更新（旧单未撤净）；下次 manage 将尝试关联/去重",
                 )
             else:
-                # 撤单后若仍有同腿匹配挂单，只关联并去重，不再新挂
+                # 撤单后：数量正确的同腿单才沿用；偏小旧单撤干净再新挂
                 orders = await self._fetch_open_orders_raw(auth_binance, symbol)
                 matches = self._list_matching_tp_close_limits(
                     orders,
                     position_side=pos_side,
                     contracts=new_total,
                     auth_binance=auth_binance,
+                    require_qty_match=False,
                 )
-                if matches:
-                    keep = str(matches[0].get("id"))
-                    px = float(matches[0].get("price", 0) or 0)
+                qty_ok = [o for o in matches if self._tp_qty_ok(o, new_total)]
+                if qty_ok:
+                    chosen = self._pick_best_tp_match(qty_ok, new_total) or qty_ok[0]
+                    keep = str(chosen.get("id"))
+                    px = float(chosen.get("price", 0) or 0)
                     pos.tp_limit_order_id = keep
                     if px > 0:
                         pos.take_profit_price = px
@@ -1938,6 +2007,14 @@ class PositionManager:
                         f"{symbol} 加仓后沿用交易所止盈限价 id={keep} qty≈{new_total:.4f}",
                     )
                 else:
+                    if matches:
+                        await self._cancel_duplicate_tp_limits(
+                            auth_binance,
+                            symbol,
+                            matches,
+                            keep_id="",
+                            strategy_id=strategy_id,
+                        )
                     tp_placed = False
                     close_side = "sell" if pos_side == "long" else "buy"
                     for attempt in range(2):

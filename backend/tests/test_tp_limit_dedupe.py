@@ -95,3 +95,40 @@ def test_list_matching_finds_binance_order():
     )
     assert len(hits) == 1
     assert hits[0]["id"] == "tp1"
+
+
+def test_qty_mismatch_rejected_unless_loose():
+    order = {
+        "id": "old",
+        "side": "sell",
+        "type": "limit",
+        "amount": 5.0,
+        "positionSide": "LONG",
+    }
+    assert not _is_matching_tp_close_limit(
+        order,
+        close_side="sell",
+        ps_need="LONG",
+        contracts=15.0,
+        hedge_mode=True,
+        exchange_id="binance",
+        require_qty_match=True,
+    )
+    assert _is_matching_tp_close_limit(
+        order,
+        close_side="sell",
+        ps_need="LONG",
+        contracts=15.0,
+        hedge_mode=True,
+        exchange_id="binance",
+        require_qty_match=False,
+    )
+
+
+def test_pick_best_tp_match_prefers_closer_qty():
+    pm = PositionManager()
+    a = {"id": "a", "amount": 5.0}
+    b = {"id": "b", "amount": 14.8}  # within 2% of 15
+    assert pm._pick_best_tp_match([a, b], 15.0)["id"] == "b"
+    assert pm._tp_qty_ok(b, 15.0)
+    assert not pm._tp_qty_ok(a, 15.0)

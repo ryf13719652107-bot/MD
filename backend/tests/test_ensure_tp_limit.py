@@ -101,3 +101,41 @@ async def test_ensure_tp_does_not_place_for_non_bot_orphan():
     )
     auth.create_limit_order.assert_not_called()
     assert pos.tp_limit_order_id is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_tp_replaces_undersized_existing():
+    """本地已有止盈 id，但交易所挂单数量小于总仓 → 撤旧并按总量重挂。"""
+    pm = PositionManager()
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    strategy = SimpleNamespace(take_profit_limit_order=True, id=1)
+    eng = MartingaleEngine(base_quantity=1, take_profit_pct=2)
+    stale = {
+        "id": "old-tp",
+        "side": "sell",
+        "type": "limit",
+        "amount": 5.0,
+        "positionSide": "LONG",
+        "price": 110.0,
+    }
+    auth = MagicMock()
+    auth.exchange_id = "binance"
+    auth.hedge_mode = True
+    auth.create_limit_order = AsyncMock(return_value={"id": "new-tp"})
+    auth.cancel_order = AsyncMock()
+    auth.exchange = MagicMock()
+    auth.exchange.fetch_open_orders = AsyncMock(return_value=[stale])
+    auth._format_symbol = lambda s: s
+    pos = SimpleNamespace(
+        tp_limit_order_id="old-tp",
+        take_profit_price=110.0,
+        layer=0,
+        exchange_order_id="open-1",
+    )
+    await pm._ensure_tp_limit_orders(
+        session, strategy, "BTCUSDT", auth, [pos], eng, 100.0, 15.0, "long"
+    )
+    auth.cancel_order.assert_called()
+    auth.create_limit_order.assert_called_once()
+    assert pos.tp_limit_order_id == "new-tp"
