@@ -165,7 +165,7 @@ API Key 使用 Fernet 加密存储。密钥解析顺序：`settings.encryption_k
 - **多交易所**：交易执行、余额、选币池（调度侧）一律按**账户 `exchange`**；禁止用 `max(钱包, 保证金)` 取余额（浮亏会冻在钱包上）
 - **余额口径**：App 钱包=`totalWalletBalance`；App 保证金/`totalMarginBalance` 用于曲线、保证金止损、单币止损、顶栏
 - **双向持仓**：`positionSide` + 平仓 `reduceOnly`（单向账户不发）
-- **限价止盈**：mid-candle + Sync；成交价优先 `average`。manage 时若开启限价止盈但本地无 `tp_limit_order_id`：先关联交易所已有减仓限价，否则按均价止盈价**补挂**；仍失败则达止盈比例时市价兜底
+- **限价止盈**：mid-candle + Sync；成交价优先 `average`。manage 时若开启限价止盈但本地无 `tp_limit_order_id`：先关联交易所已有减仓限价；仅当本地有策略开仓单号（`exchange_order_id`）时才**补挂**——非机器人开的仓（无开仓单号）不挂止盈；仍失败则达止盈比例时市价兜底
 - **符号标准化**：去 `/`、`:USDT`、大写
 - **TradFi / 下架 / 主流 / 费率**：策略级开关；已有持仓不因过滤抛弃
 - **新增 DB 列**：model + schema + 前端 types + `init_db` 迁移 + NULL 兜底

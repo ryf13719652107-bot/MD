@@ -233,7 +233,11 @@ class PositionManager:
         total_qty: float,
         pos_side: str,
     ) -> None:
-        """限价止盈开启时：无 tp_limit_order_id 则先关联交易所挂单，否则补挂。"""
+        """限价止盈开启时：无 tp_limit_order_id 则先关联交易所挂单，否则补挂。
+
+        仅对机器人本地开仓记录补挂（至少一层有 exchange_order_id）。
+        交易所有仓但本地无开仓单号的领养/手动仓：只尝试关联已有挂单，绝不新挂。
+        """
         if not getattr(strategy, "take_profit_limit_order", False):
             return
         if total_qty <= 0 or not open_positions:
@@ -242,6 +246,7 @@ class PositionManager:
             return
 
         strategy_id = strategy.id
+        bot_opened = any((p.exchange_order_id or "").strip() for p in open_positions)
         anchor = max(open_positions, key=lambda p: p.layer)
         await self._bind_tp_limit_from_open_orders(
             auth_binance, symbol, pos_side, anchor, total_qty
@@ -256,6 +261,10 @@ class PositionManager:
                 strategy_id, f"{symbol} 补关联交易所止盈限价单 id={oid}"
             )
             await session.flush()
+            return
+
+        if not bot_opened:
+            # 非策略开仓（无 exchange_order_id）：不挂止盈，避免干预手动单
             return
 
         tp_price = eng.get_take_profit_price(avg_entry, pos_side)
@@ -422,10 +431,11 @@ class PositionManager:
                 entry_price,
             )
             msg = (
-                f"{symbol} 交易所有{side}仓但本地无记录 — 已按交易所数据恢复一条持仓(L0)，止盈价按当前策略重算"
+                f"{symbol} 交易所有{side}仓但本地无开仓记录 — 已恢复一条持仓(L0)防重复开仓；"
+                f"非策略原单不自动挂止盈"
             )
             if pos.tp_limit_order_id:
-                msg += f"，已关联交易所限价止盈单 id={pos.tp_limit_order_id}"
+                msg += f"（已关联交易所已有限价单 id={pos.tp_limit_order_id}）"
             strategy_log_service.warning(strategy_id, msg)
 
         if created:
