@@ -71,7 +71,8 @@ async def lifespan(app: FastAPI):
 
     strategy_scheduler.scheduler.add_job(
         _equity_hourly_job,
-        CronTrigger(minute=0, timezone=BEIJING_TZ),
+        # 避开 :00 策略收盘 tick，减少 SQLite 写锁冲突
+        CronTrigger(minute=0, second=25, timezone=BEIJING_TZ),
         id="equity_hourly_snapshots",
         replace_existing=True,
         misfire_grace_time=300,

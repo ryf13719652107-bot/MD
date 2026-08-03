@@ -14,7 +14,12 @@ db_dir = os.path.dirname(db_path)
 if db_dir and not os.path.exists(db_dir):
     os.makedirs(db_dir, exist_ok=True)
 
-engine = create_async_engine(settings.database_url, echo=False)
+# aiosqlite timeout：等锁秒数（与 PRAGMA busy_timeout 配合）
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    connect_args={"timeout": 30},
+)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -22,12 +27,10 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
-    # WAL + busy_timeout: background sync now runs detached from the tick and may
-    # overlap the next tick's writes on a separate connection. WAL lets readers and
-    # one writer coexist; busy_timeout makes a competing writer wait instead of
-    # immediately raising "database is locked".
+    # WAL + busy_timeout: 整点权益快照 / 后台 sync / 多策略 tick 可能重叠写库。
+    # busy_timeout 单位 ms；过短时整点易报 database is locked。
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA busy_timeout=30000")
     cursor.close()
 
 

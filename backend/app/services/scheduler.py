@@ -971,17 +971,32 @@ class StrategyScheduler:
             # Phase 1a: manage existing positions (TP/martingale/SL).
             # :00 runs after opens; :30 runs manage only (after TP fill check above).
             for symbol, open_positions in manage_symbols:
-                try:
-                    await self._position_mgr.manage_symbol(
-                        session, strategy, symbol, auth_binance, public_binance,
-                        open_positions, total_margin, leverage, tick_ctx,
-                    )
-                    await session.commit()
-                except Exception as e:
-                    logger.exception(
-                        "Strategy %d: manage %s failed: %s", strategy_id, symbol, e
-                    )
-                    strategy = await _rollback_and_refresh_strategy(session, strategy)
+                managed_ok = False
+                for attempt in range(3):
+                    try:
+                        await self._position_mgr.manage_symbol(
+                            session, strategy, symbol, auth_binance, public_binance,
+                            open_positions, total_margin, leverage, tick_ctx,
+                        )
+                        await session.commit()
+                        managed_ok = True
+                        break
+                    except Exception as e:
+                        msg = str(e).lower()
+                        locked = "database is locked" in msg or "database locked" in msg
+                        strategy = await _rollback_and_refresh_strategy(session, strategy)
+                        if locked and attempt < 2:
+                            logger.warning(
+                                "Strategy %d: manage %s database locked, retry %d/3",
+                                strategy_id, symbol, attempt + 2,
+                            )
+                            await asyncio.sleep(0.35 * (attempt + 1))
+                            continue
+                        logger.exception(
+                            "Strategy %d: manage %s failed: %s", strategy_id, symbol, e
+                        )
+                        break
+                if not managed_ok:
                     continue
 
             # Sync after signal processing — non-blocking background task.
