@@ -126,13 +126,17 @@ Index("idx_strategies_status", Strategy.status)
 
 @event.listens_for(Strategy, "before_update")
 def _track_status_change(mapper, connection, target):
-    state = target._sa_instance_state
-    hist = state.get_history("status", state.attrs.status.loaded_value)
-    if hist.deleted and hist.deleted[0] != target.status:
-        logger.warning(
-            "STATUS CHANGE: strategy_id=%d '%s' -> '%s'\n%s",
-            target.id, hist.deleted[0], target.status,
-            "".join(traceback.format_stack()[-8:-1])
-        )
+    # 仅调试 status 变更；任何异常都吞掉，避免污染 async flush（MissingGreenlet）
+    try:
+        state = target._sa_instance_state
+        hist = state.get_history("status", True)
+        if hist.has_changes() and hist.deleted and hist.deleted[0] != target.status:
+            logger.warning(
+                "STATUS CHANGE: strategy_id=%d '%s' -> '%s'\n%s",
+                target.id, hist.deleted[0], target.status,
+                "".join(traceback.format_stack()[-8:-1]),
+            )
+    except Exception:
+        pass
 
 

@@ -1883,8 +1883,42 @@ class PositionManager:
                             for p in open_positions:
                                 p.tp_limit_order_id = None
                         else:
-                            strategy_log_service.info(strategy_id, f"{symbol} 止盈限价单状态={order_status}，等待成交")
-                            return
+                            # 现价已穿过本地止盈价但仍未成交 → 挂单价可能错/精度/腿不对，兜底市价
+                            tp_target = next(
+                                (
+                                    float(p.take_profit_price)
+                                    for p in open_positions
+                                    if p.take_profit_price and float(p.take_profit_price) > 0
+                                ),
+                                0.0,
+                            )
+                            through = False
+                            if tp_target > 0 and current_price > 0:
+                                through = (
+                                    current_price >= tp_target
+                                    if pos_side == "long"
+                                    else current_price <= tp_target
+                                )
+                            if not through:
+                                strategy_log_service.info(
+                                    strategy_id,
+                                    f"{symbol} 止盈限价单状态={order_status}，等待成交",
+                                )
+                                return
+                            strategy_log_service.warning(
+                                strategy_id,
+                                f"{symbol} 现价已过止盈价{tp_target:.6g}但限价未成"
+                                f"(状态={order_status}) — 兜底市价平仓",
+                            )
+                            for p in open_positions:
+                                if p.tp_limit_order_id:
+                                    try:
+                                        await auth_binance.cancel_order(
+                                            p.tp_limit_order_id, symbol
+                                        )
+                                    except Exception:
+                                        pass
+                                    p.tp_limit_order_id = None
                     except (Exception, asyncio.TimeoutError) as e:
                         logger.warning("Strategy %d: TP order check failed for %s: %s — waiting for check_tp_fills", strategy_id, symbol, e)
                         return

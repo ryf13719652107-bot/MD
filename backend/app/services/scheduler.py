@@ -49,6 +49,17 @@ from .order_times import exit_time_from_order
 logger = logging.getLogger(__name__)
 
 TIMEFRAME_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
+
+
+async def _rollback_and_refresh_strategy(session, strategy: Strategy) -> Strategy:
+    """rollback 会 expire 全部 ORM；async 下再读属性会触发 MissingGreenlet，必须 refresh。"""
+    await session.rollback()
+    try:
+        await session.refresh(strategy)
+        return strategy
+    except Exception:
+        fresh = await session.get(Strategy, strategy.id)
+        return fresh if fresh is not None else strategy
 # 并发跑「收盘整轮」的策略数；≥ running 策略数可避免整点排队。多账户分散 API，可适当提高（单账户一堆策略时勿过大以防 429）。
 _STRATEGY_SEMAPHORE = asyncio.Semaphore(10)
 # 单策略内并发评估池内币信号的上限（拉 K 线/算信号，多为 WS 缓存命中）。
@@ -811,8 +822,11 @@ class StrategyScheduler:
                     await session.commit()
                     open_by_norm = await _load_open_by_norm()
                 except Exception as e:
-                    logger.error("Strategy %d mid-candle TP check error: %s", strategy_id, e)
-                    await session.rollback()
+                    logger.exception(
+                        "Strategy %d mid-candle TP check error: %s", strategy_id, e
+                    )
+                    strategy = await _rollback_and_refresh_strategy(session, strategy)
+                    open_by_norm = await _load_open_by_norm()
 
             # Phase 1b + 2: signal scan and new opens — K-line close (:00) only.
             # wick_spike: 首仓由价流循环开，收盘 tick 只管理持仓（马丁/止盈/止损）。
@@ -900,7 +914,9 @@ class StrategyScheduler:
                                             "Strategy %d: reconcile/open precheck for %s failed: %s",
                                             strategy_id, cand.symbol, e,
                                         )
-                                        await session.rollback()
+                                        strategy = await _rollback_and_refresh_strategy(
+                                            session, strategy
+                                        )
                                 elif auth_binance:
                                     task = asyncio.create_task(_run_open_api(cand))
                                     pending_open[task] = cand
@@ -925,14 +941,25 @@ class StrategyScheduler:
                                     "Strategy %d: commit after open %s failed: %s",
                                     strategy_id, cand.symbol, e,
                                 )
-                                await session.rollback()
+                                strategy = await _rollback_and_refresh_strategy(
+                                    session, strategy
+                                )
 
                     # Persist strategy.last_signal/last_rsi if no open DB commit happened last.
                     try:
                         await session.commit()
                     except Exception as e:
                         logger.error("Strategy %d: commit after signal scan failed: %s", strategy_id, e)
-                        await session.rollback()
+                        strategy = await _rollback_and_refresh_strategy(session, strategy)
+
+                # 开仓阶段可能 rollback/commit：manage 前重载持仓，避免用过期 Position
+                open_by_norm = await _load_open_by_norm()
+                manage_symbols = []
+                for symbol in symbols:
+                    sym_key = _norm_sym(symbol)
+                    open_positions = open_by_norm.get(sym_key, [])
+                    if open_positions:
+                        manage_symbols.append((symbol, open_positions))
 
             # Phase 1a: manage existing positions (TP/martingale/SL).
             # :00 runs after opens; :30 runs manage only (after TP fill check above).
@@ -944,8 +971,10 @@ class StrategyScheduler:
                     )
                     await session.commit()
                 except Exception as e:
-                    logger.error("Strategy %d: manage %s failed: %s", strategy_id, symbol, e)
-                    await session.rollback()
+                    logger.exception(
+                        "Strategy %d: manage %s failed: %s", strategy_id, symbol, e
+                    )
+                    strategy = await _rollback_and_refresh_strategy(session, strategy)
                     continue
 
             # Sync after signal processing — non-blocking background task.
