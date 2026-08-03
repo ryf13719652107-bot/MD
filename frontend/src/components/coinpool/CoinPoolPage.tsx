@@ -173,12 +173,17 @@ export default function CoinPoolPage() {
             </select>
           </div>
           <div>
-            <label className="text-xs text-gray-400 block mb-1">最大数量</label>
+            <label className="text-xs text-gray-400 block mb-1">最大数量（每侧）</label>
             <input
               type="number" value={config.max_symbols}
               onChange={(e) => setConfig({ ...config, max_symbols: parseInt(e.target.value) || 20 })}
               className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm w-20"
             />
+            <p className="text-[11px] text-gray-500 mt-1">
+              {config.pool_source === 'both'
+                ? `两者：涨/跌各取前 ${config.max_symbols}，合计最多 ${config.max_symbols * 2}`
+                : `仅单侧前 ${config.max_symbols}`}
+            </p>
           </div>
           <button onClick={handleConfigUpdate} className="mt-4 px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded text-sm">保存配置</button>
         </div>

@@ -34,6 +34,10 @@ const schema = z.object({
   wick_atr_period: z.number().min(2).max(100),
   wick_spike_atr_mult: z.number().min(0.1).max(50),
   wick_cooldown_sec: z.number().min(0).max(3600),
+  wick_amp_vol_relax_enabled: z.boolean(),
+  wick_vol_relax_progress_start: z.number().min(0).max(10),
+  wick_vol_relax_progress_full: z.number().min(0).max(10),
+  wick_vol_relax_mult: z.number().min(0).max(100),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -105,6 +109,10 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       wick_atr_period: initialData.wick_atr_period ?? 14,
       wick_spike_atr_mult: initialData.wick_spike_atr_mult ?? 5,
       wick_cooldown_sec: initialData.wick_cooldown_sec ?? 0,
+      wick_amp_vol_relax_enabled: initialData.wick_amp_vol_relax_enabled ?? true,
+      wick_vol_relax_progress_start: initialData.wick_vol_relax_progress_start ?? 1,
+      wick_vol_relax_progress_full: initialData.wick_vol_relax_progress_full ?? 1.5,
+      wick_vol_relax_mult: initialData.wick_vol_relax_mult ?? 5,
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -164,6 +172,10 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
     wick_atr_period: 14,
     wick_spike_atr_mult: 5,
     wick_cooldown_sec: 0,
+    wick_amp_vol_relax_enabled: true,
+    wick_vol_relax_progress_start: 1,
+    wick_vol_relax_progress_full: 1.5,
+    wick_vol_relax_mult: 5,
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -220,6 +232,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
   const direction = watch('direction', 'long');
   const signalSource = watch('signal_source', 'rsi');
   const useCoinPool = watch('use_coin_pool', true);
+  const coinPoolSource = watch('coin_pool_source', 'gainers');
   const fetchMode = watch('coin_pool_fetch_mode', 'interval');
   const stopLossEnabled = watch('stop_loss_enabled', true);
   const singleSymbolStopLossEnabled = watch('single_symbol_stop_loss_enabled', false);
@@ -319,6 +332,18 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
               <p>毫秒接针：仅币安。先放量（当前量 ≥ Vol SMA × 倍数），再用本根极值追认「开盘价 ± 上根 ATR × 倍数」后立刻市价开仓，无反弹确认。</p>
               <p>调度错峰：持仓管理在每根 K 第 40 秒，止盈检测第 30 秒；:00 附近不占锁，留给价流开仓。止盈/层数下方手填；加仓可开 WT 确认。</p>
             </div>
+            <div>
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>progress 量能放宽</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_amp_vol_relax_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+              </label>
+              <span className="text-xs text-gray-600">
+                默认开：progress = |极值-开盘|/N；刺破后按进度把放量倍数线性降到下方「放宽后量能」
+              </span>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={labelClass}>放量倍数（相对 Vol SMA）</label>
@@ -339,6 +364,21 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
                 <label className={labelClass}>刺出 ATR 倍数</label>
                 <input type="number" step="0.1" {...register('wick_spike_atr_mult', { valueAsNumber: true })} className={inputClass} />
                 <span className="text-xs text-gray-600">N = ATR × 该值；默认 5</span>
+              </div>
+              <div>
+                <label className={labelClass}>开始放宽 progress</label>
+                <input type="number" step="0.1" {...register('wick_vol_relax_progress_start', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">默认 1.0（刚刺破）</span>
+              </div>
+              <div>
+                <label className={labelClass}>完全放宽 progress</label>
+                <input type="number" step="0.1" {...register('wick_vol_relax_progress_full', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">默认 1.5</span>
+              </div>
+              <div>
+                <label className={labelClass}>放宽后量能倍数</label>
+                <input type="number" step="0.1" {...register('wick_vol_relax_mult', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">默认 5；不会高于上方放量倍数</span>
               </div>
               <div>
                 <label className={labelClass}>同币额外冷却（秒）</label>
@@ -540,7 +580,7 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <div>
               <label className={labelClass}>选币池来源</label>
               <select {...register('coin_pool_source')} className={inputClass}>
-                <option value="both">涨幅榜 + 跌幅榜</option>
+                <option value="both">涨幅榜 + 跌幅榜（各取前N，合计最多2N）</option>
                 <option value="gainers">仅涨幅榜</option>
                 <option value="losers">仅跌幅榜</option>
               </select>
@@ -578,7 +618,11 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <div>
               <label className={labelClass}>抓取前几名</label>
               <input type="number" min={1} max={50} {...register('coin_pool_top_n', { valueAsNumber: true })} className={inputClass} />
-              <span className="text-xs text-gray-600">默认20，最多50</span>
+              <span className="text-xs text-gray-600">
+                {coinPoolSource === 'both'
+                  ? 'both：每侧前 N（默认20→涨20+跌20=40）；再经成交量/排除过滤后可能更少'
+                  : '默认20，最多50；再经成交量/排除过滤后可能更少'}
+              </span>
             </div>
             <div>
               <label className={labelClass}>最低 24h 成交量（万 USDT）</label>

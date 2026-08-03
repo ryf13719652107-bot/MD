@@ -79,6 +79,10 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN wick_atr_period INTEGER DEFAULT 14",
             "ALTER TABLE strategies ADD COLUMN wick_spike_atr_mult FLOAT DEFAULT 5.0",
             "ALTER TABLE strategies ADD COLUMN wick_cooldown_sec INTEGER DEFAULT 0",
+            "ALTER TABLE strategies ADD COLUMN wick_amp_vol_relax_enabled BOOLEAN DEFAULT 1",
+            "ALTER TABLE strategies ADD COLUMN wick_vol_relax_progress_start FLOAT DEFAULT 1.0",
+            "ALTER TABLE strategies ADD COLUMN wick_vol_relax_progress_full FLOAT DEFAULT 1.5",
+            "ALTER TABLE strategies ADD COLUMN wick_vol_relax_mult FLOAT DEFAULT 5.0",
             "ALTER TABLE accounts ADD COLUMN cashflow_sync_cursor_ms INTEGER",
             "ALTER TABLE accounts ADD COLUMN exchange VARCHAR(20) DEFAULT 'binance'",
         ]
@@ -145,6 +149,46 @@ async def init_db():
                 lambda c: c.exec_driver_sql(
                     "UPDATE strategies SET exclude_mainstream=1 "
                     "WHERE exclude_mainstream IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_amp_vol_relax_enabled=1 "
+                    "WHERE wick_amp_vol_relax_enabled IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_vol_relax_progress_start=1.0 "
+                    "WHERE wick_vol_relax_progress_start IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_vol_relax_progress_full=1.5 "
+                    "WHERE wick_vol_relax_progress_full IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_vol_relax_mult=5.0 "
+                    "WHERE wick_vol_relax_mult IS NULL"
                 )
             )
         except Exception:

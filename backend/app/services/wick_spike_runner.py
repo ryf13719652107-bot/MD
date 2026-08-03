@@ -230,11 +230,22 @@ class WickSpikeRunner:
                             break
                         if strategy.signal_source != "wick_spike":
                             break
+                        relax_flag = getattr(strategy, "wick_amp_vol_relax_enabled", None)
                         params = WickSpikeParams(
                             direction=strategy.direction,
                             volume_mult=float(getattr(strategy, "wick_volume_mult", 8.0) or 0),
                             atr_mult=float(getattr(strategy, "wick_spike_atr_mult", 5.0) or 5.0),
                             cooldown_sec=float(getattr(strategy, "wick_cooldown_sec", 0) or 0),
+                            vol_relax_enabled=True if relax_flag is None else bool(relax_flag),
+                            vol_relax_progress_start=float(
+                                getattr(strategy, "wick_vol_relax_progress_start", 1.0) or 1.0
+                            ),
+                            vol_relax_progress_full=float(
+                                getattr(strategy, "wick_vol_relax_progress_full", 1.5) or 1.5
+                            ),
+                            vol_relax_mult=float(
+                                getattr(strategy, "wick_vol_relax_mult", 5.0) or 5.0
+                            ),
                         )
                         atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
                         vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)

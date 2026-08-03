@@ -31,6 +31,30 @@ def sort_coin_pool_by_price_change(coins: list[CoinPool], source: str | None = N
     return gainers + losers + other
 
 
+def apply_coin_pool_top_n(
+    coins: list[CoinPool],
+    source: str | None,
+    limit: int,
+) -> list[CoinPool]:
+    """截断榜内名次。
+
+    - 仅涨/仅跌：取前 limit
+    - both：涨幅、跌幅各取前 limit，合并后最多 2×limit（如 20 → 40）
+    """
+    if limit <= 0 or not coins:
+        return list(coins)
+    src = (source or "").lower()
+    if src == "both":
+        gainers = sort_coin_pool_by_price_change(
+            [c for c in coins if c.source == "gainers"], "gainers"
+        )[:limit]
+        losers = sort_coin_pool_by_price_change(
+            [c for c in coins if c.source == "losers"], "losers"
+        )[:limit]
+        return sort_coin_pool_by_price_change(gainers + losers, "both")
+    return sort_coin_pool_by_price_change(coins, src)[:limit]
+
+
 _DEFAULT_POOL_CONFIG = {
     "refresh_interval_seconds": 3600,
     "pool_source": "both",
@@ -431,9 +455,7 @@ class CoinPoolService:
         if not self._coin_pool_valid_for_strategy(strategy, coins):
             return []
         top_n = int(getattr(strategy, "coin_pool_top_n", 0) or 0)
-        if top_n > 0:
-            coins = coins[:top_n]
-        return coins
+        return apply_coin_pool_top_n(coins, source, top_n)
 
     @staticmethod
     def _first_anchor_at_or_after(
@@ -516,13 +538,12 @@ class CoinPoolService:
         strategy: Strategy | None = None,
         exchange: str = "binance",
     ) -> list[CoinPool]:
-        """Strategy-facing pool: top N -> volume -> exclude."""
+        """Strategy-facing pool: top N（both=每侧N）-> volume -> exclude。"""
         ex = normalize_exchange_id(exchange)
         coins = await self.get_pool(source, exchange=ex)
         if strategy is not None and not self._coin_pool_valid_for_strategy(strategy, coins):
             return []
-        if limit > 0:
-            coins = coins[:limit]
+        coins = apply_coin_pool_top_n(coins, source, limit)
         if min_volume_24h > 0:
             coins = [c for c in coins if (c.volume_24h or 0) >= min_volume_24h]
         if exclude_symbols_norm:

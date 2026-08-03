@@ -20,6 +20,10 @@ export interface Strategy {
   wick_atr_period: number;
   wick_spike_atr_mult: number;
   wick_cooldown_sec: number;
+  wick_amp_vol_relax_enabled: boolean;
+  wick_vol_relax_progress_start: number;
+  wick_vol_relax_progress_full: number;
+  wick_vol_relax_mult: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -84,6 +88,10 @@ export interface StrategyFormData {
   wick_atr_period: number;
   wick_spike_atr_mult: number;
   wick_cooldown_sec: number;
+  wick_amp_vol_relax_enabled: boolean;
+  wick_vol_relax_progress_start: number;
+  wick_vol_relax_progress_full: number;
+  wick_vol_relax_mult: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;

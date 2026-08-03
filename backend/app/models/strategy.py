@@ -27,6 +27,19 @@ class Strategy(Base):
     wick_atr_period: Mapped[int] = mapped_column(Integer, default=14, server_default="14")
     wick_spike_atr_mult: Mapped[float] = mapped_column(Float, default=5.0, server_default="5.0")
     wick_cooldown_sec: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # progress 量能放宽（默认开）：刺破后按 progress 线性把量能收到 relax_mult
+    wick_amp_vol_relax_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="1"
+    )
+    wick_vol_relax_progress_start: Mapped[float] = mapped_column(
+        Float, default=1.0, server_default="1.0"
+    )
+    wick_vol_relax_progress_full: Mapped[float] = mapped_column(
+        Float, default=1.5, server_default="1.5"
+    )
+    wick_vol_relax_mult: Mapped[float] = mapped_column(
+        Float, default=5.0, server_default="5.0"
+    )
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)

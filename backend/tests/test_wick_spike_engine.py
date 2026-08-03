@@ -5,11 +5,13 @@ from app.services.wick_spike_engine import (
     WickBarSnapshot,
     WickSpikeParams,
     WickSymbolState,
+    effective_volume_mult,
     enrich_snap_with_trades,
     mark_bar_triggered,
     near_miss_diag,
     on_tick,
     release_bar_trigger,
+    spike_progress,
 )
 
 
@@ -124,10 +126,10 @@ def test_new_bar_seeds_extremes_from_kline():
 def test_near_miss_diag_volume_half():
     state = WickSymbolState()
     params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
-    # vol 4x = half of need 8x; price not pierced
-    snap = _snap(vol_now=40.0, vol_sma=10.0, open_=100.0, high=101.0, low=99.0)
-    on_tick(state, params, snap, last_price=101.0, now_ms=1)
-    diag = near_miss_diag(params, snap, state, 101.0)
+    # progress=0.6 >= 0.5 → 可诊断；vol 4x = half of need 8x
+    snap = _snap(vol_now=40.0, vol_sma=10.0, open_=100.0, high=103.0, low=99.0)
+    on_tick(state, params, snap, last_price=103.0, now_ms=1)
+    diag = near_miss_diag(params, snap, state, 103.0)
     assert diag is not None
     assert "vol_hot=False" in diag
 
@@ -135,9 +137,50 @@ def test_near_miss_diag_volume_half():
 def test_near_miss_diag_silent_when_far():
     state = WickSymbolState()
     params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
-    snap = _snap(vol_now=10.0, vol_sma=10.0, open_=100.0, high=100.5, low=99.5)
-    on_tick(state, params, snap, last_price=100.2, now_ms=1)
-    assert near_miss_diag(params, snap, state, 100.2) is None
+    # progress≈0.02，未刺破且 <0.5；即使量到一半也不刷屏
+    snap = _snap(vol_now=40.0, vol_sma=10.0, open_=100.0, high=100.1, low=99.5)
+    on_tick(state, params, snap, last_price=100.05, now_ms=1)
+    assert near_miss_diag(params, snap, state, 100.05) is None
+
+
+def test_progress_below_start_keeps_strict_volume():
+    """progress < 1 不放宽：vol 5× 不够。"""
+    params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
+    # high=102 → progress = 2/5 = 0.4
+    assert abs(spike_progress("short", 100.0, 102.0, 5.0) - 0.4) < 1e-9
+    assert effective_volume_mult(params, 0.4) == 8.0
+
+    state = WickSymbolState()
+    snap = _snap(open_=100.0, atr=1.0, vol_now=50.0, vol_sma=10.0, high=102.0, low=100.0)
+    assert on_tick(state, params, snap, last_price=102.0, now_ms=1) is None
+
+
+def test_progress_at_full_relaxes_volume_to_5x():
+    """progress ≥ 1.5 时量能收到 5×。"""
+    params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
+    # high=107.5 → progress = 7.5/5 = 1.5
+    assert abs(spike_progress("short", 100.0, 107.5, 5.0) - 1.5) < 1e-9
+    assert effective_volume_mult(params, 1.5) == 5.0
+    assert abs(effective_volume_mult(params, 1.25) - 6.5) < 1e-9  # 线性中点
+
+    state = WickSymbolState()
+    snap = _snap(open_=100.0, atr=1.0, vol_now=50.0, vol_sma=10.0, high=107.5, low=100.0)
+    assert on_tick(state, params, snap, last_price=107.5, now_ms=1) == Signal.SHORT
+
+
+def test_progress_relax_disabled_keeps_strict_volume():
+    """关闭放宽：深针也不降量能门槛。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        vol_relax_enabled=False,
+    )
+    snap = _snap(open_=100.0, atr=1.0, vol_now=50.0, vol_sma=10.0, high=107.5, low=100.0)
+    assert on_tick(state, params, snap, last_price=107.5, now_ms=1) is None
+    snap_hot = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=107.5, low=100.0)
+    assert on_tick(state, params, snap_hot, last_price=107.5, now_ms=2) == Signal.SHORT
 
 
 def test_enrich_snap_prefers_trade_volume_and_high():

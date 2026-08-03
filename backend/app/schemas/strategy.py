@@ -81,6 +81,10 @@ class StrategyCreate(BaseModel):
     wick_atr_period: int = Field(default=14, ge=2, le=100)
     wick_spike_atr_mult: float = Field(default=5.0, gt=0, le=50)
     wick_cooldown_sec: int = Field(default=0, ge=0, le=3600)
+    wick_amp_vol_relax_enabled: bool = True
+    wick_vol_relax_progress_start: float = Field(default=1.0, ge=0, le=10)
+    wick_vol_relax_progress_full: float = Field(default=1.5, ge=0, le=10)
+    wick_vol_relax_mult: float = Field(default=5.0, ge=0, le=100)
 
 
 class StrategyUpdate(BaseModel):
@@ -134,6 +138,10 @@ class StrategyUpdate(BaseModel):
     wick_atr_period: Optional[int] = Field(default=None, ge=2, le=100)
     wick_spike_atr_mult: Optional[float] = Field(default=None, gt=0, le=50)
     wick_cooldown_sec: Optional[int] = Field(default=None, ge=0, le=3600)
+    wick_amp_vol_relax_enabled: Optional[bool] = None
+    wick_vol_relax_progress_start: Optional[float] = Field(default=None, ge=0, le=10)
+    wick_vol_relax_progress_full: Optional[float] = Field(default=None, ge=0, le=10)
+    wick_vol_relax_mult: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 class StrategyResponse(BaseModel):
@@ -189,6 +197,10 @@ class StrategyResponse(BaseModel):
     wick_atr_period: int = 14
     wick_spike_atr_mult: float = 5.0
     wick_cooldown_sec: int = 0
+    wick_amp_vol_relax_enabled: bool = True
+    wick_vol_relax_progress_start: float = 1.0
+    wick_vol_relax_progress_full: float = 1.5
+    wick_vol_relax_mult: float = 5.0
     blacklisted_symbols: list[str] = Field(default_factory=list)
     status: str
     started_at: Optional[datetime] = None

@@ -370,7 +370,10 @@ export default function StrategyDetailPage() {
             </div>
             {poolView === 'effective' && (
               <p className="text-xs text-gray-500 mb-2">
-                与实盘一致：{poolSourceRankLabel(strategy.coin_pool_source)} {strategy.coin_pool_top_n} 名内 + 成交量
+                与实盘一致：{strategy.coin_pool_source === 'both'
+                  ? `涨幅前${strategy.coin_pool_top_n}+跌幅前${strategy.coin_pool_top_n}（合计最多${strategy.coin_pool_top_n * 2}）`
+                  : `${poolSourceRankLabel(strategy.coin_pool_source)}${strategy.coin_pool_top_n}名`}
+                {' '}内 + 成交量
                 {(strategy.coin_pool_min_volume_24h ?? 0) > 0
                   ? ` ≥ ${(strategy.coin_pool_min_volume_24h / 1e4).toLocaleString('zh-CN')} 万 USDT`
                   : ' 不限制'}

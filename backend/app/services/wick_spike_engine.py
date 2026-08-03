@@ -2,6 +2,12 @@
 
 流程：先放量(Vol >= SMA×mult) → 用本根极值追认 / 之后触及 open±N → 立刻信号。
 N = 上根 ATR × atr_mult。开盘价由调用方传入（须为 K 线官方 open）。
+
+progress 量能放宽（可选，默认开）：
+  progress = |极值-开盘| / N；
+  progress < start(1.0) 不放宽；
+  start→full(1.5) 时 need 从 volume_mult 线性降到 vol_relax_mult(5×)；
+  progress ≥ full 时 need = vol_relax_mult。
 """
 
 from __future__ import annotations
@@ -11,6 +17,11 @@ from typing import Optional
 
 from .strategy_engine import Signal, calculate_atr
 
+# progress 量能放宽默认阈值（开关打开时生效）
+_VOL_RELAX_PROGRESS_START = 1.0
+_VOL_RELAX_PROGRESS_FULL = 1.5
+_VOL_RELAX_MULT = 5.0
+
 
 @dataclass
 class WickSpikeParams:
@@ -18,6 +29,11 @@ class WickSpikeParams:
     volume_mult: float = 8.0
     atr_mult: float = 5.0
     cooldown_sec: float = 0.0
+    # progress 量能放宽（默认开）
+    vol_relax_enabled: bool = True
+    vol_relax_progress_start: float = _VOL_RELAX_PROGRESS_START
+    vol_relax_progress_full: float = _VOL_RELAX_PROGRESS_FULL
+    vol_relax_mult: float = _VOL_RELAX_MULT
 
 
 @dataclass
@@ -86,10 +102,45 @@ def build_bar_snapshot(
         return None
 
 
-def _volume_hot(params: WickSpikeParams, snap: WickBarSnapshot) -> bool:
-    if params.volume_mult <= 0:
+def _volume_hot(
+    params: WickSpikeParams, snap: WickBarSnapshot, *, volume_mult: float | None = None
+) -> bool:
+    mult = params.volume_mult if volume_mult is None else volume_mult
+    if mult <= 0:
         return True
-    return snap.vol_now >= snap.vol_sma * params.volume_mult
+    return snap.vol_now >= snap.vol_sma * mult
+
+
+def spike_progress(direction: str, bar_open: float, extreme: float, n: float) -> float:
+    """刺破进度 = |极值-开盘| / N。"""
+    if n <= 0 or bar_open <= 0 or extreme <= 0:
+        return 0.0
+    d = (direction or "").lower()
+    if d == "short":
+        return max(0.0, (extreme - bar_open) / n)
+    if d == "long":
+        return max(0.0, (bar_open - extreme) / n)
+    return 0.0
+
+
+def effective_volume_mult(params: WickSpikeParams, progress: float) -> float:
+    """progress 量能放宽下的有效放量倍数。"""
+    if not params.vol_relax_enabled:
+        return params.volume_mult
+    if params.volume_mult <= 0:
+        return 0.0
+
+    floor = min(params.volume_mult, max(0.0, params.vol_relax_mult))
+    start = float(params.vol_relax_progress_start)
+    full = float(params.vol_relax_progress_full)
+
+    if progress < start:
+        return params.volume_mult
+    if full <= start or progress >= full:
+        return floor
+
+    t = (progress - start) / (full - start)
+    return params.volume_mult + t * (floor - params.volume_mult)
 
 
 def enrich_snap_with_trades(
@@ -120,16 +171,13 @@ def near_miss_diag(
 ) -> Optional[str]:
     """近阈值诊断文案（仅供服务器 logger，勿写入前端策略日志）。
 
-    量能达到所需一半，或价格/极值已走过刺破距离的一半时返回说明，否则 None。
+    价格/极值已走过刺破距离的一半，或已刺破且量能接近所需时返回说明。
     """
     if last_price <= 0 or snap.bar_open <= 0 or snap.atr <= 0:
         return None
     if state.triggered_bar_ts == snap.bar_open_ts:
         return None
 
-    vol_need = snap.vol_sma * params.volume_mult if params.volume_mult > 0 else 0.0
-    vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
-    vol_hot = _volume_hot(params, snap)
     n = snap.atr * params.atr_mult
     if n <= 0:
         return None
@@ -142,17 +190,22 @@ def near_miss_diag(
         thr = snap.bar_open + n
         extreme = max(hi, last_price)
         pierced = extreme >= thr
-        progress = (extreme - snap.bar_open) / n if n > 0 else 0.0
     elif direction == "long":
         thr = snap.bar_open - n
         extreme = min(lo, last_price)
         pierced = extreme <= thr
-        progress = (snap.bar_open - extreme) / n if n > 0 else 0.0
     else:
         return None
 
-    vol_near = params.volume_mult <= 0 or vol_ratio >= params.volume_mult * 0.5
+    progress = spike_progress(direction, snap.bar_open, extreme, n)
+    need = effective_volume_mult(params, progress)
+    vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
+    vol_hot = _volume_hot(params, snap, volume_mult=need)
+    vol_near = need <= 0 or vol_ratio >= need * 0.5
     px_near = progress >= 0.5
+    # 未接近刺破时不因「半量」刷屏（例如大阴线对做空）
+    if not pierced and not px_near:
+        return None
     if not (vol_near or px_near):
         return None
 
@@ -160,7 +213,7 @@ def near_miss_diag(
         f"dir={direction} px={last_price:.6g} open={snap.bar_open:.6g} "
         f"ext={extreme:.6g} thr={thr:.6g} pierce={pierced} "
         f"atrN={n:.6g} progress={progress:.2f} "
-        f"vol×={vol_ratio:.2f} need×={params.volume_mult:g} vol_hot={vol_hot}"
+        f"vol×={vol_ratio:.2f} need×={need:g} vol_hot={vol_hot}"
     )
 
 
@@ -214,21 +267,29 @@ def on_tick(
     if params.cooldown_sec > 0 and now_ms < state.cooldown_until_ms:
         return None
 
-    if not _volume_hot(params, snap):
+    direction = (params.direction or "").lower()
+    if direction == "long":
+        extreme = state.bar_low if state.bar_low is not None else last_price
+    elif direction == "short":
+        extreme = state.bar_high if state.bar_high is not None else last_price
+    else:
         return None
 
     n = snap.atr * params.atr_mult
     if n <= 0:
         return None
 
-    direction = (params.direction or "").lower()
+    progress = spike_progress(direction, snap.bar_open, extreme, n)
+    need = effective_volume_mult(params, progress)
+    if not _volume_hot(params, snap, volume_mult=need):
+        return None
+
     if direction == "long":
         threshold = snap.bar_open - n
         if (state.bar_low is not None and state.bar_low <= threshold) or last_price <= threshold:
-            # 乐观锁定，防止并发重复；失败由调用方 release
             state.triggered_bar_ts = snap.bar_open_ts
             return Signal.LONG
-    elif direction == "short":
+    else:
         threshold = snap.bar_open + n
         if (state.bar_high is not None and state.bar_high >= threshold) or last_price >= threshold:
             state.triggered_bar_ts = snap.bar_open_ts
