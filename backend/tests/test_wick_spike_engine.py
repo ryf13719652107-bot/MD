@@ -10,6 +10,7 @@ from app.services.wick_spike_engine import (
     mark_bar_triggered,
     near_miss_diag,
     on_tick,
+    pierce_vol_view,
     release_bar_trigger,
     spike_move_pct,
     spike_progress,
@@ -216,3 +217,38 @@ def test_min_move_pct_zero_disables():
     params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0, min_move_pct=0)
     snap = _snap(open_=100.0, atr=0.2, vol_now=80.0, vol_sma=10.0, high=101.5, low=100.0)
     assert on_tick(state, params, snap, last_price=101.5, now_ms=1) == Signal.SHORT
+
+
+def test_pierce_vol_view_pierced_but_cold():
+    """已刺破但量不够 → pierced=True, vol_hot=False（供短窗重试武装）。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(direction="long", volume_mult=8.0, atr_mult=5.0)
+    snap = _snap(vol_now=20.0, vol_sma=10.0, low=90.0)
+    assert on_tick(state, params, snap, last_price=90.0, now_ms=1) is None
+    view = pierce_vol_view(params, snap, state, 90.0)
+    assert view is not None
+    assert view.pierced is True
+    assert view.vol_hot is False
+    assert view.vol_ratio == 2.0
+
+
+def test_pierce_vol_view_hot_when_ready():
+    state = WickSymbolState()
+    params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
+    snap = _snap(vol_now=80.0, vol_sma=10.0, high=106.0, low=100.0)
+    on_tick(state, params, snap, last_price=106.0, now_ms=1)
+    # on_tick 已触发会锁本根；view 仍应反映刺破+量热
+    view = pierce_vol_view(params, snap, state, 106.0)
+    assert view is not None
+    assert view.pierced is True
+    assert view.vol_hot is True
+
+
+def test_pierce_vol_view_not_pierced():
+    state = WickSymbolState()
+    params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
+    snap = _snap(vol_now=80.0, vol_sma=10.0, high=101.0, low=100.0)
+    on_tick(state, params, snap, last_price=101.0, now_ms=1)
+    view = pierce_vol_view(params, snap, state, 101.0)
+    assert view is not None
+    assert view.pierced is False

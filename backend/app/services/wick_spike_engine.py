@@ -65,6 +65,17 @@ class WickSymbolState:
     cooldown_until_ms: int = 0
 
 
+@dataclass
+class PierceVolView:
+    """刺破/量能快照（供 runner 短窗重试判断）。"""
+
+    pierced: bool
+    vol_hot: bool
+    progress: float
+    need: float
+    vol_ratio: float
+
+
 def volume_sma(closed_volumes: list[float], period: int) -> Optional[float]:
     if period <= 0 or len(closed_volumes) < period:
         return None
@@ -344,3 +355,40 @@ def on_tick(
             return Signal.SHORT
 
     return None
+
+
+def pierce_vol_view(
+    params: WickSpikeParams,
+    snap: WickBarSnapshot,
+    state: WickSymbolState,
+    last_price: float,
+) -> Optional[PierceVolView]:
+    """读取当前是否已刺破、量是否达标（须在 on_tick 更新极值之后调用）。"""
+    if last_price <= 0 or snap.bar_open <= 0 or snap.atr <= 0:
+        return None
+    direction = (params.direction or "").lower()
+    if direction == "long":
+        extreme = state.bar_low if state.bar_low is not None else last_price
+        n = snap.atr * params.atr_mult
+        if n <= 0:
+            return None
+        pierced = extreme <= snap.bar_open - n or last_price <= snap.bar_open - n
+    elif direction == "short":
+        extreme = state.bar_high if state.bar_high is not None else last_price
+        n = snap.atr * params.atr_mult
+        if n <= 0:
+            return None
+        pierced = extreme >= snap.bar_open + n or last_price >= snap.bar_open + n
+    else:
+        return None
+
+    progress = spike_progress(direction, snap.bar_open, extreme, n)
+    need = effective_volume_mult(params, progress)
+    vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
+    return PierceVolView(
+        pierced=bool(pierced),
+        vol_hot=_volume_hot(params, snap, volume_mult=need),
+        progress=progress,
+        need=need,
+        vol_ratio=vol_ratio,
+    )

@@ -53,6 +53,7 @@ from .wick_spike_engine import (
     effective_volume_mult,
     near_miss_diag,
     on_tick,
+    pierce_vol_view,
     mark_bar_triggered,
     release_bar_trigger,
     spike_progress,
@@ -66,14 +67,45 @@ logger = logging.getLogger(__name__)
 _SYMBOL_REFRESH_SEC = 15.0
 _POLL_IDLE_SEC = 0.005
 _KLINE_MIN_BARS = 80
-# 策略参数/DB 重载间隔（热路径不每圈查库）
+# 策略参数/DB 重载间隔（后台 task，热路径只消费）
 _STRATEGY_RELOAD_SEC = 2.0
 # 近阈值诊断写入 bot.log 的节流（秒）；不进前端策略日志
 _NEAR_MISS_LOG_SEC = 8.0
+# 已刺破但量未达标：短窗内强制重判（覆盖量 WS 滞后）
+_PIERCE_RETRY_SEC = 2.5
 # 缓冲不足时后台 REST 纠偏节流
 _BG_REST_SEC = 5.0
 # 抢策略锁最长等待（毫秒级 TP 检测），超时则 release 重试
 _LOCK_WAIT_SEC = 0.12
+
+
+def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int, int, str, str]:
+    """从 Strategy ORM 抽出接针参数（调用方须已保证字段可读）。"""
+    relax_flag = getattr(strategy, "wick_amp_vol_relax_enabled", None)
+    params = WickSpikeParams(
+        direction=strategy.direction,
+        volume_mult=float(getattr(strategy, "wick_volume_mult", 8.0) or 0),
+        atr_mult=float(getattr(strategy, "wick_spike_atr_mult", 5.0) or 5.0),
+        cooldown_sec=float(getattr(strategy, "wick_cooldown_sec", 0) or 0),
+        vol_relax_enabled=True if relax_flag is None else bool(relax_flag),
+        vol_relax_progress_start=float(
+            getattr(strategy, "wick_vol_relax_progress_start", 1.0) or 1.0
+        ),
+        vol_relax_progress_full=float(
+            getattr(strategy, "wick_vol_relax_progress_full", 1.5) or 1.5
+        ),
+        vol_relax_mult=float(getattr(strategy, "wick_vol_relax_mult", 5.0) or 5.0),
+        min_move_pct=float(
+            getattr(strategy, "wick_min_move_pct", 2.4)
+            if getattr(strategy, "wick_min_move_pct", None) is not None
+            else 2.4
+        ),
+    )
+    atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
+    vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)
+    timeframe = strategy.timeframe
+    direction = strategy.direction
+    return params, atr_period, vol_period, timeframe, direction
 
 
 class WickSpikeRunner:
@@ -142,6 +174,9 @@ class WickSpikeRunner:
         last_kline_fp: dict[str, tuple] = {}
         last_bg_rest: dict[str, float] = {}
         last_near_miss_log: dict[str, float] = {}
+        # 刺破后短窗重试：sym_key → deadline；同根 K 只武装一次
+        pierce_retry_until: dict[str, float] = {}
+        pierce_retry_bar: dict[str, int] = {}
         symbols: list[str] = []
         next_refresh = 0.0
         next_strategy_reload = 0.0
@@ -158,6 +193,8 @@ class WickSpikeRunner:
         filter_strategy = None
         # 后台刷新结果槽：热循环只消费，不 await 刷池/预热
         refresh_slot: dict = {"task": None, "packed": None, "failed": False}
+        # 策略参数重载槽：热路径绝不 await DB
+        strategy_slot: dict = {"task": None, "packed": None, "stop": False}
 
         async def _bg_refresh() -> None:
             try:
@@ -173,6 +210,36 @@ class WickSpikeRunner:
             finally:
                 refresh_slot["task"] = None
 
+        async def _load_strategy_pack() -> Optional[dict]:
+            async with async_session() as session:
+                strategy = await session.get(Strategy, strategy_id)
+                if not strategy or strategy.status != "running":
+                    return None
+                if strategy.signal_source != "wick_spike":
+                    return None
+                p, ap, vp, tf, d = _wick_params_from_strategy(strategy)
+                session.expunge(strategy)
+                return {
+                    "params": p,
+                    "atr_period": ap,
+                    "vol_period": vp,
+                    "timeframe": tf,
+                    "direction": d,
+                    "filter_strategy": strategy,
+                }
+
+        async def _bg_strategy_reload() -> None:
+            try:
+                pack = await _load_strategy_pack()
+                if pack is None:
+                    strategy_slot["stop"] = True
+                else:
+                    strategy_slot["packed"] = pack
+            except Exception as e:
+                logger.warning("wick_spike bg strategy reload %d: %s", strategy_id, e)
+            finally:
+                strategy_slot["task"] = None
+
         async def _bg_prewarm_klines(pub, syms: list[str], tf: str) -> None:
             for sym in syms:
                 try:
@@ -187,7 +254,24 @@ class WickSpikeRunner:
             except Exception:
                 pass
 
+        def _apply_strategy_pack(pack: dict) -> None:
+            nonlocal params, atr_period, vol_period, timeframe, direction, filter_strategy
+            params = pack["params"]
+            atr_period = pack["atr_period"]
+            vol_period = pack["vol_period"]
+            timeframe = pack["timeframe"]
+            direction = pack["direction"]
+            filter_strategy = pack["filter_strategy"]
+
         try:
+            # 启动时同步加载一次策略，之后一律后台重载
+            boot = await _load_strategy_pack()
+            if boot is None:
+                strategy_log_service.info(strategy_id, "毫秒接针：策略未运行或非 wick_spike，退出")
+                return
+            _apply_strategy_pack(boot)
+            next_strategy_reload = time.time() + _STRATEGY_RELOAD_SEC
+
             while True:
                 now = time.time()
                 # 应用已完成的后台刷新（不阻塞）
@@ -209,6 +293,14 @@ class WickSpikeRunner:
                     )
                     self._fire_bg(_bg_prewarm_klines(public, list(symbols), timeframe))
 
+                # 应用后台策略重载（不阻塞）
+                spack = strategy_slot.get("packed")
+                if spack is not None:
+                    strategy_slot["packed"] = None
+                    _apply_strategy_pack(spack)
+                if strategy_slot.get("stop"):
+                    break
+
                 if now >= next_refresh:
                     next_refresh = now + _SYMBOL_REFRESH_SEC
                     t = refresh_slot.get("task")
@@ -216,6 +308,14 @@ class WickSpikeRunner:
                         refresh_slot["task"] = asyncio.create_task(_bg_refresh())
                         self._bg_tasks.add(refresh_slot["task"])
                         refresh_slot["task"].add_done_callback(self._bg_tasks.discard)
+
+                if now >= next_strategy_reload:
+                    next_strategy_reload = now + _STRATEGY_RELOAD_SEC
+                    stask = strategy_slot.get("task")
+                    if stask is None or stask.done():
+                        strategy_slot["task"] = asyncio.create_task(_bg_strategy_reload())
+                        self._bg_tasks.add(strategy_slot["task"])
+                        strategy_slot["task"].add_done_callback(self._bg_tasks.discard)
 
                 if not symbols or auth is None or public is None:
                     if refresh_slot.get("failed") and (refresh_slot.get("task") is None):
@@ -226,55 +326,20 @@ class WickSpikeRunner:
                         await asyncio.sleep(_POLL_IDLE_SEC)
                     continue
 
-                # 策略参数低频重载，避免每圈打 DB
-                if filter_strategy is None or now >= next_strategy_reload:
-                    next_strategy_reload = now + _STRATEGY_RELOAD_SEC
-                    async with async_session() as session:
-                        strategy = await session.get(Strategy, strategy_id)
-                        if not strategy or strategy.status != "running":
-                            break
-                        if strategy.signal_source != "wick_spike":
-                            break
-                        relax_flag = getattr(strategy, "wick_amp_vol_relax_enabled", None)
-                        params = WickSpikeParams(
-                            direction=strategy.direction,
-                            volume_mult=float(getattr(strategy, "wick_volume_mult", 8.0) or 0),
-                            atr_mult=float(getattr(strategy, "wick_spike_atr_mult", 5.0) or 5.0),
-                            cooldown_sec=float(getattr(strategy, "wick_cooldown_sec", 0) or 0),
-                            vol_relax_enabled=True if relax_flag is None else bool(relax_flag),
-                            vol_relax_progress_start=float(
-                                getattr(strategy, "wick_vol_relax_progress_start", 1.0) or 1.0
-                            ),
-                            vol_relax_progress_full=float(
-                                getattr(strategy, "wick_vol_relax_progress_full", 1.5) or 1.5
-                            ),
-                            vol_relax_mult=float(
-                                getattr(strategy, "wick_vol_relax_mult", 5.0) or 5.0
-                            ),
-                            min_move_pct=float(
-                                getattr(strategy, "wick_min_move_pct", 2.4)
-                                if getattr(strategy, "wick_min_move_pct", None) is not None
-                                else 2.4
-                            ),
-                        )
-                        atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
-                        vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)
-                        timeframe = strategy.timeframe
-                        direction = strategy.direction
-                        filter_strategy = strategy
-                        session.expunge(filter_strategy)
-
-                # 优先处理刚有成交的币，降低池内扫尾延迟
+                # 刺破短窗优先，其次刚有成交的币
+                retry_syms: list[str] = []
                 hot: list[str] = []
                 cold: list[str] = []
                 for sym in symbols:
                     sym_key = _norm_sym(sym)
-                    seq = price_stream_manager.seq(sym_key)
-                    if last_seq.get(sym_key) != seq:
+                    until = pierce_retry_until.get(sym_key, 0.0)
+                    if until > now:
+                        retry_syms.append(sym)
+                    elif last_seq.get(sym_key) != price_stream_manager.seq(sym_key):
                         hot.append(sym)
                     else:
                         cold.append(sym)
-                scan_order = hot + cold
+                scan_order = retry_syms + hot + cold
 
                 any_update = False
                 for sym in scan_order:
@@ -286,6 +351,12 @@ class WickSpikeRunner:
                     price_changed = last_seq.get(sym_key) != seq
                     if price_changed:
                         last_seq[sym_key] = seq
+
+                    force_retry = pierce_retry_until.get(sym_key, 0.0) > now
+                    if not force_retry and pierce_retry_until.get(sym_key, 0.0) > 0:
+                        # 窗口已过期，清理
+                        pierce_retry_until.pop(sym_key, None)
+                        pierce_retry_bar.pop(sym_key, None)
 
                     if not self._position_mgr._passes_new_entry_filters(
                         sym, filter_strategy, tick_ctx
@@ -316,7 +387,7 @@ class WickSpikeRunner:
                     except (TypeError, ValueError, IndexError):
                         continue
                     kline_changed = last_kline_fp.get(sym_key) != fp
-                    if not price_changed and not kline_changed:
+                    if not price_changed and not kline_changed and not force_retry:
                         continue
                     last_kline_fp[sym_key] = fp
                     any_update = True
@@ -344,11 +415,32 @@ class WickSpikeRunner:
                         trade_low=price_stream_manager.bar_low(sym_key),
                     )
 
+                    # 换根 K：清空刺破短窗
+                    if pierce_retry_bar.get(sym_key) not in (None, snap.bar_open_ts):
+                        pierce_retry_until.pop(sym_key, None)
+                        pierce_retry_bar.pop(sym_key, None)
+                        force_retry = False
+
                     st = states.setdefault(sym_key, WickSymbolState())
                     now_ms = int(time.time() * 1000)
                     t_signal0 = time.perf_counter()
                     signal = on_tick(st, params, snap, price, now_ms)
                     if signal is None:
+                        view = pierce_vol_view(params, snap, st, price)
+                        if (
+                            view
+                            and view.pierced
+                            and not view.vol_hot
+                            and st.triggered_bar_ts != snap.bar_open_ts
+                        ):
+                            # 同根只武装一次短窗
+                            if pierce_retry_bar.get(sym_key) != snap.bar_open_ts:
+                                pierce_retry_until[sym_key] = now + _PIERCE_RETRY_SEC
+                                pierce_retry_bar[sym_key] = snap.bar_open_ts
+                        elif view is None or not view.pierced:
+                            pierce_retry_until.pop(sym_key, None)
+                            pierce_retry_bar.pop(sym_key, None)
+
                         if now - last_near_miss_log.get(sym_key, 0.0) >= _NEAR_MISS_LOG_SEC:
                             diag = near_miss_diag(params, snap, st, price)
                             if diag:
@@ -378,14 +470,19 @@ class WickSpikeRunner:
                         signal_detect_perf=t_signal0,
                     )
                     if outcome == "opened":
+                        pierce_retry_until.pop(sym_key, None)
+                        pierce_retry_bar.pop(sym_key, None)
                         mark_bar_triggered(st, params, snap.bar_open_ts, now_ms)
                         next_refresh = min(next_refresh, time.time() + 1.0)
-                    elif outcome == "busy":
-                        # tick 占锁：回滚触发标记，价仍在极值下时可在后续成交里重试
+                    elif outcome in ("busy", "retryable_fail"):
+                        # 回滚触发标记；重武装短窗，避免无新成交时被指纹门控跳过
                         release_bar_trigger(st)
-                    elif outcome == "retryable_fail":
-                        release_bar_trigger(st)
-                    # has_pos / blocked / committed_fail：保持本根已触发，避免重复市价单
+                        pierce_retry_until[sym_key] = time.time() + _PIERCE_RETRY_SEC
+                        pierce_retry_bar[sym_key] = snap.bar_open_ts
+                    else:
+                        # has_pos / blocked / committed_fail：保持本根已触发，清短窗
+                        pierce_retry_until.pop(sym_key, None)
+                        pierce_retry_bar.pop(sym_key, None)
 
                 if not any_update:
                     await asyncio.sleep(_POLL_IDLE_SEC)
