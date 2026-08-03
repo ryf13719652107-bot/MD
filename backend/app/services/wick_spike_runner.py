@@ -675,7 +675,7 @@ class WickSpikeRunner:
                     logger.info(
                         "wick_spike opened strategy=%d %s open_api_ms=%.0f "
                         "signal_to_order_ms=%.0f trade_age_ms=%d "
-                        "px=%.6g open=%.6g ext=%.6g "
+                        "px=%.6g open=%.6g ext=%.6g atrN=%.6g "
                         "progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g",
                         strategy_id,
                         symbol,
@@ -685,6 +685,7 @@ class WickSpikeRunner:
                         price,
                         snap.bar_open,
                         extreme,
+                        n,
                         progress,
                         gap,
                         vol_ratio,

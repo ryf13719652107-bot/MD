@@ -398,6 +398,18 @@ export default function WickStatsPage() {
                         <th className="text-right px-2 py-2" title="账户下单锁 + 交易所 API">
                           下单ms
                         </th>
+                        <th className="text-right px-2 py-2" title="触发时成交量 / SMA">
+                          量能×
+                        </th>
+                        <th className="text-right px-2 py-2" title="当时量能门槛">
+                          门槛×
+                        </th>
+                        <th className="text-right px-2 py-2" title="刺破进度 progress">
+                          progress
+                        </th>
+                        <th className="text-right px-2 py-2" title="刺破阈值 N = ATR × 倍数（价格）">
+                          atrN
+                        </th>
                         <th className="text-right px-2 py-2" title="信号触发价相对触发时极值">
                           触发贴尖%
                         </th>
@@ -412,7 +424,7 @@ export default function WickStatsPage() {
                     <tbody>
                       {(oq.rows || []).length === 0 ? (
                         <tr>
-                          <td colSpan={11} className="px-3 py-8 text-center text-gray-600">
+                          <td colSpan={15} className="px-3 py-8 text-center text-gray-600">
                             无开仓可对齐（需有 opened 日志）
                           </td>
                         </tr>
@@ -428,6 +440,18 @@ export default function WickStatsPage() {
                             </td>
                             <td className="px-2 py-1.5 text-right font-mono">
                               {r.open_api_ms == null ? '-' : Math.round(r.open_api_ms)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono text-amber-300">
+                              {r.vol_x == null ? '-' : r.vol_x.toFixed(2)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono">
+                              {r.need_x == null ? '-' : r.need_x.toFixed(2)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono">
+                              {r.progress == null ? '-' : r.progress.toFixed(2)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono">
+                              {r.atr_n == null ? '-' : r.atr_n.toPrecision(4)}
                             </td>
                             <td className="px-2 py-1.5 text-right font-mono">
                               {r.tip_gap_at_trigger_pct == null ? '-' : r.tip_gap_at_trigger_pct.toFixed(3)}

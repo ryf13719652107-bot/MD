@@ -56,6 +56,11 @@ class OpenOutcome:
     final_tip_gap_pct: float | None
     wick_range_pct: float | None
     capture_ratio: float | None  # 1=贴最终针尖，0=停在开盘
+    # 信号条件（触发瞬间）
+    vol_x: float | None = None
+    need_x: float | None = None
+    progress: float | None = None
+    atr_n: float | None = None  # N=ATR×倍数
     # 速度（ms）
     trade_age_ms: int | None = None
     detect_to_lock_ms: float | None = None
@@ -72,6 +77,12 @@ class OpenOutcome:
     matched: bool = False
     kline_ok: bool = False
     note: str = ""
+
+
+def _finite_f(v: float) -> float | None:
+    if v != v:
+        return None
+    return float(v)
 
 
 def _side_zh(side: str) -> str:
@@ -384,6 +395,19 @@ async def enrich_open_outcomes(
         open_api = _finite_ms(op.open_api_ms)
         sig_ord = _finite_ms(op.signal_to_order_ms)
 
+        vol_x = _finite_f(op.vol_x)
+        need_x = _finite_f(op.need_x)
+        progress = _finite_f(op.progress)
+        atr_n = _finite_f(op.atr_n)
+        if atr_n is None and tr is not None:
+            atr_n = _finite_f(tr.atr_n)
+        if vol_x is None and tr is not None:
+            vol_x = _finite_f(tr.vol_x)
+        if need_x is None and tr is not None:
+            need_x = _finite_f(tr.need_x)
+        if progress is None and tr is not None:
+            progress = _finite_f(tr.progress)
+
         return OpenOutcome(
             ts=op.ts,
             strategy_id=op.strategy_id,
@@ -398,6 +422,10 @@ async def enrich_open_outcomes(
             final_tip_gap_pct=tip_final if tip_final == tip_final else None,
             wick_range_pct=wick if wick == wick else None,
             capture_ratio=capture if capture == capture else None,
+            vol_x=vol_x,
+            need_x=need_x,
+            progress=progress,
+            atr_n=atr_n,
             trade_age_ms=trade_age,
             detect_to_lock_ms=detect_ms,
             open_api_ms=open_api,
@@ -479,6 +507,10 @@ async def enrich_open_outcomes(
                 "final_tip_gap_pct": _round(r.final_tip_gap_pct),
                 "wick_range_pct": _round(r.wick_range_pct),
                 "capture_ratio": _round(r.capture_ratio),
+                "vol_x": _round(r.vol_x, 3),
+                "need_x": _round(r.need_x, 3),
+                "progress": _round(r.progress, 3),
+                "atr_n": _round(r.atr_n, 6),
                 "trade_age_ms": r.trade_age_ms,
                 "detect_to_lock_ms": _round(r.detect_to_lock_ms, 1),
                 "open_api_ms": _round(r.open_api_ms, 1),

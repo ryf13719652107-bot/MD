@@ -283,6 +283,10 @@ export type WickStatsOpenRow = {
   final_tip_gap_pct: number | null;
   wick_range_pct: number | null;
   capture_ratio: number | null;
+  vol_x?: number | null;
+  need_x?: number | null;
+  progress?: number | null;
+  atr_n?: number | null;
   trade_age_ms?: number | null;
   detect_to_lock_ms?: number | null;
   open_api_ms?: number | null;

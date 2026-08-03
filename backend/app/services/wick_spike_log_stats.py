@@ -42,6 +42,7 @@ _OPENED_RE = re.compile(
     + r"(?:\s+signal_to_order_ms=(?P<sig_ord>[^\s]+))?"
     + r"\s+trade_age_ms=(?P<age>-?\d+)"
     + r"(?:\s+px=(?P<px>[^\s]+)\s+open=(?P<open>[^\s]+)\s+ext=(?P<ext>[^\s]+)"
+    + r"(?:\s+atrN=(?P<atrN>[^\s]+))?"
     + r"\s+progress=(?P<progress>[^\s]+)\s+tip_gap%=(?P<tip_gap>[^\s]+))?"
     + r"\s+vol×=(?P<vol>[^\s]+)"
     + r"(?:\s+need×=(?P<need>[^\s]+))?"
@@ -103,6 +104,7 @@ class EntryRow:
     tip_gap_pct: float = float("nan")
     vol_x: float = float("nan")
     need_x: float = float("nan")
+    atr_n: float = float("nan")  # 刺破阈值 N=ATR×倍数（价格单位）
     trade_age_ms: int = -1
     open_api_ms: float = float("nan")  # 仅下单（旧字段名 open_api_db_ms 亦写入此）
     signal_to_order_ms: float = float("nan")  # 捕捉信号 → 下单返回
@@ -172,6 +174,7 @@ def parse_line(line: str) -> Optional[object]:
             tip_gap_pct=_f(m.group("tip_gap")),
             vol_x=_f(m.group("vol")),
             need_x=_f(m.group("need")),
+            atr_n=_f(m.groupdict().get("atrN")),
             trade_age_ms=int(m.group("age") or -1),
             open_api_ms=_f(m.group("open_ms")),
             signal_to_order_ms=_f(m.group("sig_ord")),
@@ -191,6 +194,7 @@ def parse_line(line: str) -> Optional[object]:
             tip_gap_pct=_f(m.group("tip_gap")),
             vol_x=_f(m.group("vol")),
             need_x=_f(m.group("need")),
+            atr_n=_f(m.group("atrN")),
             trade_age_ms=int(m.group("age") or -1),
             detect_to_lock_ms=_f(m.group("detect_ms")),
         )
