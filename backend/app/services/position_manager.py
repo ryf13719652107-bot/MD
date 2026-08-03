@@ -187,17 +187,21 @@ def _position_opened_at_from_exchange(ep: dict) -> Optional[datetime]:
 
 
 def _single_symbol_stop_loss_trigger(
-    wallet_balance: float,
+    margin_balance: float,
     symbol_floating_loss: float,
     threshold_pct: float,
 ) -> bool:
-    """Trigger when single-symbol floating loss reaches threshold % of wallet balance."""
+    """单币浮亏达到「保证金余额/权益」的 threshold_pct% 时触发。
+
+    分母必须是 extract_margin_balance（币安保证金余额 / Gate total+未实现），
+    不是可用余额，也不是不含浮盈亏的钱包余额。
+    """
     if symbol_floating_loss <= 0:
         return False
-    if wallet_balance <= 0:
+    if margin_balance <= 0:
         return False
     pct = max(0.0, float(threshold_pct or 0))
-    return symbol_floating_loss >= wallet_balance * (pct / 100.0)
+    return symbol_floating_loss >= margin_balance * (pct / 100.0)
 
 
 def _symbol_unrealized_pnl_from_exchange(
@@ -1707,33 +1711,34 @@ class PositionManager:
             else sum(float(p.unrealized_pnl or 0) for p in open_positions)
         )
         symbol_floating_loss = max(0.0, -symbol_unrealized_pnl)
-        wallet_balance = float(total_margin)
+        # total_margin 来自 tick 的 extract_margin_balance（权益，非钱包）
+        margin_balance = float(total_margin)
         threshold_pct = float(getattr(strategy, "single_symbol_stop_loss_pct", 10) or 10)
         if (
             getattr(strategy, "single_symbol_stop_loss_enabled", False)
             and (ctx is None or ctx.wallet_balance_valid)
             and _single_symbol_stop_loss_trigger(
-                wallet_balance,
+                margin_balance,
                 symbol_floating_loss,
                 threshold_pct,
             )
         ):
             logger.warning(
-                "Strategy %d: single-symbol SL triggered %s %s loss=%.4f wallet=%.4f threshold=%.4f pct=%.4f upnl_source=%s",
+                "Strategy %d: single-symbol SL triggered %s %s loss=%.4f margin=%.4f threshold=%.4f pct=%.4f upnl_source=%s",
                 strategy_id,
                 symbol,
                 pos_side,
                 symbol_floating_loss,
-                wallet_balance,
-                wallet_balance * (threshold_pct / 100.0),
+                margin_balance,
+                margin_balance * (threshold_pct / 100.0),
                 threshold_pct,
                 "exchange" if exchange_upnl is not None else "local",
             )
             strategy_log_service.warning(
                 strategy_id,
                 f"{symbol} 单币止损触发 — 浮亏 {symbol_floating_loss:.2f}U / "
-                f"保证金余额 {wallet_balance:.2f}U / "
-                f"阈值 {wallet_balance * (threshold_pct / 100.0):.2f}U",
+                f"保证金余额 {margin_balance:.2f}U / "
+                f"阈值 {margin_balance * (threshold_pct / 100.0):.2f}U",
             )
             close_reason = "single_symbol_stop_loss"
         elif strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
