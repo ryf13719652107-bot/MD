@@ -12,6 +12,27 @@ function formatUsd(n: number) {
   return `${sign}$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+/** 按复利把区间回报折算为预估年化 / 月化（样本越短波动越大）。 */
+function estimateAnnualMonthly(
+  returnPct: number,
+  elapsedDays: number,
+): { annual: number; monthly: number } | null {
+  if (!(elapsedDays > 0) || !Number.isFinite(returnPct)) return null;
+  // 至少约 1 小时，避免除零/爆炸
+  const days = Math.max(elapsedDays, 1 / 24);
+  const r = returnPct / 100;
+  if (r <= -1) return { annual: -100, monthly: -100 };
+  const annual = (Math.pow(1 + r, 365 / days) - 1) * 100;
+  const monthly = (Math.pow(1 + r, 30 / days) - 1) * 100;
+  if (!Number.isFinite(annual) || !Number.isFinite(monthly)) return null;
+  return { annual, monthly };
+}
+
+function formatSignedPct(n: number, digits = 1) {
+  const capped = Math.max(-9999, Math.min(9999, n));
+  return `${capped >= 0 ? '+' : ''}${capped.toFixed(digits)}%`;
+}
+
 function nearestPointByUnix(pts: EquitySeriesPoint[], tUnix: number): EquitySeriesPoint | null {
   if (!pts.length) return null;
   const best = pts.reduce((a, b) => (Math.abs(b.t_unix - tUnix) < Math.abs(a.t_unix - tUnix) ? b : a));
@@ -220,22 +241,44 @@ export default function StrategyEquityPanel({ accountId }: { accountId: number |
   };
 
   const s = data?.summary;
+  const pts = data?.points ?? [];
+  const elapsedDays =
+    pts.length >= 2 ? (pts[pts.length - 1].t_unix - pts[0].t_unix) / 86400 : 0;
+  const annMon =
+    s != null && elapsedDays > 0
+      ? estimateAnnualMonthly(s.return_pct, elapsedDays)
+      : null;
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
-        <button
-          type="button"
-          onClick={() => {
-            setPanelOpen((v) => !v);
-            setCrosshairTip(null);
-          }}
-          className="flex items-center gap-2 text-gray-200 text-sm font-semibold text-left hover:text-white shrink-0"
-        >
-          {panelOpen ? <ChevronDown size={18} className="text-gray-500 shrink-0" /> : <ChevronRight size={18} className="text-gray-500 shrink-0" />}
-          <LineChart size={18} className="text-emerald-400/90 shrink-0" />
-          <span>策略收益</span>
-        </button>
+        <div className="flex items-center gap-3 min-w-0 flex-wrap">
+          <button
+            type="button"
+            onClick={() => {
+              setPanelOpen((v) => !v);
+              setCrosshairTip(null);
+            }}
+            className="flex items-center gap-2 text-gray-200 text-sm font-semibold text-left hover:text-white shrink-0"
+          >
+            {panelOpen ? <ChevronDown size={18} className="text-gray-500 shrink-0" /> : <ChevronRight size={18} className="text-gray-500 shrink-0" />}
+            <LineChart size={18} className="text-emerald-400/90 shrink-0" />
+            <span>策略收益</span>
+          </button>
+          {annMon && (
+            <span className="text-xs text-gray-500 whitespace-nowrap" title="按当前区间回报复利折算，样本越短波动越大">
+              预估年化{' '}
+              <span className={`font-mono font-medium ${annMon.annual >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {formatSignedPct(annMon.annual)}
+              </span>
+              <span className="text-gray-600 mx-1.5">·</span>
+              月化{' '}
+              <span className={`font-mono font-medium ${annMon.monthly >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {formatSignedPct(annMon.monthly)}
+              </span>
+            </span>
+          )}
+        </div>
         {panelOpen && (
           <div className="flex flex-wrap items-center gap-2">
             <div className="inline-flex rounded-md border border-gray-700 overflow-hidden text-xs">

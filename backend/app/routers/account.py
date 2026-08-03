@@ -63,6 +63,14 @@ async def create_account(data: AccountCreate, request: Request, db: AsyncSession
     await db.commit()
     await db.refresh(account)
 
+    # 立刻打快照+基准=当前余额；不拉充提（建账前资金算本金）。游标拨到下一整点，从下小时起再同步划转。
+    try:
+        await _seed_account_equity_snapshot(db, account)
+        await db.commit()
+    except Exception as e:
+        logger.warning("seed equity after create account %s failed: %s", account.id, e)
+        await db.rollback()
+
     return AccountResponse(
         id=account.id,
         name=account.name,
@@ -73,6 +81,59 @@ async def create_account(data: AccountCreate, request: Request, db: AsyncSession
         created_at=account.created_at,
         updated_at=account.updated_at,
     )
+
+
+async def _seed_account_equity_snapshot(db: AsyncSession, account: Account) -> None:
+    """新建账户：只写当前余额快照与基准，不请求充提流水。"""
+    from ..config import now_beijing
+    from ..models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline
+    from ..services.exchange_factory import extract_margin_balance, get_exchange_for_account
+    from ..services.equity_cashflow import beijing_naive_to_ms
+
+    now = now_beijing()
+    snap_at = now.replace(microsecond=0)
+    # 游标=建账时刻：此刻不拉流水；之后同步从该时刻起算。
+    # 勿拨到下一整点，否则建账→下一整点之间的充提会漏同步，被当成交易盈利。
+    account.cashflow_sync_cursor_ms = beijing_naive_to_ms(snap_at)
+
+    client = await get_exchange_for_account(account)
+    balance = await client.fetch_balance()
+    total = extract_margin_balance(client, balance)
+    if total <= 0:
+        total = float(balance.get("total", {}).get("USDT", 0) or 0)
+
+    existing = (
+        await db.execute(
+            select(AccountBalanceSnapshot).where(
+                AccountBalanceSnapshot.account_id == account.id,
+                AccountBalanceSnapshot.snapshot_at == snap_at,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        existing.total_usdt = total
+    else:
+        db.add(
+            AccountBalanceSnapshot(
+                account_id=account.id,
+                snapshot_at=snap_at,
+                total_usdt=total,
+            )
+        )
+
+    bl = (
+        await db.execute(
+            select(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account.id)
+        )
+    ).scalar_one_or_none()
+    if bl is None:
+        db.add(
+            AccountEquityBaseline(
+                account_id=account.id,
+                baseline_total_usdt=float(total),
+                set_at=now,
+            )
+        )
 
 
 @router.get("", response_model=list[AccountResponse])

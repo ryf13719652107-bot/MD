@@ -21,7 +21,11 @@ async def run_hourly_equity_snapshots() -> None:
     async with async_session() as session:
         accounts = (await session.execute(select(Account).order_by(Account.id))).scalars().all()
 
-    hour_floor = now_beijing().replace(minute=0, second=0, microsecond=0)
+    now = now_beijing()
+    # 快照时间用实际采样时刻（到秒），勿用整点标签：余额是「现在」的，
+    # 若标成 hour_floor，本小时充值会晚一拍才进入校正，隐式基准被抬高后收益率变负。
+    snap_at = now.replace(microsecond=0)
+    hour_floor = now.replace(minute=0, second=0, microsecond=0)
 
     for account in accounts:
         try:
@@ -39,7 +43,7 @@ async def run_hourly_equity_snapshots() -> None:
         async with async_session() as session:
             stmt = select(AccountBalanceSnapshot).where(
                 AccountBalanceSnapshot.account_id == account.id,
-                AccountBalanceSnapshot.snapshot_at == hour_floor,
+                AccountBalanceSnapshot.snapshot_at == snap_at,
             )
             row = (await session.execute(stmt)).scalar_one_or_none()
             if row:
@@ -48,7 +52,7 @@ async def run_hourly_equity_snapshots() -> None:
                 session.add(
                     AccountBalanceSnapshot(
                         account_id=account.id,
-                        snapshot_at=hour_floor,
+                        snapshot_at=snap_at,
                         total_usdt=total,
                     )
                 )
@@ -68,14 +72,16 @@ async def run_hourly_equity_snapshots() -> None:
                         api_key, api_secret, acc.testnet, acc.hedge_mode
                     )
                     n = await asyncio.wait_for(
-                        sync_account_cashflows_for_hour(session, acc, binance, hour_floor),
+                        sync_account_cashflows_for_hour(
+                            session, acc, binance, hour_floor, as_of=snap_at
+                        ),
                         timeout=30.0,
                     )
                     if n:
                         logger.info(
-                            "equity cashflow synced account %s hour=%s: +%s rows",
+                            "equity cashflow synced account %s as_of=%s: +%s rows",
                             account.id,
-                            hour_floor.strftime("%Y-%m-%d %H:%M"),
+                            snap_at.strftime("%Y-%m-%d %H:%M:%S"),
                             n,
                         )
                 except Exception as e:

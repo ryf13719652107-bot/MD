@@ -19,6 +19,7 @@ from ..services.exchange_factory import (
 from ..services.binance_service import get_binance_service
 from ..services.equity_cashflow import (
     build_adjusted_points,
+    cashflows_after,
     window_deposit_withdraw,
     sync_account_cashflows_for_hour,
     cum_net_external,
@@ -63,7 +64,7 @@ async def get_equity_series(
     days: int = Query(30, ge=1, le=366),
     db: AsyncSession = Depends(get_db),
 ):
-    """收益序列：余额快照 − 已落库划转后计算回报/回撤；划转仅由整点任务按「前一小时」写入。"""
+    """收益序列：余额快照 − 已落库划转后计算回报/回撤；划转由整点任务补齐，并与快照时刻对齐。"""
     result = await db.execute(select(Account).where(Account.id == account_id))
     account = result.scalar()
     if not account:
@@ -102,14 +103,14 @@ async def get_equity_series(
         await db.execute(select(AccountEquityBaseline).where(AccountEquityBaseline.account_id == account_id))
     ).scalar_one_or_none()
 
-    # 充提展示：有显式基准时从重置时刻起算，避免重置后仍显示旧划转
-    dep_start = start
+    # 充提展示/校正：有显式基准时只认 set_at 之后的划转（建账前资金算本金）
+    cf_for_adj = cf_pairs
     if baseline_row and baseline_row.set_at is not None:
-        dep_start = max(start, baseline_row.set_at) if start else baseline_row.set_at
-    deposit_usdt, withdraw_usdt = window_deposit_withdraw(cf_pairs, dep_start)
+        cf_for_adj = cashflows_after(cf_pairs, baseline_row.set_at)
+    deposit_usdt, withdraw_usdt = window_deposit_withdraw(cf_for_adj, start)
 
     snaps_raw = [(s.snapshot_at, float(s.total_usdt)) for s in snaps]
-    adjusted = build_adjusted_points(snaps_raw, cf_pairs)
+    adjusted = build_adjusted_points(snaps_raw, cf_for_adj)
 
     if baseline_row:
         baseline = float(baseline_row.baseline_total_usdt)
@@ -179,17 +180,21 @@ async def reset_equity_baseline(
     if not account:
         raise HTTPException(status_code=404, detail="账户不存在")
 
-    hour_floor = now_beijing().replace(minute=0, second=0, microsecond=0)
+    now = now_beijing()
+    hour_floor = now.replace(minute=0, second=0, microsecond=0)
+    snap_at = now.replace(microsecond=0)
     try:
         client = await get_exchange_for_account(account)
-        # 仅币安同步划转现金流
+        # 仅币安同步划转现金流（含本小时已发生，与快照时刻对齐）
         if account_exchange_id(account) == "binance":
             api_key = decrypt(account.api_key_encrypted)
             api_secret = decrypt(account.api_secret_encrypted)
             binance = await get_binance_service(
                 api_key, api_secret, account.testnet, account.hedge_mode
             )
-            await sync_account_cashflows_for_hour(db, account, binance, hour_floor)
+            await sync_account_cashflows_for_hour(
+                db, account, binance, hour_floor, as_of=snap_at
+            )
         balance = await client.fetch_balance()
         cur_total = extract_margin_balance(client, balance)
         if cur_total <= 0:
@@ -219,7 +224,6 @@ async def reset_equity_baseline(
     )
     cum = cum_net_external((c.occurred_at, float(c.amount)) for c in all_cfs)
     adjusted_baseline = cur_total - cum
-    now = now_beijing()
 
     r_snaps = await db.execute(
         delete(AccountBalanceSnapshot).where(AccountBalanceSnapshot.account_id == account_id)
@@ -228,7 +232,6 @@ async def reset_equity_baseline(
 
     # 立刻写入/更新一条当前快照，避免「无点位时 cur_adj=0 − baseline → -100%」
     if cur_total > 0 or abs(adjusted_baseline) > 1e-12:
-        snap_at = now.replace(second=0, microsecond=0)
         existing_snap = (
             await db.execute(
                 select(AccountBalanceSnapshot).where(

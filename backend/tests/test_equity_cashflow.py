@@ -4,6 +4,7 @@ from datetime import datetime
 from app.services.equity_cashflow import (
     build_adjusted_points,
     cashflow_external_id,
+    cashflows_after,
     hour_cashflow_window,
     window_deposit_withdraw,
 )
@@ -35,6 +36,41 @@ def test_hours_to_sync_catchup_missed():
     ]
 
 
+def test_hours_to_sync_mid_hour_seed_cursor():
+    """建账 10:40：当前 10:00 整点不拉；11:00 会拉 [10:00,11:00)，建账前靠 set_at 过滤。"""
+    from app.services.equity_cashflow import _hours_to_sync, beijing_naive_to_ms
+
+    seed = beijing_naive_to_ms(datetime(2026, 8, 1, 10, 40, 0))
+    assert _hours_to_sync(datetime(2026, 8, 1, 10, 0, 0), seed) == []
+    assert _hours_to_sync(datetime(2026, 8, 1, 11, 0, 0), seed) == [
+        datetime(2026, 8, 1, 11, 0, 0)
+    ]
+
+
+def test_cashflows_after_baseline_ignores_prior_deposit():
+    t0 = datetime(2026, 8, 1, 10, 15, 0)
+    t_set = datetime(2026, 8, 1, 10, 40, 0)
+    t1 = datetime(2026, 8, 1, 12, 0, 0)
+    cfs = [(t0, 1000.0), (t1, 50.0)]
+    assert cashflows_after(cfs, t_set) == [(t1, 50.0)]
+    snaps = [(t_set, 1000.0), (t1, 1050.0)]
+    pts = build_adjusted_points(snaps, cashflows_after(cfs, t_set))
+    assert pts[0][2] == 1000.0
+    assert pts[1][2] == 1000.0
+
+
+def test_post_seed_same_hour_deposit_counts_after_set_at():
+    """建账后同小时再充值：必须计入校正，不能当盈利。"""
+    t_set = datetime(2026, 8, 1, 10, 40, 0)
+    t_dep = datetime(2026, 8, 1, 10, 50, 0)
+    t1 = datetime(2026, 8, 1, 11, 0, 25)
+    snaps = [(t_set, 1000.0), (t1, 1500.0)]
+    cfs = cashflows_after([(t_dep, 500.0)], t_set)
+    pts = build_adjusted_points(snaps, cfs)
+    assert pts[0][2] == 1000.0
+    assert pts[1][2] == 1000.0  # +500 充值被剔除
+
+
 def test_transfer_in_does_not_change_adjusted():
     t0 = datetime(2026, 7, 1, 10, 0, 0)
     t1 = datetime(2026, 7, 1, 11, 0, 0)
@@ -45,6 +81,36 @@ def test_transfer_in_does_not_change_adjusted():
     assert pts[1][1] == 350.0  # 余额上涨
     assert pts[0][2] == 300.0
     assert pts[1][2] == 300.0  # 校正权益不变
+
+
+def test_hour_floor_label_with_intrabar_deposit_looks_like_loss():
+    """旧 bug：快照标整点、余额已含本小时充值 → 下一小时扣充值后校正骤降，隐式基准下收益率变负。"""
+    t0 = datetime(2026, 8, 1, 10, 0, 0)  # 标签=整点，余额其实采自 10:25
+    t_dep = datetime(2026, 8, 1, 10, 15, 0)
+    t1 = datetime(2026, 8, 1, 11, 0, 0)
+    snaps = [(t0, 1000.0), (t1, 1000.0)]
+    cfs = [(t_dep, 1000.0)]
+    pts = build_adjusted_points(snaps, cfs)
+    assert pts[0][2] == 1000.0  # 充值时刻 > 标签，未扣
+    assert pts[1][2] == 0.0
+    baseline = pts[0][2]
+    ret = (pts[1][2] - baseline) / baseline * 100.0
+    assert ret == -100.0
+
+
+def test_actual_snap_time_keeps_deposit_neutral():
+    """修复后：快照用实际采样时刻，充值 ≤ 快照时刻，校正权益不抬高隐式基准。"""
+    t_dep = datetime(2026, 8, 1, 10, 15, 0)
+    t_snap = datetime(2026, 8, 1, 10, 25, 0)
+    t1 = datetime(2026, 8, 1, 11, 0, 25)
+    snaps = [(t_snap, 1000.0), (t1, 1000.0)]
+    cfs = [(t_dep, 1000.0)]
+    pts = build_adjusted_points(snaps, cfs)
+    assert pts[0][2] == 0.0
+    assert pts[1][2] == 0.0
+    baseline = pts[0][2]
+    # baseline≈0 时系列接口回报按 0 处理；此处校正权益保持平坦
+    assert pts[-1][2] == baseline
 
 
 def test_transfer_out_balance_drops_but_adjusted_flat():

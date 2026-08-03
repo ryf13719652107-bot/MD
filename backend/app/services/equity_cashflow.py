@@ -1,6 +1,7 @@
 """合约划转流水同步与收益曲线校正。
 
-整点快照时查询「上一小时」划转（22:00 快照 → [21:00, 22:00)）。
+整点任务仍补齐「已完成小时」划转；快照写入时额外同步本小时已发生的划转，
+且快照时间戳用实际采样时刻，避免「余额已含充值、校正却滞后」把收益率打成负数。
 校正规则：充值、提现均从回报率/盈亏/回撤中剔除；余额曲线仍用真实钱包余额。
 若中间整点任务漏跑，最多补齐最近 48 小时内未同步的小时窗，不回溯更早历史。
 """
@@ -41,7 +42,7 @@ def beijing_naive_to_ms(dt: datetime) -> int:
 
 
 def hour_cashflow_window(hour_floor: datetime) -> tuple[datetime, datetime]:
-    """22:00 快照 → 半开区间 [21:00, 22:00)，避免整点边界双计。"""
+    """22:00 快照任务 → 半开区间 [21:00, 22:00)，避免整点边界双计。"""
     end = hour_floor.replace(minute=0, second=0, microsecond=0)
     start = end - timedelta(hours=1)
     return start, end
@@ -111,21 +112,22 @@ def window_deposit_withdraw(
 
 def _hours_to_sync(hour_floor: datetime, cursor_ms: int | None) -> list[datetime]:
     """
-    需要同步的快照整点列表（每个对应其前一小时窗）。
+    需要同步的快照整点列表（每个对应其前一小时窗 [H-1h, H)）。
     - 无游标：只同步当前 hour_floor（不回溯历史）
-    - 有游标：从上次成功窗的下一小时补到 hour_floor（最多 MAX_CATCHUP_HOURS）
+    - 有游标：从游标所在小时的下一窗补到 hour_floor（最多 MAX_CATCHUP_HOURS）
+    - 游标在小时中段（建账 10:40→按 10:00）：当前整点不再重拉；下一整点会拉 [10:00,11:00)，
+      其中建账前流水靠收益序列的 set_at 过滤，建账后流水会正确计入
     """
     end = hour_floor.replace(minute=0, second=0, microsecond=0)
     if cursor_ms is None:
         return [end]
 
-    last_end = ms_to_beijing_naive(int(cursor_ms)).replace(minute=0, second=0, microsecond=0)
-    # cursor 存的是窗终点 (= 某次 hour_floor)；下一窗终点为 +1h
-    nxt = last_end + timedelta(hours=1)
-    if nxt > end:
-        # 本小时已同步过，仍再跑一次当前小时（幂等去重），防止上次部分类型失败
-        return [end]
+    cursor_at = ms_to_beijing_naive(int(cursor_ms)).replace(microsecond=0)
+    last_end = cursor_at.replace(minute=0, second=0, microsecond=0)
+    if last_end >= end:
+        return []
 
+    nxt = last_end + timedelta(hours=1)
     hours: list[datetime] = []
     cur = nxt
     while cur <= end:
@@ -133,18 +135,27 @@ def _hours_to_sync(hour_floor: datetime, cursor_ms: int | None) -> list[datetime
         cur += timedelta(hours=1)
         if len(hours) >= MAX_CATCHUP_HOURS:
             break
-    return hours or [end]
+    return hours
 
 
-async def _sync_one_hour_window(
+async def _load_known_external_ids(session: AsyncSession, account_id: int) -> set[str]:
+    existing = (
+        await session.execute(
+            select(AccountCashflow.external_id).where(AccountCashflow.account_id == account_id)
+        )
+    ).scalars().all()
+    return set(existing)
+
+
+async def _sync_cashflow_window(
     session: AsyncSession,
     account: Account,
     binance,
-    hour_floor: datetime,
+    window_start: datetime,
+    window_end: datetime,
     known: set[str],
 ) -> tuple[int, bool]:
-    """同步单个小时窗。返回 (新写入数, 是否至少一次 API 成功)。"""
-    window_start, window_end = hour_cashflow_window(hour_floor)
+    """同步半开区间 [window_start, window_end) 的划转。返回 (新写入数, 是否至少一次 API 成功)。"""
     start_ms = beijing_naive_to_ms(window_start)
     # 半开 [start, end)：币安 endTime 含等号，故传 end_ms - 1
     end_ms_inclusive = beijing_naive_to_ms(window_end) - 1
@@ -180,6 +191,7 @@ async def _sync_one_hour_window(
                 break
 
             batch_max = cursor
+            end_ms_exclusive = beijing_naive_to_ms(window_end)
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -193,7 +205,7 @@ async def _sync_one_hour_window(
                 if abs(amount) < 1e-12:
                     continue
                 t_ms = int(row.get("time") or 0)
-                if t_ms < start_ms or t_ms >= beijing_naive_to_ms(window_end):
+                if t_ms < start_ms or t_ms >= end_ms_exclusive:
                     continue
                 ext_id = cashflow_external_id(row)
                 if ext_id in known:
@@ -224,25 +236,75 @@ async def _sync_one_hour_window(
     return inserted, any_ok
 
 
+async def _sync_one_hour_window(
+    session: AsyncSession,
+    account: Account,
+    binance,
+    hour_floor: datetime,
+    known: set[str],
+) -> tuple[int, bool]:
+    """同步单个已完成小时窗（hour_floor 对应前一小时）。"""
+    window_start, window_end = hour_cashflow_window(hour_floor)
+    return await _sync_cashflow_window(session, account, binance, window_start, window_end, known)
+
+
+async def sync_open_hour_cashflows_until(
+    session: AsyncSession,
+    account: Account,
+    binance,
+    as_of: datetime,
+    *,
+    known: set[str] | None = None,
+) -> int:
+    """同步本小时已发生划转到 as_of（半开 [start, as_of)），不推进 cursor。
+
+    start = max(hour_floor, cursor精确时刻)：新建账户游标=建账时刻，可跳过建账前流水，
+    且不漏掉建账后到下一整点之间的充提。
+    """
+    as_of = as_of.replace(microsecond=0)
+    hour_floor = as_of.replace(minute=0, second=0, microsecond=0)
+    start = hour_floor
+    if account.cashflow_sync_cursor_ms is not None:
+        cursor_at = ms_to_beijing_naive(int(account.cashflow_sync_cursor_ms)).replace(
+            microsecond=0
+        )
+        if cursor_at > start:
+            start = cursor_at
+    if as_of <= start:
+        return 0
+    if known is None:
+        known = await _load_known_external_ids(session, account.id)
+    n, _ok = await _sync_cashflow_window(session, account, binance, start, as_of, known)
+    return n
+
+
+def cashflows_after(
+    cashflows: Iterable[tuple[datetime, float]],
+    since: datetime | None,
+) -> list[tuple[datetime, float]]:
+    """只保留 since 之后的划转（since 为 None 则全部保留）。"""
+    if since is None:
+        return list(cashflows)
+    return [(t, amt) for t, amt in cashflows if t > since]
+
+
 async def sync_account_cashflows_for_hour(
     session: AsyncSession,
     account: Account,
     binance,
     hour_floor: datetime,
+    *,
+    as_of: datetime | None = None,
 ) -> int:
     """
     同步 hour_floor 对应前一小时划转；若有游标且中间漏跑，补齐中间小时窗（≤48h）。
+    若传入 as_of（通常为快照实际时刻），再补齐本小时 [hour_floor, as_of) 已发生划转（不推进 cursor）。
     返回新写入条数。
     """
     hour_floor = hour_floor.replace(minute=0, second=0, microsecond=0)
     hours = _hours_to_sync(hour_floor, account.cashflow_sync_cursor_ms)
 
-    existing = (
-        await session.execute(
-            select(AccountCashflow.external_id).where(AccountCashflow.account_id == account.id)
-        )
-    ).scalars().all()
-    known = set(existing)
+    known = await _load_known_external_ids(session, account.id)
 
     inserted_total = 0
     last_ok_end: datetime | None = None
@@ -257,5 +319,10 @@ async def sync_account_cashflows_for_hour(
 
     if last_ok_end is not None:
         account.cashflow_sync_cursor_ms = beijing_naive_to_ms(last_ok_end)
+
+    if as_of is not None:
+        inserted_total += await sync_open_hour_cashflows_until(
+            session, account, binance, as_of, known=known
+        )
 
     return inserted_total
