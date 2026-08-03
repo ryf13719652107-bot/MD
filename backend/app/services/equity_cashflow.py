@@ -288,6 +288,30 @@ def cashflows_after(
     return [(t, amt) for t, amt in cashflows if t > since]
 
 
+def normalize_baseline_to_gross(
+    stored_baseline: float,
+    *,
+    set_at: datetime | None,
+    cashflows: list[tuple[datetime, float]],
+    first_snap_total: float | None,
+) -> tuple[float, bool]:
+    """把旧版「校正基准」(total−历史划转) 升级为「毛余额基准」，与只扣 set_at 之后划转的新算法对齐。
+
+    返回 (baseline_gross, healed)。
+    """
+    stored = float(stored_baseline)
+    if set_at is None:
+        return stored, False
+    cf_before = cum_net_external((t, a) for t, a in cashflows if t <= set_at)
+    if abs(cf_before) < 1.0:
+        return stored, False
+    ref = float(first_snap_total) if first_snap_total is not None else stored + cf_before
+    # 旧基准≈当时校正权益（明显小于毛余额）；新种子基准≈毛余额
+    if stored < ref - abs(cf_before) * 0.35:
+        return stored + cf_before, True
+    return stored, False
+
+
 async def sync_account_cashflows_for_hour(
     session: AsyncSession,
     account: Account,

@@ -12,18 +12,16 @@ function formatUsd(n: number) {
   return `${sign}$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** 按复利把区间回报折算为预估年化 / 月化（样本越短波动越大）。 */
+/** 按线性把区间回报折算为预估年化 / 月化（短样本用复利会极端到 ±100%）。 */
 function estimateAnnualMonthly(
   returnPct: number,
   elapsedDays: number,
 ): { annual: number; monthly: number } | null {
-  if (!(elapsedDays > 0) || !Number.isFinite(returnPct)) return null;
-  // 至少约 1 小时，避免除零/爆炸
-  const days = Math.max(elapsedDays, 1 / 24);
-  const r = returnPct / 100;
-  if (r <= -1) return { annual: -100, monthly: -100 };
-  const annual = (Math.pow(1 + r, 365 / days) - 1) * 100;
-  const monthly = (Math.pow(1 + r, 30 / days) - 1) * 100;
+  if (!Number.isFinite(returnPct)) return null;
+  // 至少 1 天再显示，避免数小时样本夸张
+  if (!(elapsedDays >= 1)) return null;
+  const annual = returnPct * (365 / elapsedDays);
+  const monthly = returnPct * (30 / elapsedDays);
   if (!Number.isFinite(annual) || !Number.isFinite(monthly)) return null;
   return { annual, monthly };
 }

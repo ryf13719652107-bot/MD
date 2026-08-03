@@ -18,11 +18,12 @@ from ..services.exchange_factory import (
 )
 from ..services.binance_service import get_binance_service
 from ..services.equity_cashflow import (
+    beijing_naive_to_ms,
     build_adjusted_points,
     cashflows_after,
     window_deposit_withdraw,
     sync_account_cashflows_for_hour,
-    cum_net_external,
+    normalize_baseline_to_gross,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,21 @@ async def get_equity_series(
     adjusted = build_adjusted_points(snaps_raw, cf_for_adj)
 
     if baseline_row:
-        baseline = float(baseline_row.baseline_total_usdt)
+        first_tot = float(snaps_raw[0][1]) if snaps_raw else None
+        baseline, healed = normalize_baseline_to_gross(
+            float(baseline_row.baseline_total_usdt),
+            set_at=baseline_row.set_at,
+            cashflows=cf_pairs,
+            first_snap_total=first_tot,
+        )
+        if healed:
+            # 持久化升级，避免每次都误算成数千倍回报
+            baseline_row.baseline_total_usdt = baseline
+            try:
+                await db.commit()
+            except Exception as e:
+                logger.warning("persist healed baseline account %s: %s", account_id, e)
+                await db.rollback()
         implicit = False
         baseline_set_at = _fmt_ts(baseline_row.set_at)
     elif adjusted:
@@ -222,8 +237,11 @@ async def reset_equity_baseline(
         .scalars()
         .all()
     )
-    cum = cum_net_external((c.occurred_at, float(c.amount)) for c in all_cfs)
-    adjusted_baseline = cur_total - cum
+    # 与新建账户一致：基准用当前毛余额；之后只扣 set_at 之后的划转
+    adjusted_baseline = float(cur_total)
+    from ..services.equity_cashflow import beijing_naive_to_ms
+
+    account.cashflow_sync_cursor_ms = beijing_naive_to_ms(snap_at)
 
     r_snaps = await db.execute(
         delete(AccountBalanceSnapshot).where(AccountBalanceSnapshot.account_id == account_id)

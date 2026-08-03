@@ -6,6 +6,7 @@ from app.services.equity_cashflow import (
     cashflow_external_id,
     cashflows_after,
     hour_cashflow_window,
+    normalize_baseline_to_gross,
     window_deposit_withdraw,
 )
 
@@ -69,6 +70,23 @@ def test_post_seed_same_hour_deposit_counts_after_set_at():
     pts = build_adjusted_points(snaps, cfs)
     assert pts[0][2] == 1000.0
     assert pts[1][2] == 1000.0  # +500 充值被剔除
+
+
+def test_normalize_old_adjusted_baseline_avoids_fake_thousands_pct():
+    """旧基准=扣充提后的小数；新算法若不对齐会算出 +6000% 回报。"""
+    t_set = datetime(2026, 8, 1, 10, 0, 0)
+    cfs = [(datetime(2026, 8, 1, 9, 0, 0), 200.0)]
+    healed, did = normalize_baseline_to_gross(
+        3.0, set_at=t_set, cashflows=cfs, first_snap_total=203.0
+    )
+    assert did is True
+    assert abs(healed - 203.0) < 1e-6
+    # 新种子毛基准保持不变
+    raw, did2 = normalize_baseline_to_gross(
+        203.0, set_at=t_set, cashflows=cfs, first_snap_total=203.0
+    )
+    assert did2 is False
+    assert abs(raw - 203.0) < 1e-6
 
 
 def test_transfer_in_does_not_change_adjusted():
