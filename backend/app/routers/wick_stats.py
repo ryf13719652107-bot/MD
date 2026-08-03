@@ -75,12 +75,12 @@ async def _load_account_strategies(
         select(Strategy).where(Strategy.account_id == account_id).order_by(Strategy.id)
     )
     strategies = list(result.scalars().all())
-    group = _SIGNAL_GROUPS.get(signal_source)
     if signal_source not in _SIGNAL_GROUPS:
         raise HTTPException(
             status_code=400,
             detail="signal_source 须为 wick_spike / wavetrend / all",
         )
+    group = _SIGNAL_GROUPS[signal_source]
     if group is not None:
         strategies = [s for s in strategies if (s.signal_source or "") in group]
 
@@ -125,7 +125,9 @@ async def analyze_wick_spike_logs(
             "account_name": acc.name,
             "signal_source": signal_source,
             "strategy_ids": sorted(strategy_ids),
-            "strategies": list(meta.values()),
+            "strategies": [
+                {"id": sid, **meta[sid]} for sid in sorted(strategy_ids)
+            ],
             "log_files": [],
             "near_miss_total": 0,
             "entry_total": 0,

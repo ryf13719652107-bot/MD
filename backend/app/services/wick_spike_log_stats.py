@@ -255,16 +255,12 @@ def clear_wick_spike_lines(
             out_lines.append(line)
         if removed == 0:
             continue
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        # 必须原地截断写入：tmp+replace 会换 inode，运行中的
+        # RotatingFileHandler 仍握着旧 FD，新日志会写丢、统计读到空文件。
         try:
-            tmp.write_text("".join(out_lines), encoding="utf-8")
-            tmp.replace(path)
+            with path.open("w", encoding="utf-8", newline="") as f:
+                f.write("".join(out_lines))
         except OSError:
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except OSError:
-                pass
             continue
         files_touched += 1
         lines_removed += removed
