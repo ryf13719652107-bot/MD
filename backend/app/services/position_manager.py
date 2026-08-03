@@ -3,8 +3,9 @@ import asyncio
 import logging
 import math
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Optional, Any
-from sqlalchemy import select, func
+from sqlalchemy import select, func, inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.strategy import Strategy
 from ..models.position import Position
@@ -30,6 +31,15 @@ from .order_times import exit_time_from_order, naive_beijing_from_ms_or_s
 from .tick_context import TickContext, SignalCandidate, OpenApiResult, exchange_legs_from_positions
 
 logger = logging.getLogger(__name__)
+
+
+def strategy_signal_snapshot(strategy: Strategy) -> SimpleNamespace:
+    """拷贝策略标量，供并行扫信号使用（禁止多协程共享 session 绑定的 ORM）。"""
+    data = {
+        attr.key: getattr(strategy, attr.key)
+        for attr in sa_inspect(Strategy).mapper.column_attrs
+    }
+    return SimpleNamespace(**data)
 
 
 def _norm_sym(s: str) -> str:
@@ -866,9 +876,11 @@ class PositionManager:
 
     async def _fetch_klines_and_signal(
         self,
-        strategy: Strategy,
+        strategy: Strategy | SimpleNamespace,
         symbol: str,
         public_binance: BinanceService,
+        *,
+        mutate_strategy: bool = True,
     ) -> tuple[list, float, str, Signal, float] | None:
         strategy_id = strategy.id
         limit = self._wt_like_limit(strategy.signal_source)
@@ -881,25 +893,25 @@ class PositionManager:
         klines_signal = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
         rsi = 0.0
         signal_label = "RSI"
+        last_rsi_val: float | None = None
         if strategy.signal_source == "wick_spike":
             # 首仓由 WickSpikeRunner 负责；此处仅供持仓管理取价/K线，信号恒为中性。
             signal = Signal.NEUTRAL
             signal_label = "毫秒接针"
-            strategy.last_signal = signal.value
-            strategy.last_signal_at = now_beijing()
             try:
                 current_price = float(klines[-1][4])
             except (TypeError, ValueError, IndexError):
                 logger.warning("Strategy %d: %s invalid kline data, skipping", strategy_id, symbol)
                 strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
                 return None
+            if mutate_strategy and isinstance(strategy, Strategy):
+                strategy.last_signal = signal.value
+                strategy.last_signal_at = now_beijing()
             return klines, current_price, signal_label, signal, float(rsi or 0.0)
         if strategy.signal_source == "martingale_base":
             # 基础马丁：不看任何指标，每根 K 线开盘按策略方向直接开首单。
             signal = Signal.LONG if strategy.direction == "long" else Signal.SHORT
-            strategy.last_rsi = 0.0
-            strategy.last_signal = signal.value
-            strategy.last_signal_at = now_beijing()
+            last_rsi_val = 0.0
             rsi = 0.0
             signal_label = "基础马丁"
             strategy_log_service.info(
@@ -913,9 +925,7 @@ class PositionManager:
             if wt is None:
                 return None
             signal = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
-            strategy.last_rsi = round(wt["wt1"], 2)
-            strategy.last_signal = signal.value
-            strategy.last_signal_at = now_beijing()
+            last_rsi_val = round(wt["wt1"], 2)
             rsi = wt["wt1"]
             signal_label = "WT1"
             if signal != Signal.NEUTRAL:
@@ -930,9 +940,7 @@ class PositionManager:
             if result is None:
                 return None
             signal, wt = result
-            strategy.last_rsi = round(wt["wt1"], 2)
-            strategy.last_signal = signal.value
-            strategy.last_signal_at = now_beijing()
+            last_rsi_val = round(wt["wt1"], 2)
             rsi = wt["wt1"]
             signal_label = "趋势WT"
             st_tag = (
@@ -959,13 +967,17 @@ class PositionManager:
             if rsi is None:
                 return None
             signal = generate_signal(rsi, strategy.direction, strategy.rsi_entry_threshold)
-            strategy.last_rsi = round(rsi, 1)
-            strategy.last_signal = signal.value
-            strategy.last_signal_at = now_beijing()
+            last_rsi_val = round(rsi, 1)
             if signal != Signal.NEUTRAL:
                 strategy_log_service.info(
                     strategy_id, f"{symbol} RSI={round(rsi, 1)} 信号={signal.value}"
                 )
+
+        if mutate_strategy and isinstance(strategy, Strategy):
+            if last_rsi_val is not None:
+                strategy.last_rsi = last_rsi_val
+            strategy.last_signal = signal.value
+            strategy.last_signal_at = now_beijing()
 
         try:
             current_price = float(klines[-1][4])
@@ -993,7 +1005,7 @@ class PositionManager:
 
     async def evaluate_signal_nodb(
         self,
-        strategy: Strategy,
+        strategy: Strategy | SimpleNamespace,
         symbol: str,
         public_binance: BinanceService,
         total_margin: float,
@@ -1001,12 +1013,14 @@ class PositionManager:
     ) -> SignalCandidate | None:
         """Session-free signal scan — safe to run concurrently via asyncio.gather.
 
-        Only touches network (kline_stream) + in-memory strategy fields; no DB I/O.
+        传入 strategy_signal_snapshot() 的副本；禁止写 ORM、禁止碰 AsyncSession。
         """
         if not self._passes_new_entry_filters(symbol, strategy, ctx):
             return None
 
-        fetched = await self._fetch_klines_and_signal(strategy, symbol, public_binance)
+        fetched = await self._fetch_klines_and_signal(
+            strategy, symbol, public_binance, mutate_strategy=False
+        )
         if not fetched:
             return None
         klines, current_price, signal_label, signal, rsi = fetched
@@ -1043,8 +1057,15 @@ class PositionManager:
         leverage: float,
         ctx: TickContext,
     ) -> None:
-        strategy_id = strategy.id
+        strategy_id = int(strategy.id)
         sym_key = _norm_sym(symbol)
+        # 每次 manage 重绑 ORM，避免并行扫信号/rollback 后过期对象触发 MissingGreenlet
+        fresh = await session.get(Strategy, strategy_id)
+        if fresh is None or fresh.status != "running":
+            return
+        strategy = fresh
+        result_pos = await session.execute(self._open_positions_stmt(strategy_id, sym_key))
+        open_positions = list(result_pos.scalars().all())
 
         fetched = await self._fetch_klines_and_signal(strategy, symbol, public_binance)
         if not fetched:

@@ -40,6 +40,7 @@ from .position_manager import (
     RECONCILE_CREATED,
     RECONCILE_DB_ERROR,
     _norm_sym,
+    strategy_signal_snapshot,
 )
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem, account_sync_lock
@@ -862,12 +863,18 @@ class StrategyScheduler:
                 if eval_symbols:
                     eval_sem = asyncio.Semaphore(_SIGNAL_EVAL_CONCURRENCY)
                     order_sem = account_order_sem(sync_account_id)
+                    # 并行评估只用快照，避免与主协程 commit/rollback 争用同一 ORM
+                    strategy_snap = strategy_signal_snapshot(strategy)
 
                     async def _eval_one(sym: str):
                         async with eval_sem:
                             try:
                                 res = await self._position_mgr.evaluate_signal_nodb(
-                                    strategy, sym, public_binance, total_margin, tick_ctx,
+                                    strategy_snap,
+                                    sym,
+                                    public_binance,
+                                    total_margin,
+                                    tick_ctx,
                                 )
                                 return sym, res, None
                             except Exception as e:
