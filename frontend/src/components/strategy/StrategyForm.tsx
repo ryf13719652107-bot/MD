@@ -81,12 +81,18 @@ const WAN = 1e4;
 
 interface Props {
   accounts: Account[];
+  /** 新建时默认账户（顶栏当前账户）；编辑时忽略 */
+  defaultAccountId?: number | null;
   initialData: Strategy | null;
   onSubmit: (data: StrategyApiPayload) => void;
   onCancel: () => void;
 }
 
-function toFormDefaults(initialData: Strategy | null, accounts: Account[]): StrategyFormData {
+function toFormDefaults(
+  initialData: Strategy | null,
+  accounts: Account[],
+  defaultAccountId?: number | null,
+): StrategyFormData {
   if (initialData) {
     return {
       account_id: initialData.account_id,
@@ -151,8 +157,12 @@ function toFormDefaults(initialData: Strategy | null, accounts: Account[]): Stra
       funding_rate_threshold_pct: initialData.funding_rate_threshold_pct ?? 0,
     };
   }
+  const preferred =
+    defaultAccountId != null && accounts.some((a) => a.id === defaultAccountId)
+      ? defaultAccountId
+      : accounts[0]?.id || 0;
   return {
-    account_id: accounts[0]?.id || 0,
+    account_id: preferred,
     name: '',
     direction: 'long',
     symbol: '',
@@ -221,12 +231,24 @@ function toApiPayload(data: StrategyFormData): StrategyApiPayload {
   };
 }
 
-export default function StrategyForm({ accounts, initialData, onSubmit, onCancel }: Props) {
+export default function StrategyForm({
+  accounts,
+  defaultAccountId = null,
+  initialData,
+  onSubmit,
+  onCancel,
+}: Props) {
+  // 新建：只展示顶栏当前账户；编辑：账户字段本身不展示
+  const accountOptions =
+    !initialData && defaultAccountId != null
+      ? accounts.filter((a) => a.id === defaultAccountId)
+      : accounts;
+
   const {
     register, handleSubmit, watch, setValue, getValues, formState: { errors },
   } = useForm<StrategyFormData>({
     resolver: zodResolver(schema),
-    defaultValues: toFormDefaults(initialData, accounts),
+    defaultValues: toFormDefaults(initialData, accountOptions, defaultAccountId),
   });
 
   const direction = watch('direction', 'long');
@@ -262,12 +284,15 @@ export default function StrategyForm({ accounts, initialData, onSubmit, onCancel
             <div>
               <label className={labelClass}>交易账户</label>
               <select {...register('account_id', { valueAsNumber: true })} className={inputClass}>
-                {accounts.map((a) => (
+                {accountOptions.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name} [{a.exchange === 'gate' ? 'GATE' : '币安'}] {a.testnet ? '(测试网)' : '(实盘)'}
                   </option>
                 ))}
               </select>
+              {accountOptions.length === 0 && (
+                <p className={errorClass}>请先在顶栏选择账户</p>
+              )}
               {errors.account_id && <p className={errorClass}>{errors.account_id.message}</p>}
             </div>
           )}

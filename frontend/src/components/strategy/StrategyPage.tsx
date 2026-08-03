@@ -93,7 +93,14 @@ export default function StrategyPage() {
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">策略管理</h2>
         <button
-          onClick={() => { setEditing(null); setShowForm(true); }}
+          onClick={() => {
+            if (selectedAccountId == null) {
+              alert('请先在顶栏选择账户');
+              return;
+            }
+            setEditing(null);
+            setShowForm(true);
+          }}
           className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
         >
           <Plus size={16} />
@@ -104,6 +111,7 @@ export default function StrategyPage() {
       {showForm && (
         <StrategyForm
           accounts={accounts}
+          defaultAccountId={editing ? editing.account_id : selectedAccountId}
           initialData={editing}
           onSubmit={handleSubmit}
           onCancel={() => { setShowForm(false); setEditing(null); }}
