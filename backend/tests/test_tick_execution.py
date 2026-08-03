@@ -228,6 +228,64 @@ async def test_execute_open_api_rechecks_blacklist_before_market_order():
 
 
 @pytest.mark.asyncio
+async def test_execute_wick_open_market_skips_blacklist_and_uses_leverage_cache():
+    """接针热路径：不查黑名单；杠杆缓存命中时不打 set_leverage REST。"""
+    pm = PositionManager()
+    pm._is_blacklisted_now = AsyncMock(return_value=True)
+    strategy = MagicMock()
+    strategy.id = 9
+    strategy.leverage = 10
+    strategy.martingale_mult = 2.0
+    strategy.max_layers = 5
+    strategy.price_drop_multiplier = 1.0
+    strategy.take_profit_pct = 1.5
+    strategy.take_profit_limit_order = True
+
+    auth = _make_binance_svc()
+    auth._markets_loaded = True
+    auth._leverage_cache["ICNTUSDT"] = 10
+    auth.set_symbol_leverage = AsyncMock(return_value=(10, True))
+    auth.create_market_order = AsyncMock(
+        return_value={"id": "m1", "average": 0.5, "filled": 10.0}
+    )
+    auth.create_limit_order = AsyncMock(return_value={"id": "tp1"})
+
+    candidate = SignalCandidate(
+        symbol="ICNTUSDT",
+        signal=Signal.LONG,
+        klines=[],
+        current_price=0.5,
+        rsi=5.0,
+        signal_label="毫秒接针",
+        base_qty=10.0,
+    )
+
+    result = await pm.execute_wick_open_market(candidate, strategy, auth, 10)
+
+    assert result is not None
+    assert result.tp_limit_order_id is None
+    assert result.tp_price > 0
+    pm._is_blacklisted_now.assert_not_awaited()
+    auth.set_symbol_leverage.assert_not_awaited()
+    auth.create_market_order.assert_awaited_once()
+    auth.create_limit_order.assert_not_awaited()
+
+    # 止盈在热路径外
+    result = await pm.place_open_tp_limit(auth, strategy, result)
+    auth.create_limit_order.assert_awaited_once()
+    assert result.tp_limit_order_id == "tp1"
+
+
+@pytest.mark.asyncio
+async def test_is_leverage_cached():
+    svc = _make_binance_svc()
+    svc._leverage_cache["BTCUSDT"] = 10
+    assert svc.is_leverage_cached("BTCUSDT", 10) is True
+    assert svc.is_leverage_cached("BTCUSDT", 20) is False
+    assert svc.is_leverage_cached("ETHUSDT", 10) is False
+
+
+@pytest.mark.asyncio
 async def test_sync_account_background_calls_syncer():
     from app.services.scheduler import StrategyScheduler
 

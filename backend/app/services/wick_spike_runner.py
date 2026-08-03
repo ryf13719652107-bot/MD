@@ -1,7 +1,8 @@
 """Per-strategy millisecond wick-spike open loop (Binance only).
 
 独立于收盘 tick：仅 signal_source=wick_spike 时启动。开仓复用 PositionManager
-execute_open_api / execute_open_db，并与策略锁 / 账户下单 Semaphore 协调。
+execute_wick_open_market / place_open_tp_limit / execute_open_db，
+并与策略锁 / 账户下单 Semaphore 协调。
 """
 
 from __future__ import annotations
@@ -357,6 +358,7 @@ class WickSpikeRunner:
 
                     outcome = await self._try_open(
                         strategy_id=strategy_id,
+                        strategy=filter_strategy,
                         symbol=sym,
                         signal=signal,
                         price=price,
@@ -378,7 +380,7 @@ class WickSpikeRunner:
                         release_bar_trigger(st)
                     elif outcome == "retryable_fail":
                         release_bar_trigger(st)
-                    # has_pos / committed_fail：保持本根已触发，避免重复市价单
+                    # has_pos / blocked / committed_fail：保持本根已触发，避免重复市价单
 
                 if not any_update:
                     await asyncio.sleep(_POLL_IDLE_SEC)
@@ -529,6 +531,7 @@ class WickSpikeRunner:
         self,
         *,
         strategy_id: int,
+        strategy: Strategy,
         symbol: str,
         signal: Signal,
         price: float,
@@ -542,7 +545,10 @@ class WickSpikeRunner:
         trade_ts_ms: int = 0,
         signal_detect_perf: float = 0.0,
     ) -> str:
-        """Returns: opened | busy | has_pos | retryable_fail | committed_fail"""
+        """Returns: opened | busy | has_pos | blocked | retryable_fail | committed_fail
+
+        热路径：内存门禁 + 极简市价单；止盈/写库在成交后、不计入 open_api_ms。
+        """
         from .scheduler import strategy_scheduler
 
         lock = strategy_scheduler._get_strategy_lock(strategy_id)
@@ -556,109 +562,112 @@ class WickSpikeRunner:
             )
             return "busy"
 
-        vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
-        n = snap.atr * params.atr_mult
-        direction = (signal.value or "").lower()
-        extreme = snapshot_extreme(direction, snap, price)
-        progress = spike_progress(direction, snap.bar_open, extreme, n)
-        need = effective_volume_mult(params, progress)
-        gap = tip_gap_pct(snap.bar_open, extreme, price)
-        trade_age_ms = (
-            max(0, int(time.time() * 1000) - int(trade_ts_ms)) if trade_ts_ms > 0 else -1
-        )
-        detect_ms = (
-            (time.perf_counter() - signal_detect_perf) * 1000.0
-            if signal_detect_perf > 0
-            else -1.0
-        )
-        strategy_log_service.info(
-            strategy_id,
-            f"{symbol} 毫秒接针触发 → {signal.value} "
-            f"价={price:.6g} open={snap.bar_open:.6g} ext={extreme:.6g} "
-            f"N={n:.6g} progress={progress:.2f} tip_gap%={gap:.3f} "
-            f"ATR={snap.atr:.6g} vol×={vol_ratio:.1f} need×={need:g}",
-        )
-        logger.info(
-            "wick_spike trigger strategy=%d %s %s px=%.6g open=%.6g ext=%.6g "
-            "atrN=%.6g progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g "
-            "trade_age_ms=%d detect_to_lock_ms=%.1f",
-            strategy_id,
-            symbol,
-            signal.value,
-            price,
-            snap.bar_open,
-            extreme,
-            n,
-            progress,
-            gap,
-            vol_ratio,
-            need,
-            trade_age_ms,
-            detect_ms,
-        )
-
         try:
+            if strategy is None or getattr(strategy, "status", None) != "running":
+                return "retryable_fail"
+
+            sym_key = _norm_sym(symbol)
+            side = (signal.value or "").lower()
+            # 内存快照门禁（刷新周期内略旧；不再二次查 DB）
+            if tick_ctx.exchange_legs.get((sym_key, side), 0) > 0:
+                return "has_pos"
+            if sym_key in (tick_ctx.exclude_norm or frozenset()):
+                strategy_log_service.info(
+                    strategy_id, f"{symbol} 接针触发但命中排除/黑名单快照，跳过"
+                )
+                return "blocked"
+
+            vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
+            n = snap.atr * params.atr_mult
+            extreme = snapshot_extreme(side, snap, price)
+            progress = spike_progress(side, snap.bar_open, extreme, n)
+            need = effective_volume_mult(params, progress)
+            gap = tip_gap_pct(snap.bar_open, extreme, price)
+            trade_age_ms = (
+                max(0, int(time.time() * 1000) - int(trade_ts_ms)) if trade_ts_ms > 0 else -1
+            )
+            detect_ms = (
+                (time.perf_counter() - signal_detect_perf) * 1000.0
+                if signal_detect_perf > 0
+                else -1.0
+            )
+            strategy_log_service.info(
+                strategy_id,
+                f"{symbol} 毫秒接针触发 → {signal.value} "
+                f"价={price:.6g} open={snap.bar_open:.6g} ext={extreme:.6g} "
+                f"N={n:.6g} progress={progress:.2f} tip_gap%={gap:.3f} "
+                f"ATR={snap.atr:.6g} vol×={vol_ratio:.1f} need×={need:g}",
+            )
+            logger.info(
+                "wick_spike trigger strategy=%d %s %s px=%.6g open=%.6g ext=%.6g "
+                "atrN=%.6g progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g "
+                "trade_age_ms=%d detect_to_lock_ms=%.1f",
+                strategy_id,
+                symbol,
+                signal.value,
+                price,
+                snap.bar_open,
+                extreme,
+                n,
+                progress,
+                gap,
+                vol_ratio,
+                need,
+                trade_age_ms,
+                detect_ms,
+            )
+
+            base_qty = self._position_mgr._compute_base_qty(strategy, total_margin, price)
+            if base_qty is None:
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 接针无法开仓 — 余额无效"
+                )
+                return "retryable_fail"
+
+            candidate = SignalCandidate(
+                symbol=symbol,
+                signal=signal,
+                klines=[],
+                current_price=price,
+                rsi=float(vol_ratio),
+                signal_label="毫秒接针",
+                base_qty=base_qty,
+            )
+
+            # 仅统计市价下单（含账户锁 + 必要时设杠杆），不含止盈/写库
+            order_sem = account_order_sem(strategy.account_id)
+            t_api0 = time.perf_counter()
+            async with order_sem:
+                api_res = await self._position_mgr.execute_wick_open_market(
+                    candidate, strategy, auth, leverage
+                )
+            t_filled = time.perf_counter()
+            open_api_ms = (t_filled - t_api0) * 1000.0
+            signal_to_order_ms = (
+                (t_filled - signal_detect_perf) * 1000.0
+                if signal_detect_perf > 0
+                else -1.0
+            )
+            if api_res is None:
+                return "retryable_fail"
+
+            # 成交后：挂止盈 + 写库（不计入 open_api_ms）
+            api_res = await self._position_mgr.place_open_tp_limit(auth, strategy, api_res)
+
             async with async_session() as session:
-                strategy = await session.get(Strategy, strategy_id)
-                if not strategy or strategy.status != "running":
-                    return "retryable_fail"
-                sym_key = _norm_sym(symbol)
-                existing = list(
-                    (
-                        await session.execute(
-                            select(Position).where(
-                                Position.strategy_id == strategy_id,
-                                Position.closed_at.is_(None),
-                            )
-                        )
-                    ).scalars().all()
-                )
-                if any(_norm_sym(p.symbol) == sym_key for p in existing):
-                    return "has_pos"
-
-                base_qty = self._position_mgr._compute_base_qty(strategy, total_margin, price)
-                if base_qty is None:
-                    strategy_log_service.warning(
-                        strategy_id, f"{symbol} 接针无法开仓 — 余额无效"
+                db_strategy = await session.get(Strategy, strategy_id)
+                if not db_strategy or db_strategy.status != "running":
+                    strategy_log_service.error(
+                        strategy_id,
+                        f"{symbol} 接针已成交但策略状态异常 — 请手动检查交易所",
                     )
-                    return "retryable_fail"
-
-                strategy.last_signal = signal.value
-                strategy.last_signal_at = now_beijing()
-                strategy.last_rsi = round(vol_ratio, 2)
-
-                candidate = SignalCandidate(
-                    symbol=symbol,
-                    signal=signal,
-                    klines=[],
-                    current_price=price,
-                    rsi=float(vol_ratio),
-                    signal_label="毫秒接针",
-                    base_qty=base_qty,
-                )
-
-                # 只统计影响成交的下单耗时（含账户下单锁等待），不含写库
-                order_sem = account_order_sem(strategy.account_id)
-                t_api0 = time.perf_counter()
-                async with order_sem:
-                    api_res = await self._position_mgr.execute_open_api(
-                        candidate, strategy, auth, leverage
-                    )
-                t_filled = time.perf_counter()
-                open_api_ms = (t_filled - t_api0) * 1000.0
-                # 捕捉信号 → 交易所下单返回（不含写库）
-                signal_to_order_ms = (
-                    (t_filled - signal_detect_perf) * 1000.0
-                    if signal_detect_perf > 0
-                    else -1.0
-                )
-                if api_res is None:
-                    await session.rollback()
-                    return "retryable_fail"
+                    return "committed_fail"
+                db_strategy.last_signal = signal.value
+                db_strategy.last_signal_at = now_beijing()
+                db_strategy.last_rsi = round(vol_ratio, 2)
                 try:
-                    await self._position_mgr.execute_open_db(session, strategy, api_res)
+                    await self._position_mgr.execute_open_db(session, db_strategy, api_res)
                     await session.commit()
-                    side = signal.value
                     tick_ctx.exchange_legs[(sym_key, side)] = (
                         tick_ctx.exchange_legs.get((sym_key, side), 0)
                         + float(api_res.filled_qty or 0)

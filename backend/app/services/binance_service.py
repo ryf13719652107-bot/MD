@@ -534,6 +534,12 @@ class BinanceService:
         except Exception:
             return None
 
+    def is_leverage_cached(self, symbol: str, leverage: int) -> bool:
+        """True if in-memory cache already has the target leverage (no REST)."""
+        lev = max(1, min(125, int(leverage)))
+        bin_sym = self._binance_futures_symbol_id(symbol)
+        return self._leverage_cache.get(bin_sym) == lev
+
     async def set_symbol_leverage(self, symbol: str, leverage: int) -> tuple[int, bool]:
         """
         Set USDT-M contract leverage on Binance for symbol (POST /fapi/v1/leverage).

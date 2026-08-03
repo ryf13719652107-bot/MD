@@ -1086,6 +1086,155 @@ class PositionManager:
             ).first()
         return row is not None
 
+    async def _ensure_leverage_before_open(
+        self,
+        auth_binance: BinanceService,
+        strategy_id: int,
+        symbol: str,
+        lev_int: int,
+        *,
+        quiet_cache_hit: bool = False,
+    ) -> bool:
+        """设杠杆；成功 True。quiet_cache_hit=True 时缓存命中不打策略日志、不走多余路径噪音。"""
+        try:
+            await auth_binance.ensure_markets_loaded()
+            if quiet_cache_hit and auth_binance.is_leverage_cached(symbol, lev_int):
+                return True
+            applied, leverage_cache_hit = await auth_binance.set_symbol_leverage(symbol, lev_int)
+            if leverage_cache_hit:
+                if not quiet_cache_hit:
+                    strategy_log_service.info(strategy_id, f"{symbol} 杠杆缓存命中 {applied}x")
+            else:
+                strategy_log_service.info(strategy_id, f"{symbol} 已设置交易所杠杆 {applied}x")
+            return True
+        except Exception as e:
+            logger.error("Strategy %d: set leverage for %s failed: %s", strategy_id, symbol, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 设置杠杆失败，已取消开仓 — {e}")
+            return False
+
+    async def place_open_tp_limit(
+        self,
+        auth_binance: BinanceService,
+        strategy: Strategy,
+        result: OpenApiResult,
+    ) -> OpenApiResult:
+        """市价成交后挂止盈限价（不计入接针 open_api_ms）。"""
+        if not strategy.take_profit_limit_order or result.tp_price <= 0:
+            return result
+        strategy_id = strategy.id
+        symbol = result.symbol
+        close_side = "sell" if result.position_side == "long" else "buy"
+        tp_placed = False
+        tp_limit_order_id: str | None = None
+        for attempt in range(2):
+            try:
+                tp_order = await auth_binance.create_limit_order(
+                    symbol,
+                    close_side,
+                    result.filled_qty,
+                    result.tp_price,
+                    reduce_only=_tp_limit_reduce_only(auth_binance),
+                    position_side=result.ps,
+                )
+                oid = tp_order.get("id", "")
+                if oid:
+                    tp_limit_order_id = str(oid)
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{symbol} 挂止盈限价单 @{result.tp_price:.6f} id={tp_limit_order_id}",
+                    )
+                    tp_placed = True
+                    break
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 挂止盈单异常 — 返回无id: {tp_order}"
+                )
+            except Exception as tp_err:
+                logger.error(
+                    "Strategy %d: TP limit order failed for %s (attempt %d): %s",
+                    strategy_id, symbol, attempt + 1, tp_err,
+                )
+                if attempt == 0:
+                    await asyncio.sleep(0.5)
+        if not tp_placed:
+            strategy_log_service.warning(
+                strategy_id, f"{symbol} 止盈挂单失败(已重试) — 下次tick将用市价止盈兜底"
+            )
+        result.tp_limit_order_id = tp_limit_order_id
+        return result
+
+    async def execute_wick_open_market(
+        self,
+        candidate: SignalCandidate,
+        strategy: Strategy,
+        auth_binance: BinanceService,
+        leverage: float,
+    ) -> OpenApiResult | None:
+        """接针热路径：仅市价开仓（杠杆仅缓存未命中时设置；无黑名单/止盈）。"""
+        strategy_id = strategy.id
+        symbol = candidate.symbol
+        signal = candidate.signal
+        base_qty = candidate.base_qty
+        current_price = candidate.current_price
+
+        side = "buy" if signal == Signal.LONG else "sell"
+        ps = "LONG" if signal == Signal.LONG else "SHORT"
+        position_side = "long" if side == "buy" else "short"
+        lev_int = max(1, min(125, int(leverage or strategy.leverage or 10)))
+
+        if not await self._ensure_leverage_before_open(
+            auth_binance, strategy_id, symbol, lev_int, quiet_cache_hit=True
+        ):
+            return None
+
+        try:
+            order = await auth_binance.create_market_order(
+                symbol, side, base_qty, position_side=ps,
+            )
+            avg_price = float(order.get("average") or order.get("price") or 0)
+            if avg_price <= 0:
+                avg_price = current_price
+                logger.warning(
+                    "Strategy %d: %s order filled but no average/price in response, using kline close",
+                    strategy_id, symbol,
+                )
+            filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
+        except Exception as e:
+            logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
+            strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
+            return None
+
+        strategy_log_service.success(
+            strategy_id,
+            f"{symbol} 市价开{position_side}已成交 qty={filled_qty:.4f} "
+            f"price={avg_price:.4f} {_open_signal_log_suffix(candidate.signal_label, candidate.rsi)}",
+        )
+
+        eng = MartingaleEngine(
+            base_quantity=filled_qty,
+            multiplier=strategy.martingale_mult,
+            max_layers=strategy.max_layers,
+            price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0),
+            take_profit_pct=strategy.take_profit_pct,
+        )
+        tp_price = eng.get_take_profit_price(avg_price, position_side)
+
+        return OpenApiResult(
+            symbol=symbol,
+            signal=signal,
+            base_qty=base_qty,
+            current_price=current_price,
+            rsi=candidate.rsi,
+            signal_label=candidate.signal_label,
+            side=side,
+            position_side=position_side,
+            ps=ps,
+            order=order,
+            avg_price=avg_price,
+            filled_qty=filled_qty,
+            tp_price=tp_price,
+            tp_limit_order_id=None,
+        )
+
     async def execute_open_api(
         self,
         candidate: SignalCandidate,
@@ -1104,16 +1253,9 @@ class PositionManager:
         position_side = "long" if side == "buy" else "short"
 
         lev_int = max(1, min(125, int(leverage or strategy.leverage or 10)))
-        try:
-            await auth_binance.ensure_markets_loaded()
-            applied, leverage_cache_hit = await auth_binance.set_symbol_leverage(symbol, lev_int)
-            if leverage_cache_hit:
-                strategy_log_service.info(strategy_id, f"{symbol} 杠杆缓存命中 {applied}x")
-            else:
-                strategy_log_service.info(strategy_id, f"{symbol} 已设置交易所杠杆 {applied}x")
-        except Exception as e:
-            logger.error("Strategy %d: set leverage for %s failed: %s", strategy_id, symbol, e)
-            strategy_log_service.error(strategy_id, f"{symbol} 设置杠杆失败，已取消开仓 — {e}")
+        if not await self._ensure_leverage_before_open(
+            auth_binance, strategy_id, symbol, lev_int, quiet_cache_hit=False
+        ):
             return None
 
         try:
@@ -1172,45 +1314,8 @@ class PositionManager:
             take_profit_pct=strategy.take_profit_pct,
         )
         tp_price = eng.get_take_profit_price(avg_price, position_side)
-        tp_limit_order_id: str | None = None
 
-        if strategy.take_profit_limit_order and tp_price > 0:
-            close_side = "sell" if position_side == "long" else "buy"
-            tp_placed = False
-            for attempt in range(2):
-                try:
-                    tp_order = await auth_binance.create_limit_order(
-                        symbol,
-                        close_side,
-                        filled_qty,
-                        tp_price,
-                        reduce_only=_tp_limit_reduce_only(auth_binance),
-                        position_side=ps,
-                    )
-                    oid = tp_order.get("id", "")
-                    if oid:
-                        tp_limit_order_id = str(oid)
-                        strategy_log_service.info(
-                            strategy_id, f"{symbol} 挂止盈限价单 @{tp_price:.6f} id={tp_limit_order_id}"
-                        )
-                        tp_placed = True
-                        break
-                    strategy_log_service.warning(
-                        strategy_id, f"{symbol} 挂止盈单异常 — 返回无id: {tp_order}"
-                    )
-                except Exception as tp_err:
-                    logger.error(
-                        "Strategy %d: TP limit order failed for %s (attempt %d): %s",
-                        strategy_id, symbol, attempt + 1, tp_err,
-                    )
-                    if attempt == 0:
-                        await asyncio.sleep(0.5)
-            if not tp_placed:
-                strategy_log_service.warning(
-                    strategy_id, f"{symbol} 止盈挂单失败(已重试) — 下次tick将用市价止盈兜底"
-                )
-
-        return OpenApiResult(
+        result = OpenApiResult(
             symbol=symbol,
             signal=signal,
             base_qty=base_qty,
@@ -1224,8 +1329,9 @@ class PositionManager:
             avg_price=avg_price,
             filled_qty=filled_qty,
             tp_price=tp_price,
-            tp_limit_order_id=tp_limit_order_id,
+            tp_limit_order_id=None,
         )
+        return await self.place_open_tp_limit(auth_binance, strategy, result)
 
     async def execute_open_db(
         self,
