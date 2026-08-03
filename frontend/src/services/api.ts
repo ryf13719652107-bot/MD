@@ -338,6 +338,8 @@ export type WickStatsAnalysis = {
   tip_gap_trigger?: WickStatsSummary;
   trade_age_ms?: WickStatsSummary;
   detect_to_lock_ms?: WickStatsSummary;
+  open_api_ms?: WickStatsSummary;
+  /** @deprecated 同 open_api_ms，兼容旧响应 */
   open_api_db_ms?: WickStatsSummary;
   speed_labels?: Record<string, string>;
   vol_blocked_deep?: {

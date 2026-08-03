@@ -48,7 +48,7 @@ def test_speed_stats_in_analysis(tmp_path):
                 "px=1.0 open=1.05 ext=0.98 atrN=0.02 progress=3.50 tip_gap%=1.9 "
                 "vol×=5.20 need×=5 trade_age_ms=20 detect_to_lock_ms=1.5",
                 "2026-08-03 10:00:01 [INFO] x: wick_spike opened strategy=10 AAAUSDT "
-                "open_api_db_ms=85 trade_age_ms=25 px=1.0 open=1.05 ext=0.98 "
+                "open_api_ms=85 trade_age_ms=25 px=1.0 open=1.05 ext=0.98 "
                 "progress=3.50 tip_gap%=1.9 vol×=5.20 need×=5",
             ]
         ),
@@ -59,12 +59,24 @@ def test_speed_stats_in_analysis(tmp_path):
     report = analyze_paths([log])
     data = build_analysis(report)
     assert data["detect_to_lock_ms"]["n"] == 1
-    assert data["open_api_db_ms"]["n"] == 1
+    assert data["open_api_ms"]["n"] == 1
+    assert data["open_api_ms"]["mean"] == 85
     assert data["trade_age_ms"]["n"] == 2
     assert "成交推送年龄" in data["text"]
-    assert "下单+写库" in data["text"]
-    assert "已刺破但量能不够" not in data["text"] or True  # may be empty reasons
+    assert "下单:" in data["text"]
+    assert "下单+写库" not in data["text"]
     assert "近失卡点" in data["text"] or "近失" in data["text"]
+
+
+def test_parse_opened_legacy_open_api_db_ms():
+    line = (
+        "2026-08-03 10:00:01 [INFO] x: wick_spike opened strategy=10 AAAUSDT "
+        "open_api_db_ms=120 trade_age_ms=25 px=1.0 open=1.05 ext=0.98 "
+        "progress=3.50 tip_gap%=1.9 vol×=5.20 need×=5"
+    )
+    row = parse_line(line)
+    assert row.kind == "opened"
+    assert abs(row.open_api_ms - 120) < 1e-9
 
 
 def test_vol_blocked_deep_filter(tmp_path):

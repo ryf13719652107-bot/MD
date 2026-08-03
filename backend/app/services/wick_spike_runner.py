@@ -597,7 +597,6 @@ class WickSpikeRunner:
             detect_ms,
         )
 
-        t_open0 = time.perf_counter()
         try:
             async with async_session() as session:
                 strategy = await session.get(Strategy, strategy_id)
@@ -638,11 +637,14 @@ class WickSpikeRunner:
                     base_qty=base_qty,
                 )
 
+                # 只统计影响成交的下单耗时（含账户下单锁等待），不含写库
                 order_sem = account_order_sem(strategy.account_id)
+                t_api0 = time.perf_counter()
                 async with order_sem:
                     api_res = await self._position_mgr.execute_open_api(
                         candidate, strategy, auth, leverage
                     )
+                open_api_ms = (time.perf_counter() - t_api0) * 1000.0
                 if api_res is None:
                     await session.rollback()
                     return "retryable_fail"
@@ -654,14 +656,13 @@ class WickSpikeRunner:
                         tick_ctx.exchange_legs.get((sym_key, side), 0)
                         + float(api_res.filled_qty or 0)
                     )
-                    open_ms = (time.perf_counter() - t_open0) * 1000.0
                     logger.info(
-                        "wick_spike opened strategy=%d %s open_api_db_ms=%.0f "
+                        "wick_spike opened strategy=%d %s open_api_ms=%.0f "
                         "trade_age_ms=%d px=%.6g open=%.6g ext=%.6g "
                         "progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g",
                         strategy_id,
                         symbol,
-                        open_ms,
+                        open_api_ms,
                         trade_age_ms,
                         price,
                         snap.bar_open,

@@ -297,7 +297,9 @@ export default function WickStatsPage() {
               <p className="text-xs text-gray-500">三项越低越好；成交年龄大说明推送/处理偏慢</p>
               <div className="text-sm text-gray-300">成交推送年龄：{fmtMs(data.trade_age_ms)}</div>
               <div className="text-sm text-gray-300">检出→抢锁：{fmtMs(data.detect_to_lock_ms)}</div>
-              <div className="text-sm text-gray-300">下单+写库：{fmtMs(data.open_api_db_ms)}</div>
+              <div className="text-sm text-gray-300">
+                下单：{fmtMs(data.open_api_ms ?? data.open_api_db_ms)}
+              </div>
             </div>
           </div>
 
