@@ -251,6 +251,11 @@ class WickSpikeRunner:
                             vol_relax_mult=float(
                                 getattr(strategy, "wick_vol_relax_mult", 5.0) or 5.0
                             ),
+                            min_move_pct=float(
+                                getattr(strategy, "wick_min_move_pct", 2.4)
+                                if getattr(strategy, "wick_min_move_pct", None) is not None
+                                else 2.4
+                            ),
                         )
                         atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
                         vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)

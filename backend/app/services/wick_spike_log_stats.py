@@ -78,6 +78,7 @@ class NearMissRow:
     vol_x: float
     need_x: float
     vol_hot: bool
+    amp_pct: float = float("nan")  # 极值相对开盘涨跌幅 %
 
     @property
     def tip_gap_pct(self) -> float:
@@ -88,6 +89,19 @@ class NearMissRow:
     @property
     def vol_shortfall(self) -> float:
         return self.need_x - self.vol_x
+
+    @property
+    def move_pct(self) -> float:
+        if self.amp_pct == self.amp_pct:
+            return self.amp_pct
+        if self.open <= 0:
+            return float("nan")
+        d = (self.direction or "").lower()
+        if d == "short":
+            return max(0.0, (self.ext - self.open) / self.open * 100.0)
+        if d == "long":
+            return max(0.0, (self.open - self.ext) / self.open * 100.0)
+        return abs(self.ext - self.open) / self.open * 100.0
 
 
 @dataclass
@@ -159,6 +173,7 @@ def parse_line(line: str) -> Optional[object]:
             vol_x=_f(m.group("vol")),
             need_x=_f(m.group("need")),
             vol_hot=_b(m.group("vol_hot")),
+            amp_pct=_f(m.groupdict().get("amp")),
         )
     m = _OPENED_RE.search(line)
     if m:
@@ -555,6 +570,12 @@ def _near_miss_reason_zh(r: NearMissRow) -> str:
             f"vol×={r.vol_x:.2f} < need×={r.need_x:g}"
         )
     if r.pierce and r.vol_x >= r.need_x:
+        mv = r.move_pct
+        if mv == mv:
+            return (
+                f"已刺破且量能达标但未开仓：amp%={mv:.2f}"
+                f"（可能未达最小涨跌幅/节流/占锁/同根已开）"
+            )
         return "接近触发（已刺破且量能达标，可能被节流/占锁/同根已开）"
     return "接近但未开仓（详见 progress / vol×）"
 

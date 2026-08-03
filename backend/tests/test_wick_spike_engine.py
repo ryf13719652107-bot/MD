@@ -11,6 +11,7 @@ from app.services.wick_spike_engine import (
     near_miss_diag,
     on_tick,
     release_bar_trigger,
+    spike_move_pct,
     spike_progress,
 )
 
@@ -195,3 +196,23 @@ def test_enrich_snap_prefers_trade_volume_and_high():
     state = WickSymbolState()
     params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
     assert on_tick(state, params, enriched, last_price=102.0, now_ms=1) == Signal.SHORT
+
+
+def test_min_move_pct_blocks_shallow_atr_pierce():
+    """ATR 已刺破但相对开盘涨幅不足最小门槛 → 不开仓。"""
+    state = WickSymbolState()
+    # atr=0.2 → N=1；开盘 100 刺破线 101；涨 1.5% < 默认 2.4%
+    params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0, min_move_pct=2.4)
+    snap = _snap(open_=100.0, atr=0.2, vol_now=80.0, vol_sma=10.0, high=101.5, low=100.0)
+    assert spike_move_pct("short", 100.0, 101.5) == 1.5
+    assert on_tick(state, params, snap, last_price=101.5, now_ms=1) is None
+    # 涨到 2.5% 后放行
+    snap2 = _snap(open_=100.0, atr=0.2, vol_now=80.0, vol_sma=10.0, high=102.5, low=100.0)
+    assert on_tick(state, params, snap2, last_price=102.5, now_ms=2) == Signal.SHORT
+
+
+def test_min_move_pct_zero_disables():
+    state = WickSymbolState()
+    params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0, min_move_pct=0)
+    snap = _snap(open_=100.0, atr=0.2, vol_now=80.0, vol_sma=10.0, high=101.5, low=100.0)
+    assert on_tick(state, params, snap, last_price=101.5, now_ms=1) == Signal.SHORT

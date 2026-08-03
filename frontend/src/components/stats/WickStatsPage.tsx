@@ -268,7 +268,12 @@ export default function WickStatsPage() {
                     <th className="px-2 py-1.5 text-left">类型</th>
                     <th className="px-2 py-1.5 text-left">策略</th>
                     <th className="px-2 py-1.5 text-left">方向</th>
-                    <th className="px-2 py-1.5 text-right">progress</th>
+                    <th className="px-2 py-1.5 text-right" title="刺破进度 = |极值-开盘| / atrN">
+                      progress
+                    </th>
+                    <th className="px-2 py-1.5 text-right" title="刺破阈值 N = ATR×倍数（价格单位）">
+                      atrN
+                    </th>
                     <th className="px-2 py-1.5 text-right">量能×</th>
                     <th className="px-2 py-1.5 text-right">门槛×</th>
                     <th className="px-2 py-1.5 text-left">原因</th>
@@ -297,6 +302,9 @@ export default function WickStatsPage() {
                         {r.progress == null ? '-' : r.progress.toFixed(2)}
                       </td>
                       <td className="px-2 py-1 text-right font-mono">
+                        {r.atr_n == null ? '-' : r.atr_n.toPrecision(4)}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
                         {r.vol_x == null ? '-' : r.vol_x.toFixed(2)}
                       </td>
                       <td className="px-2 py-1 text-right font-mono">
@@ -307,7 +315,7 @@ export default function WickStatsPage() {
                   ))}
                   {(symMon.rows || []).length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-2 py-6 text-center text-gray-600">
+                      <td colSpan={9} className="px-2 py-6 text-center text-gray-600">
                         无监控记录
                       </td>
                     </tr>

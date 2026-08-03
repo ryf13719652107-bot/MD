@@ -40,6 +40,10 @@ class Strategy(Base):
     wick_vol_relax_mult: Mapped[float] = mapped_column(
         Float, default=5.0, server_default="5.0"
     )
+    # 本根相对开盘最小涨跌幅 %（接针方向）；0=关闭
+    wick_min_move_pct: Mapped[float] = mapped_column(
+        Float, default=2.4, server_default="2.4"
+    )
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)

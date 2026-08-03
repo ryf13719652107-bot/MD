@@ -21,6 +21,7 @@ def test_parse_near_miss_legacy_and_new():
     assert abs(row.progress - 1.66) < 1e-9
     assert abs(row.vol_x - 4.9) < 1e-9
     assert row.vol_hot is False
+    assert abs(row.amp_pct - 6.34) < 1e-9
     assert row.tip_gap_pct > 0
 
 

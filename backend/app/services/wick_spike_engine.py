@@ -8,6 +8,8 @@ progress 量能放宽（可选，默认开）：
   progress < start(1.0) 不放宽；
   start→full(1.5) 时 need 从 volume_mult 线性降到 vol_relax_mult(5×)；
   progress ≥ full 时 need = vol_relax_mult。
+
+min_move_pct（默认 2.4）：本根极值相对开盘的涨跌幅 % 须 ≥ 该值才允许触发；0=关闭。
 """
 
 from __future__ import annotations
@@ -23,6 +25,9 @@ _VOL_RELAX_PROGRESS_FULL = 1.5
 _VOL_RELAX_MULT = 5.0
 
 
+_MIN_MOVE_PCT = 2.4
+
+
 @dataclass
 class WickSpikeParams:
     direction: str  # "long" | "short"
@@ -34,6 +39,8 @@ class WickSpikeParams:
     vol_relax_progress_start: float = _VOL_RELAX_PROGRESS_START
     vol_relax_progress_full: float = _VOL_RELAX_PROGRESS_FULL
     vol_relax_mult: float = _VOL_RELAX_MULT
+    # 本根相对开盘最小涨跌幅 %（0=关闭）
+    min_move_pct: float = _MIN_MOVE_PCT
 
 
 @dataclass
@@ -121,6 +128,25 @@ def spike_progress(direction: str, bar_open: float, extreme: float, n: float) ->
     if d == "long":
         return max(0.0, (bar_open - extreme) / n)
     return 0.0
+
+
+def spike_move_pct(direction: str, bar_open: float, extreme: float) -> float:
+    """本根接针方向涨跌幅 % = |极值-开盘| / 开盘 × 100。"""
+    if bar_open <= 0 or extreme <= 0:
+        return 0.0
+    d = (direction or "").lower()
+    if d == "short":
+        return max(0.0, (extreme - bar_open) / bar_open * 100.0)
+    if d == "long":
+        return max(0.0, (bar_open - extreme) / bar_open * 100.0)
+    return 0.0
+
+
+def _move_ok(params: WickSpikeParams, direction: str, bar_open: float, extreme: float) -> bool:
+    min_pct = float(params.min_move_pct or 0)
+    if min_pct <= 0:
+        return True
+    return spike_move_pct(direction, bar_open, extreme) + 1e-12 >= min_pct
 
 
 def tip_gap_pct(bar_open: float, extreme: float, entry_px: float) -> float:
@@ -217,6 +243,7 @@ def near_miss_diag(
         return None
 
     progress = spike_progress(direction, snap.bar_open, extreme, n)
+    move_pct = spike_move_pct(direction, snap.bar_open, extreme)
     need = effective_volume_mult(params, progress)
     vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
     vol_hot = _volume_hot(params, snap, volume_mult=need)
@@ -231,7 +258,7 @@ def near_miss_diag(
     return (
         f"dir={direction} px={last_price:.6g} open={snap.bar_open:.6g} "
         f"ext={extreme:.6g} thr={thr:.6g} pierce={pierced} "
-        f"atrN={n:.6g} progress={progress:.2f} "
+        f"atrN={n:.6g} progress={progress:.2f} amp%={move_pct:.2f} "
         f"vol×={vol_ratio:.2f} need×={need:g} vol_hot={vol_hot}"
     )
 
@@ -301,6 +328,8 @@ def on_tick(
     progress = spike_progress(direction, snap.bar_open, extreme, n)
     need = effective_volume_mult(params, progress)
     if not _volume_hot(params, snap, volume_mult=need):
+        return None
+    if not _move_ok(params, direction, snap.bar_open, extreme):
         return None
 
     if direction == "long":
