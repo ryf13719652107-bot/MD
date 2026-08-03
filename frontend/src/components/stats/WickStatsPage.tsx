@@ -1,6 +1,9 @@
 import { useCallback, useState } from 'react';
-import { BarChart3, Play, RefreshCw } from 'lucide-react';
+import { BarChart3, Play, RefreshCw, Trash2 } from 'lucide-react';
 import { api, type WickStatsAnalysis, type WickStatsSummary } from '../../services/api';
+import { useDashboardStore } from '../../store/dashboardStore';
+
+type SignalFilter = 'wick_spike' | 'wavetrend' | 'all';
 
 function fmtPct(s?: WickStatsSummary) {
   if (!s || !s.n) return '暂无数据';
@@ -29,20 +32,45 @@ function closeReasonZh(r: string | null | undefined) {
   return map[r] || r;
 }
 
+function strategyCell(r: {
+  strategy_id: number;
+  strategy_name?: string;
+  signal_source_zh?: string;
+}) {
+  return (
+    <div className="leading-tight">
+      <div className="font-mono text-gray-200">
+        #{r.strategy_id}
+        {r.strategy_name ? ` ${r.strategy_name}` : ''}
+      </div>
+      <div className="text-[10px] text-cyan-500/90">{r.signal_source_zh || '-'}</div>
+    </div>
+  );
+}
+
 export default function WickStatsPage() {
+  const selectedAccountId = useDashboardStore((s) => s.selectedAccountId);
+  const [signalSource, setSignalSource] = useState<SignalFilter>('wick_spike');
   const [progressMin, setProgressMin] = useState(1.5);
   const [listLimit, setListLimit] = useState(80);
   const [includeRotated, setIncludeRotated] = useState(true);
   const [enrichOpens, setEnrichOpens] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [data, setData] = useState<WickStatsAnalysis | null>(null);
   const [error, setError] = useState('');
 
   const run = useCallback(async () => {
+    if (selectedAccountId == null) {
+      setError('请先在顶栏选择账户');
+      return;
+    }
     setLoading(true);
     setError('');
     try {
       const res = await api.analyzeWickStats({
+        account_id: selectedAccountId,
+        signal_source: signalSource,
         progress_min: progressMin,
         list_limit: listLimit,
         include_rotated: includeRotated,
@@ -57,11 +85,50 @@ export default function WickStatsPage() {
     } finally {
       setLoading(false);
     }
-  }, [progressMin, listLimit, includeRotated, enrichOpens]);
+  }, [selectedAccountId, signalSource, progressMin, listLimit, includeRotated, enrichOpens]);
+
+  const clearLogs = useCallback(async () => {
+    if (selectedAccountId == null) {
+      setError('请先在顶栏选择账户');
+      return;
+    }
+    const srcLabel =
+      signalSource === 'wick_spike'
+        ? '接针策略'
+        : signalSource === 'wavetrend'
+          ? 'WaveTrend 策略'
+          : '该账户全部策略';
+    if (
+      !confirm(
+        `确定删除顶栏账户 ID ${selectedAccountId} 下「${srcLabel}」在服务器 bot.log 中的接针日志行吗？\n` +
+          '同时会清空对应策略的内存日志。\n' +
+          '成交记录（trades）不会删除；如需清空请到交易历史页。\n此操作不可撤销。'
+      )
+    ) {
+      return;
+    }
+    setClearing(true);
+    setError('');
+    try {
+      const res = await api.clearWickStatsLogs({
+        account_id: selectedAccountId,
+        // 清空时默认按当前筛选；若只想清接针日志可选 wick_spike
+        signal_source: signalSource,
+        include_rotated: includeRotated,
+      });
+      setData(null);
+      alert(res.message || `已删除 ${res.lines_removed} 行`);
+    } catch (e: any) {
+      setError(e?.message || '清除失败');
+    } finally {
+      setClearing(false);
+    }
+  }, [selectedAccountId, signalSource, includeRotated]);
 
   const deep = data?.vol_blocked_deep;
   const cf = deep?.counterfactual;
   const oq = data?.open_quality;
+  const noAccount = selectedAccountId == null;
 
   return (
     <div className="space-y-4">
@@ -72,21 +139,60 @@ export default function WickStatsPage() {
             接针统计
           </h2>
           <p className="text-xs text-gray-500 mt-1">
-            扫描服务器日志：进场贴尖程度、接针速度、近失卡点、深针被量能挡住清单。用于调刺破进度 / 量能参数。
+            必须先选顶栏账户，再按信号源（接针 / WT）筛选。扫描该账户策略的服务器日志：贴尖、速度、近失卡点。
+            刚上线时可先「清除接针日志」再重新采集。
+          </p>
+          <p className="text-xs mt-1">
+            {noAccount ? (
+              <span className="text-amber-400">尚未选择账户 — 请先在顶栏选择</span>
+            ) : (
+              <span className="text-gray-400">
+                当前账户 ID：
+                <span className="text-gray-200 font-mono ml-1">{selectedAccountId}</span>
+                {data?.account_name ? (
+                  <span className="text-gray-500 ml-2">上次分析：{data.account_name}</span>
+                ) : null}
+              </span>
+            )}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={run}
-          disabled={loading}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-sm font-medium"
-        >
-          {loading ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} />}
-          {loading ? '分析中…' : '运行统计'}
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={clearLogs}
+            disabled={loading || clearing || noAccount}
+            title={noAccount ? '请先在顶栏选择账户' : '删除该账户相关接针日志行'}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-red-900/60 text-red-300 hover:bg-red-950/40 disabled:opacity-50 text-sm"
+          >
+            {clearing ? <RefreshCw size={16} className="animate-spin" /> : <Trash2 size={16} />}
+            {clearing ? '清除中…' : '清除接针日志'}
+          </button>
+          <button
+            type="button"
+            onClick={run}
+            disabled={loading || clearing || noAccount}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-sm font-medium"
+          >
+            {loading ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} />}
+            {loading ? '分析中…' : '运行统计'}
+          </button>
+        </div>
       </div>
 
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-wrap gap-4 items-end">
+        <div>
+          <label className="text-xs text-gray-400 block mb-1">信号源</label>
+          <select
+            value={signalSource}
+            onChange={(e) => setSignalSource(e.target.value as SignalFilter)}
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm min-w-[140px]"
+          >
+            <option value="wick_spike">仅接针</option>
+            <option value="wavetrend">仅 WaveTrend</option>
+            <option value="all">本账户全部策略</option>
+          </select>
+          <p className="text-[11px] text-gray-600 mt-1">统计仍只读接针日志行；WT 用于排除混入</p>
+        </div>
         <div>
           <label className="text-xs text-gray-400 block mb-1">深针刺破进度 ≥</label>
           <input
@@ -139,6 +245,21 @@ export default function WickStatsPage() {
 
       {data?.ok && (
         <>
+          {(data.strategies?.length ?? 0) > 0 && (
+            <div className="text-xs text-gray-500 flex flex-wrap gap-2">
+              <span>纳入策略：</span>
+              {data.strategies!.map((s) => (
+                <span
+                  key={s.id}
+                  className="px-2 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-300"
+                >
+                  #{s.id} {s.name}
+                  <span className="text-cyan-500 ml-1">{s.signal_source_zh}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
               <div className="text-xs text-gray-500">近失记录</div>
@@ -237,7 +358,9 @@ export default function WickStatsPage() {
                               <td className="text-right font-mono">
                                 {b.n ? `${((b.win_rate ?? 0) * 100).toFixed(0)}%` : '-'}
                               </td>
-                              <td className={`text-right font-mono ${(b.avg_pnl_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              <td
+                                className={`text-right font-mono ${(b.avg_pnl_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                              >
                                 {b.n ? b.avg_pnl_pct!.toFixed(3) : '-'}
                               </td>
                               <td className="text-right font-mono">
@@ -261,7 +384,7 @@ export default function WickStatsPage() {
                     <thead className="sticky top-0 bg-gray-900 text-gray-500">
                       <tr>
                         <th className="text-left px-3 py-2">时间</th>
-                        <th className="text-right px-2 py-2">策略</th>
+                        <th className="text-left px-2 py-2">策略 / 信号</th>
                         <th className="text-left px-2 py-2">币种</th>
                         <th className="text-left px-2 py-2">方向</th>
                         <th className="text-right px-2 py-2">触发贴尖%</th>
@@ -282,7 +405,7 @@ export default function WickStatsPage() {
                         oq.rows!.map((r, i) => (
                           <tr key={`${r.ts}-${r.symbol}-${i}`} className="border-t border-gray-800/80 text-gray-300">
                             <td className="px-3 py-1.5 whitespace-nowrap font-mono">{r.ts}</td>
-                            <td className="px-2 py-1.5 text-right font-mono">{r.strategy_id}</td>
+                            <td className="px-2 py-1.5">{strategyCell(r)}</td>
                             <td className="px-2 py-1.5 font-mono">{r.symbol}</td>
                             <td className="px-2 py-1.5">{r.side_zh || r.side}</td>
                             <td className="px-2 py-1.5 text-right font-mono">
@@ -326,7 +449,7 @@ export default function WickStatsPage() {
                 <thead className="sticky top-0 bg-gray-900 text-gray-500">
                   <tr>
                     <th className="text-left px-3 py-2">时间</th>
-                    <th className="text-right px-2 py-2">策略</th>
+                    <th className="text-left px-2 py-2">策略 / 信号</th>
                     <th className="text-left px-2 py-2">币种</th>
                     <th className="text-left px-2 py-2">方向</th>
                     <th className="text-right px-2 py-2">刺破进度</th>
@@ -347,7 +470,7 @@ export default function WickStatsPage() {
                     deep!.rows.map((r, i) => (
                       <tr key={`${r.ts}-${r.symbol}-${i}`} className="border-t border-gray-800/80 text-gray-300">
                         <td className="px-3 py-1.5 whitespace-nowrap font-mono">{r.ts}</td>
-                        <td className="px-2 py-1.5 text-right font-mono">{r.strategy_id}</td>
+                        <td className="px-2 py-1.5">{strategyCell(r)}</td>
                         <td className="px-2 py-1.5 font-mono">{r.symbol}</td>
                         <td className="px-2 py-1.5">{r.direction_zh || r.direction}</td>
                         <td className="px-2 py-1.5 text-right font-mono">{r.progress.toFixed(2)}</td>
@@ -384,7 +507,9 @@ export default function WickStatsPage() {
 
       {!data && !error && !loading && (
         <div className="border border-dashed border-gray-800 rounded-lg py-16 text-center text-gray-600 text-sm">
-          点击「运行统计」分析服务器接针日志
+          {noAccount
+            ? '请先在顶栏选择账户，再点击「运行统计」'
+            : '选择信号源后点击「运行统计」分析该账户接针日志'}
         </div>
       )}
     </div>

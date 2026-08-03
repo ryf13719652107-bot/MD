@@ -196,7 +196,9 @@ export const api = {
     request('/bot/toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
 
   // Wick spike log stats
-  analyzeWickStats: (params?: {
+  analyzeWickStats: (params: {
+    account_id: number;
+    signal_source?: 'wick_spike' | 'wavetrend' | 'all';
     progress_min?: number;
     list_limit?: number;
     include_rotated?: boolean;
@@ -204,13 +206,35 @@ export const api = {
     max_enrich?: number;
   }): Promise<WickStatsAnalysis> => {
     const qs = new URLSearchParams();
-    if (params?.progress_min != null) qs.set('progress_min', String(params.progress_min));
-    if (params?.list_limit != null) qs.set('list_limit', String(params.list_limit));
-    if (params?.include_rotated != null) qs.set('include_rotated', String(params.include_rotated));
-    if (params?.enrich_opens != null) qs.set('enrich_opens', String(params.enrich_opens));
-    if (params?.max_enrich != null) qs.set('max_enrich', String(params.max_enrich));
-    const q = qs.toString();
-    return request<WickStatsAnalysis>(`/wick-stats/analyze${q ? `?${q}` : ''}`);
+    qs.set('account_id', String(params.account_id));
+    if (params.signal_source) qs.set('signal_source', params.signal_source);
+    if (params.progress_min != null) qs.set('progress_min', String(params.progress_min));
+    if (params.list_limit != null) qs.set('list_limit', String(params.list_limit));
+    if (params.include_rotated != null) qs.set('include_rotated', String(params.include_rotated));
+    if (params.enrich_opens != null) qs.set('enrich_opens', String(params.enrich_opens));
+    if (params.max_enrich != null) qs.set('max_enrich', String(params.max_enrich));
+    return request<WickStatsAnalysis>(`/wick-stats/analyze?${qs.toString()}`);
+  },
+  clearWickStatsLogs: (params: {
+    account_id: number;
+    signal_source?: 'wick_spike' | 'wavetrend' | 'all';
+    include_rotated?: boolean;
+  }): Promise<{
+    ok: boolean;
+    account_id: number;
+    account_name: string;
+    signal_source: string;
+    strategy_ids: number[];
+    files_touched: number;
+    lines_removed: number;
+    memory_logs_cleared: number;
+    message: string;
+  }> => {
+    const qs = new URLSearchParams();
+    qs.set('account_id', String(params.account_id));
+    if (params.signal_source) qs.set('signal_source', params.signal_source);
+    if (params.include_rotated != null) qs.set('include_rotated', String(params.include_rotated));
+    return request(`/wick-stats/logs?${qs.toString()}`, { method: 'DELETE' });
   },
 };
 
@@ -228,6 +252,9 @@ export type WickStatsSummary = {
 export type WickStatsDeepRow = {
   ts: string;
   strategy_id: number;
+  strategy_name?: string;
+  signal_source?: string;
+  signal_source_zh?: string;
   symbol: string;
   direction: string;
   direction_zh?: string;
@@ -244,6 +271,9 @@ export type WickStatsDeepRow = {
 export type WickStatsOpenRow = {
   ts: string;
   strategy_id: number;
+  strategy_name?: string;
+  signal_source?: string;
+  signal_source_zh?: string;
   symbol: string;
   side: string;
   side_zh: string;
@@ -288,6 +318,16 @@ export type WickStatsOpenQuality = {
 export type WickStatsAnalysis = {
   ok: boolean;
   error?: string | null;
+  account_id?: number;
+  account_name?: string;
+  signal_source?: string;
+  strategy_ids?: number[];
+  strategies?: Array<{
+    id: number;
+    name: string;
+    signal_source: string;
+    signal_source_zh: string;
+  }>;
   log_files?: string[];
   near_miss_total: number;
   entry_total: number;

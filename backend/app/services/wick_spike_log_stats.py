@@ -203,6 +203,74 @@ def analyze_paths(paths: Iterable[Path]) -> WickLogReport:
     return report
 
 
+def filter_report_by_strategies(
+    report: WickLogReport, strategy_ids: set[int]
+) -> WickLogReport:
+    """只保留指定策略的接针日志行。"""
+    if not strategy_ids:
+        return WickLogReport()
+    return WickLogReport(
+        near_misses=[r for r in report.near_misses if r.strategy_id in strategy_ids],
+        entries=[e for e in report.entries if e.strategy_id in strategy_ids],
+    )
+
+
+_STRATEGY_ID_RE = re.compile(r"strategy=(\d+)\b")
+
+
+def clear_wick_spike_lines(
+    paths: Iterable[Path],
+    *,
+    strategy_ids: set[int] | None = None,
+) -> dict:
+    """
+    从 bot.log（及轮转文件）删除接针相关行。
+
+    strategy_ids 为空/None：删除全部含 wick_spike 的行；
+    否则只删 strategy=ID 落在集合内的接针行。
+    """
+    files_touched = 0
+    lines_removed = 0
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out_lines: list[str] = []
+        removed = 0
+        for line in text.splitlines(keepends=True):
+            raw = line.rstrip("\r\n")
+            if "wick_spike" not in raw:
+                out_lines.append(line)
+                continue
+            if strategy_ids is None:
+                removed += 1
+                continue
+            m = _STRATEGY_ID_RE.search(raw)
+            if m and int(m.group(1)) in strategy_ids:
+                removed += 1
+                continue
+            out_lines.append(line)
+        if removed == 0:
+            continue
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text("".join(out_lines), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            continue
+        files_touched += 1
+        lines_removed += removed
+    return {"files_touched": files_touched, "lines_removed": lines_removed}
+
+
 def _percentile(sorted_vals: list[float], p: float) -> float:
     if not sorted_vals:
         return float("nan")

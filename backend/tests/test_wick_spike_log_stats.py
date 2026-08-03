@@ -96,3 +96,55 @@ def test_vol_blocked_deep_filter(tmp_path):
     assert "已刺破但量能不够" in text
     assert "进场距针尖" in text or "距针尖" in text
     assert "若量能门槛改为" in text or "反事实" in text or "可过" in text
+
+
+def test_filter_report_by_strategies(tmp_path):
+    from app.services.wick_spike_log_stats import filter_report_by_strategies
+
+    log = tmp_path / "bot.log"
+    log.write_text(
+        "\n".join(
+            [
+                "2026-08-03 09:22:10 [INFO] x: wick_spike near-miss strategy=9 AAAUSDT "
+                "dir=short px=0.022 open=0.021 ext=0.0225 thr=0.0215 pierce=True "
+                "atrN=0.001 progress=1.66 vol×=4.90 need×=8 vol_hot=False",
+                "2026-08-03 09:22:11 [INFO] x: wick_spike near-miss strategy=12 BBBUSDT "
+                "dir=long px=1 open=1.01 ext=0.99 thr=1.0 pierce=True "
+                "atrN=0.01 progress=2.0 vol×=3.0 need×=8 vol_hot=False",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    report = analyze_paths([log])
+    filtered = filter_report_by_strategies(report, {9})
+    assert len(filtered.near_misses) == 1
+    assert filtered.near_misses[0].strategy_id == 9
+
+
+def test_clear_wick_spike_lines_by_strategy(tmp_path):
+    from app.services.wick_spike_log_stats import clear_wick_spike_lines
+
+    log = tmp_path / "bot.log"
+    log.write_text(
+        "\n".join(
+            [
+                "keep me unrelated",
+                "2026-08-03 09:22:10 [INFO] x: wick_spike opened strategy=9 AAAUSDT "
+                "open_api_db_ms=80 trade_age_ms=15 px=1 open=1 ext=1.1 progress=1 tip_gap%=0.1 vol×=5 need×=5",
+                "2026-08-03 09:22:11 [INFO] x: wick_spike opened strategy=90 BBBUSDT "
+                "open_api_db_ms=80 trade_age_ms=15 px=1 open=1 ext=1.1 progress=1 tip_gap%=0.1 vol×=5 need×=5",
+                "2026-08-03 09:22:12 [INFO] x: wick_spike opened strategy=12 CCCUSDT "
+                "open_api_db_ms=80 trade_age_ms=15 px=1 open=1 ext=1.1 progress=1 tip_gap%=0.1 vol×=5 need×=5",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = clear_wick_spike_lines([log], strategy_ids={9, 12})
+    assert result["lines_removed"] == 2
+    text = log.read_text(encoding="utf-8")
+    assert "strategy=9 " not in text
+    assert "strategy=12 " not in text
+    assert "strategy=90 " in text
+    assert "keep me unrelated" in text
+
