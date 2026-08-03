@@ -226,21 +226,8 @@ async def reset_equity_baseline(
         ).scalar_one_or_none()
         cur_total = float(last.total_usdt) if last else 0.0
 
-    all_cfs = (
-        (
-            await db.execute(
-                select(AccountCashflow)
-                .where(AccountCashflow.account_id == account_id)
-                .order_by(AccountCashflow.occurred_at.asc())
-            )
-        )
-        .scalars()
-        .all()
-    )
     # 与新建账户一致：基准用当前毛余额；之后只扣 set_at 之后的划转
     adjusted_baseline = float(cur_total)
-    from ..services.equity_cashflow import beijing_naive_to_ms
-
     account.cashflow_sync_cursor_ms = beijing_naive_to_ms(snap_at)
 
     r_snaps = await db.execute(
