@@ -236,6 +236,44 @@ def test_extract_gate_balance_prefers_total():
     assert extract_gate_usdt_wallet_balance(bal) == 100.0
 
 
+def test_extract_gate_margin_includes_unrealized():
+    from app.services.exchange_factory import extract_dashboard_balances, extract_margin_balance
+    from app.services.gate_service import extract_gate_usdt_margin_balance
+
+    bal = {
+        "total": {"USDT": 300.0},
+        "free": {"USDT": 280.0},
+        "info": {
+            "total": "300",
+            "unrealised_pnl": "12.5",
+            "currency": "USDT",
+        },
+    }
+    assert extract_gate_usdt_margin_balance(bal) == 312.5
+
+    class _Gate:
+        exchange_id = "gate"
+
+    assert extract_margin_balance(_Gate(), bal) == 312.5
+    wallet, margin = extract_dashboard_balances(_Gate(), bal, unrealized_pnl=0.0)
+    assert wallet == 300.0
+    assert margin == 312.5
+
+
+def test_extract_gate_margin_prefers_cross_margin_balance():
+    from app.services.gate_service import extract_gate_usdt_margin_balance
+
+    bal = {
+        "info": {
+            "total": "300",
+            "unrealised_pnl": "10",
+            "cross_margin_balance": "315.5",
+            "cross_unrealised_pnl": "15.5",
+        }
+    }
+    assert extract_gate_usdt_margin_balance(bal) == 315.5
+
+
 @pytest.mark.asyncio
 async def test_gate_base_to_contracts():
     svc = GateService()

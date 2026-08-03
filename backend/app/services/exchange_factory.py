@@ -109,14 +109,14 @@ async def get_exchange_for_account(account: Any) -> ExchangeClient:
 
 
 def extract_margin_balance(client: Any, balance: dict) -> float:
-    """币安 App「保证金余额」/ Gate 合约权益（含未实现盈亏）。
+    """币安 App「保证金余额」/ Gate 合约权益（钱包 + 未实现盈亏）。
 
     用于：收益曲线小时快照、保证金阈值止损、单币止损分母。
     """
     if getattr(client, "exchange_id", None) == "gate":
-        from .gate_service import extract_gate_usdt_wallet_balance
+        from .gate_service import extract_gate_usdt_margin_balance
 
-        return extract_gate_usdt_wallet_balance(balance)
+        return extract_gate_usdt_margin_balance(balance)
     from .binance_service import extract_usdt_margin_balance
 
     return extract_usdt_margin_balance(balance)
@@ -133,15 +133,27 @@ def extract_dashboard_balances(
     """仪表盘用：(钱包余额, 保证金余额)。
 
     币安：totalWalletBalance / totalMarginBalance。
-    Gate：无独立钱包字段时，钱包 ≈ 权益 - 未实现盈亏，保证金 = 权益。
+    Gate：info.total / (total+unrealised_pnl 或 cross_margin_balance)。
     """
     if getattr(client, "exchange_id", None) == "gate":
-        from .gate_service import extract_gate_usdt_wallet_balance
+        from .gate_service import (
+            extract_gate_usdt_margin_balance,
+            extract_gate_usdt_unrealized_pnl,
+            extract_gate_usdt_wallet_balance,
+        )
 
-        margin = extract_gate_usdt_wallet_balance(balance)
-        wallet = margin - float(unrealized_pnl or 0.0)
+        wallet = extract_gate_usdt_wallet_balance(balance)
+        margin = extract_gate_usdt_margin_balance(balance)
+        gate_upnl = extract_gate_usdt_unrealized_pnl(balance)
+        # info 缺 upnl 时用持仓汇总浮盈亏兜底推导保证金
+        if abs(gate_upnl) < 1e-12 and abs(float(unrealized_pnl or 0.0)) > 1e-12:
+            margin = wallet + float(unrealized_pnl or 0.0)
         if wallet <= 0 and margin > 0:
-            wallet = margin
+            wallet = margin - float(unrealized_pnl or gate_upnl or 0.0)
+            if wallet <= 0:
+                wallet = margin
+        if margin <= 0 and wallet > 0:
+            margin = wallet + float(unrealized_pnl or gate_upnl or 0.0)
         return float(wallet), float(margin)
 
     from .binance_service import (

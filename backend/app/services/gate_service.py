@@ -49,12 +49,54 @@ def _float_or_zero(value) -> float:
         return 0.0
 
 
+def _gate_account_info_row(balance: dict) -> dict:
+    """取出 Gate /futures/{settle}/accounts 的 info 行（dict 或 USDT 列表项）。"""
+    if not isinstance(balance, dict):
+        return {}
+    info = balance.get("info")
+    if isinstance(info, dict):
+        return info
+    if isinstance(info, list):
+        for row in info:
+            if not isinstance(row, dict):
+                continue
+            currency = (row.get("currency") or row.get("asset") or "").upper()
+            if currency in ("USDT", ""):
+                return row
+    return {}
+
+
+def extract_gate_usdt_unrealized_pnl(balance: dict) -> float:
+    """Gate 合约未实现盈亏（info.unrealised_pnl / cross_unrealised_pnl）。"""
+    info = _gate_account_info_row(balance)
+    if not info:
+        return 0.0
+    for key in (
+        "cross_unrealised_pnl",
+        "cross_unrealized_pnl",
+        "unrealised_pnl",
+        "unrealized_pnl",
+        "unrealisedPnl",
+        "unrealizedPnl",
+    ):
+        if info.get(key) is not None and info.get(key) != "":
+            return _float_or_zero(info.get(key))
+    return 0.0
+
+
 def extract_gate_usdt_wallet_balance(balance: dict) -> float:
-    """从 ccxt Gate 合约余额中取稳定 USDT 权益（优先 total，避免用 max 误取未实现盈亏）。"""
+    """Gate 合约「钱包余额」≈ info.total（历史净流入，不含未实现盈亏）。
+
+    对应币安 totalWalletBalance；勿与权益/保证金余额混淆。
+    """
     if not isinstance(balance, dict):
         return 0.0
 
-    # 1) ccxt 统一结构
+    info = _gate_account_info_row(balance)
+    if info and info.get("total") is not None and info.get("total") != "":
+        return _float_or_zero(info.get("total"))
+
+    # ccxt 统一结构（通常已是 total，不含 upnl）
     for section in ("total", "free"):
         data = balance.get(section) or {}
         if isinstance(data, dict):
@@ -68,25 +110,30 @@ def extract_gate_usdt_wallet_balance(balance: dict) -> float:
             v = _float_or_zero(usdt_row.get(key))
             if v > 0:
                 return v
-
-    info = balance.get("info")
-    if isinstance(info, dict):
-        for key in ("total", "available"):
-            v = _float_or_zero(info.get(key))
-            if v > 0:
-                return v
-    if isinstance(info, list):
-        for row in info:
-            if not isinstance(row, dict):
-                continue
-            currency = (row.get("currency") or row.get("asset") or "").upper()
-            if currency not in ("USDT", ""):
-                continue
-            for key in ("total", "available"):
-                v = _float_or_zero(row.get(key))
-                if v > 0:
-                    return v
     return 0.0
+
+
+def extract_gate_usdt_margin_balance(balance: dict) -> float:
+    """Gate 合约权益（对齐币安「保证金余额」= 钱包 + 未实现盈亏）。
+
+    优先 cross_margin_balance（全仓经典账户）；否则 total + unrealised_pnl。
+    用于收益曲线快照 / 保证金阈值 / 单币止损分母。
+    """
+    if not isinstance(balance, dict):
+        return 0.0
+
+    info = _gate_account_info_row(balance)
+    if info:
+        for key in ("cross_margin_balance", "crossMarginBalance"):
+            raw = info.get(key)
+            if raw is not None and raw != "":
+                return _float_or_zero(raw)
+        wallet = extract_gate_usdt_wallet_balance(balance)
+        upnl = extract_gate_usdt_unrealized_pnl(balance)
+        if wallet > 0 or abs(upnl) > 1e-12:
+            return wallet + upnl
+
+    return extract_gate_usdt_wallet_balance(balance)
 
 
 def normalize_gate_symbol(symbol: str) -> str:
