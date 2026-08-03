@@ -45,32 +45,36 @@ def _open_signal_log_suffix(signal_label: str, rsi: float) -> str:
 
 
 def _order_fill_avg_price(order: dict, fallback: float = 0.0) -> float:
-    """从成交回报解析均价；优先 average / info.avgPrice，避免误用信号价。"""
+    """从成交回报解析均价。
+
+    优先 ccxt ``average`` 与币安 ``info.avgPrice``；不要先用顶层 ``price``——
+    市价单里它常是下单参考价/信号价，会把最终贴尖算歪。
+    """
     if not isinstance(order, dict):
         return float(fallback or 0)
-    for key in ("average", "price"):
+
+    def _pos(v) -> float:
         try:
-            v = float(order.get(key) or 0)
-            if v > 0:
-                return v
+            x = float(v or 0)
+            return x if x > 0 else 0.0
         except (TypeError, ValueError):
-            pass
+            return 0.0
+
+    avg = _pos(order.get("average"))
+    if avg > 0:
+        return avg
     info = order.get("info") if isinstance(order.get("info"), dict) else {}
-    for key in ("avgPrice", "averagePrice", "price"):
-        raw = info.get(key)
-        if raw is None or raw == "":
-            continue
-        try:
-            v = float(raw)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
-    try:
-        fb = float(fallback or 0)
-    except (TypeError, ValueError):
-        fb = 0.0
-    return fb if fb > 0 else 0.0
+    for key in ("avgPrice", "averagePrice"):
+        avg = _pos(info.get(key))
+        if avg > 0:
+            return avg
+    # 最后才用 price（可能非成交均价）
+    for raw in (order.get("price"), info.get("price")):
+        avg = _pos(raw)
+        if avg > 0:
+            return avg
+    fb = _pos(fallback)
+    return fb
 
 
 async def _fetch_order(client, order_id: str, symbol: str) -> dict:
@@ -1219,7 +1223,19 @@ class PositionManager:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
             )
-            avg_price = _order_fill_avg_price(order, current_price)
+            # 先不回退信号价；缺均价时再查一次订单
+            avg_price = _order_fill_avg_price(order, 0.0)
+            if avg_price <= 0:
+                oid = str(order.get("id") or "")
+                if oid:
+                    try:
+                        order = await _fetch_order(auth_binance, oid, symbol)
+                        avg_price = _order_fill_avg_price(order, 0.0)
+                    except Exception as e:
+                        logger.warning(
+                            "Strategy %d: %s fetch_order for fill avg failed: %s",
+                            strategy_id, symbol, e,
+                        )
             if avg_price <= 0:
                 avg_price = current_price
                 logger.warning(

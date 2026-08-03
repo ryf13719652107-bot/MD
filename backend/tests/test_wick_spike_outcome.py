@@ -43,6 +43,13 @@ def test_order_fill_avg_price_prefers_info_avg():
     order = {"average": 0, "price": 0, "info": {"avgPrice": "0.1131"}}
     assert abs(_order_fill_avg_price(order, fallback=0.1121) - 0.1131) < 1e-9
     assert abs(_order_fill_avg_price({"average": 0.11}, 0.01) - 0.11) < 1e-9
+    # 市价单顶层 price 常是信号/参考价，不得压过 info.avgPrice
+    mixed = {
+        "average": 0,
+        "price": 0.06824,
+        "info": {"avgPrice": "0.0683397"},
+    }
+    assert abs(_order_fill_avg_price(mixed, fallback=0.06824) - 0.0683397) < 1e-9
 
 
 def test_match_trade_prefers_layer0():

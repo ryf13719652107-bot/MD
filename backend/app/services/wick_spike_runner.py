@@ -672,6 +672,7 @@ class WickSpikeRunner:
                         tick_ctx.exchange_legs.get((sym_key, side), 0)
                         + float(api_res.filled_qty or 0)
                     )
+                    fill_px = float(api_res.avg_price or 0) or float(price)
                     logger.info(
                         "wick_spike opened strategy=%d %s open_api_ms=%.0f "
                         "signal_to_order_ms=%.0f trade_age_ms=%d "
@@ -682,7 +683,7 @@ class WickSpikeRunner:
                         open_api_ms,
                         signal_to_order_ms,
                         trade_age_ms,
-                        price,
+                        fill_px,
                         snap.bar_open,
                         extreme,
                         n,
