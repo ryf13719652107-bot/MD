@@ -151,6 +151,10 @@ class WickSpikeRunner:
                 await task
             except asyncio.CancelledError:
                 pass
+        try:
+            await price_stream_manager.clear_wanted(f"wick:{strategy_id}")
+        except Exception as e:
+            logger.warning("wick_spike clear_wanted %d: %s", strategy_id, e)
 
     async def shutdown(self) -> None:
         ids = list(self._tasks.keys())
@@ -289,7 +293,10 @@ class WickSpikeRunner:
                     ) = packed
                     timeframe = getattr(_strategy_stub, "timeframe", timeframe) or timeframe
                     await price_stream_manager.set_wanted(
-                        public, set(symbols), timeframe=timeframe
+                        public,
+                        set(symbols),
+                        timeframe=timeframe,
+                        owner=f"wick:{strategy_id}",
                     )
                     self._fire_bg(_bg_prewarm_klines(public, list(symbols), timeframe))
 
@@ -407,12 +414,13 @@ class WickSpikeRunner:
                     )
                     if snap is None:
                         continue
-                    # 成交流量/高低补强（K 线 WS 量常滞后数秒）
+                    # 成交流量/高低补强；bar 未对齐则忽略（防换根串量）
                     snap = enrich_snap_with_trades(
                         snap,
                         trade_vol=price_stream_manager.bar_volume(sym_key),
                         trade_high=price_stream_manager.bar_high(sym_key),
                         trade_low=price_stream_manager.bar_low(sym_key),
+                        trade_bar_open_ts=price_stream_manager.bar_open_ms(sym_key),
                     )
 
                     # 换根 K：清空刺破短窗
@@ -495,6 +503,11 @@ class WickSpikeRunner:
             logger.exception("wick_spike runner %d error: %s", strategy_id, e)
             strategy_log_service.error(strategy_id, f"毫秒接针循环异常 — {e}")
             raise
+        finally:
+            try:
+                await price_stream_manager.clear_wanted(f"wick:{strategy_id}")
+            except Exception:
+                pass
 
     async def _refresh_context(self, strategy_id: int):
         from .scheduler import strategy_scheduler
@@ -649,7 +662,7 @@ class WickSpikeRunner:
     ) -> str:
         """Returns: opened | busy | has_pos | blocked | retryable_fail | committed_fail
 
-        热路径：内存门禁 + 极简市价单；止盈/写库在成交后、不计入 open_api_ms。
+        策略锁仅覆盖门禁 + 市价成交；挂止盈/写库在锁外，缩短占锁时间。
         """
         from .scheduler import strategy_scheduler
 
@@ -664,30 +677,73 @@ class WickSpikeRunner:
             )
             return "busy"
 
+        api_res = None
+        early: Optional[str] = None
+        sym_key = _norm_sym(symbol)
+        side = (signal.value or "").lower()
+        vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
+        n = snap.atr * params.atr_mult
+        extreme = snapshot_extreme(side, snap, price)
+        progress = spike_progress(side, snap.bar_open, extreme, n)
+        need = effective_volume_mult(params, progress)
+        gap = tip_gap_pct(snap.bar_open, extreme, price)
+        trade_age_ms = (
+            max(0, int(time.time() * 1000) - int(trade_ts_ms)) if trade_ts_ms > 0 else -1
+        )
+        open_api_ms = -1.0
+        signal_to_order_ms = -1.0
+
         try:
             if strategy is None or getattr(strategy, "status", None) != "running":
-                return "retryable_fail"
+                early = "retryable_fail"
+                return early
 
-            sym_key = _norm_sym(symbol)
-            side = (signal.value or "").lower()
-            # 内存快照门禁（刷新周期内略旧；不再二次查 DB）
+            # 内存快照门禁
             if tick_ctx.exchange_legs.get((sym_key, side), 0) > 0:
-                return "has_pos"
+                early = "has_pos"
+                return early
             if sym_key in (tick_ctx.exclude_norm or frozenset()):
                 strategy_log_service.info(
                     strategy_id, f"{symbol} 接针触发但命中排除/黑名单快照，跳过"
                 )
-                return "blocked"
+                early = "blocked"
+                return early
 
-            vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
-            n = snap.atr * params.atr_mult
-            extreme = snapshot_extreme(side, snap, price)
-            progress = spike_progress(side, snap.bar_open, extreme, n)
-            need = effective_volume_mult(params, progress)
-            gap = tip_gap_pct(snap.bar_open, extreme, price)
-            trade_age_ms = (
-                max(0, int(time.time() * 1000) - int(trade_ts_ms)) if trade_ts_ms > 0 else -1
-            )
+            # 下单前轻量复核交易所同向仓（纠正最多 15s 的 legs 陈旧）
+            try:
+                fresh = await auth.fetch_positions([symbol])
+                fresh_legs = exchange_legs_from_positions(fresh or [])
+                if fresh_legs.get((sym_key, side), 0) > 0:
+                    tick_ctx.exchange_legs[(sym_key, side)] = fresh_legs[(sym_key, side)]
+                    strategy_log_service.info(
+                        strategy_id, f"{symbol} 接针触发但交易所已有同向仓，跳过"
+                    )
+                    early = "has_pos"
+                    return early
+            except Exception as e:
+                logger.warning(
+                    "wick_spike %d %s pre-open position recheck failed: %s",
+                    strategy_id,
+                    symbol,
+                    e,
+                )
+
+            # 黑名单热复检：命中须 blocked（保持本根触发），不可当 retryable 反复打
+            try:
+                if await self._position_mgr._is_blacklisted_now(strategy_id, symbol):
+                    strategy_log_service.info(
+                        strategy_id, f"{symbol} 接针下单前黑名单复检命中，跳过"
+                    )
+                    early = "blocked"
+                    return early
+            except Exception as e:
+                strategy_log_service.error(
+                    strategy_id,
+                    f"{symbol} 接针下单前黑名单复检失败，已安全取消 — {e}",
+                )
+                early = "blocked"
+                return early
+
             detect_ms = (
                 (time.perf_counter() - signal_detect_perf) * 1000.0
                 if signal_detect_perf > 0
@@ -724,7 +780,8 @@ class WickSpikeRunner:
                 strategy_log_service.warning(
                     strategy_id, f"{symbol} 接针无法开仓 — 余额无效"
                 )
-                return "retryable_fail"
+                early = "retryable_fail"
+                return early
 
             candidate = SignalCandidate(
                 symbol=symbol,
@@ -736,7 +793,7 @@ class WickSpikeRunner:
                 base_qty=base_qty,
             )
 
-            # 仅统计市价下单（含账户锁 + 必要时设杠杆），不含止盈/写库
+            # 市价下单（含账户锁 + 必要时设杠杆 + 黑名单热复检）
             order_sem = account_order_sem(strategy.account_id)
             t_api0 = time.perf_counter()
             async with order_sem:
@@ -751,60 +808,68 @@ class WickSpikeRunner:
                 else -1.0
             )
             if api_res is None:
-                return "retryable_fail"
+                early = "retryable_fail"
+                return early
 
-            # 成交后：挂止盈 + 写库（不计入 open_api_ms）
-            api_res = await self._position_mgr.place_open_tp_limit(auth, strategy, api_res)
-
-            async with async_session() as session:
-                db_strategy = await session.get(Strategy, strategy_id)
-                if not db_strategy or db_strategy.status != "running":
-                    strategy_log_service.error(
-                        strategy_id,
-                        f"{symbol} 接针已成交但策略状态异常 — 请手动检查交易所",
-                    )
-                    return "committed_fail"
-                db_strategy.last_signal = signal.value
-                db_strategy.last_signal_at = now_beijing()
-                db_strategy.last_rsi = round(vol_ratio, 2)
-                try:
-                    await self._position_mgr.execute_open_db(session, db_strategy, api_res)
-                    await session.commit()
-                    tick_ctx.exchange_legs[(sym_key, side)] = (
-                        tick_ctx.exchange_legs.get((sym_key, side), 0)
-                        + float(api_res.filled_qty or 0)
-                    )
-                    fill_px = float(api_res.avg_price or 0) or float(price)
-                    logger.info(
-                        "wick_spike opened strategy=%d %s open_api_ms=%.0f "
-                        "signal_to_order_ms=%.0f trade_age_ms=%d "
-                        "px=%.6g open=%.6g ext=%.6g atrN=%.6g "
-                        "progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g",
-                        strategy_id,
-                        symbol,
-                        open_api_ms,
-                        signal_to_order_ms,
-                        trade_age_ms,
-                        fill_px,
-                        snap.bar_open,
-                        extreme,
-                        n,
-                        progress,
-                        gap,
-                        vol_ratio,
-                        need,
-                    )
-                    return "opened"
-                except Exception as e:
-                    logger.error("wick_spike open db %s: %s", symbol, e)
-                    await session.rollback()
-                    strategy_log_service.error(
-                        strategy_id,
-                        f"{symbol} 接针开仓已可能成交但写库失败 — 请手动检查交易所，本根不再重试",
-                    )
-                    return "committed_fail"
+            # 成交后立刻更新内存腿，防止锁外窗口重复开
+            tick_ctx.exchange_legs[(sym_key, side)] = (
+                tick_ctx.exchange_legs.get((sym_key, side), 0)
+                + float(api_res.filled_qty or 0)
+            )
         finally:
             lock.release()
+
+        if early is not None:
+            return early
+        if api_res is None:
+            return "retryable_fail"
+
+        # 锁外：挂止盈 + 写库（本根已由 on_tick 标记 triggered，防双开）
+        api_res = await self._position_mgr.place_open_tp_limit(auth, strategy, api_res)
+
+        async with async_session() as session:
+            db_strategy = await session.get(Strategy, strategy_id)
+            if not db_strategy or db_strategy.status != "running":
+                strategy_log_service.error(
+                    strategy_id,
+                    f"{symbol} 接针已成交但策略状态异常 — 请手动检查交易所",
+                )
+                return "committed_fail"
+            db_strategy.last_signal = signal.value
+            db_strategy.last_signal_at = now_beijing()
+            db_strategy.last_rsi = round(vol_ratio, 2)
+            try:
+                await self._position_mgr.execute_open_db(session, db_strategy, api_res)
+                await session.commit()
+                fill_px = float(api_res.avg_price or 0) or float(price)
+                logger.info(
+                    "wick_spike opened strategy=%d %s open_api_ms=%.0f "
+                    "signal_to_order_ms=%.0f trade_age_ms=%d "
+                    "px=%.6g open=%.6g ext=%.6g atrN=%.6g "
+                    "progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g",
+                    strategy_id,
+                    symbol,
+                    open_api_ms,
+                    signal_to_order_ms,
+                    trade_age_ms,
+                    fill_px,
+                    snap.bar_open,
+                    extreme,
+                    n,
+                    progress,
+                    gap,
+                    vol_ratio,
+                    need,
+                )
+                return "opened"
+            except Exception as e:
+                logger.error("wick_spike open db %s: %s", symbol, e)
+                await session.rollback()
+                strategy_log_service.error(
+                    strategy_id,
+                    f"{symbol} 接针开仓已可能成交但写库失败 — 请手动检查交易所，本根不再重试",
+                )
+                return "committed_fail"
 
 
 wick_spike_runner = WickSpikeRunner()

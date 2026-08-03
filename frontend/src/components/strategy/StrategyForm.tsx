@@ -705,20 +705,27 @@ export default function StrategyForm({
           </div>
         </div>
 
-        <div>
-          <label className={`${labelClass} flex items-center gap-2`}>
-            <span>{signalSource === 'wick_spike' ? '加仓需 WaveTrend 确认' : '马丁加仓信号确认'}</span>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input type="checkbox" {...register('martingale_rsi_enabled')} className="sr-only peer" />
-              <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+        {signalSource === 'wick_spike' ? (
+          <div>
+            <p className={`${labelClass}`}>接针加仓</p>
+            <span className="text-xs text-gray-600">
+              接针策略加仓仅按价格跌幅，不使用 WaveTrend 确认
+            </span>
+          </div>
+        ) : (
+          <div>
+            <label className={`${labelClass} flex items-center gap-2`}>
+              <span>马丁加仓信号确认</span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" {...register('martingale_rsi_enabled')} className="sr-only peer" />
+                <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+              </label>
             </label>
-          </label>
-          <span className="text-xs text-gray-600">
-            {signalSource === 'wick_spike'
-              ? '开启后：跌幅到位且 WT 同向才加仓；关闭则仅按价格跌幅加仓'
-              : '开启后，加仓时仍需满足当前信号条件（RSI/WaveTrend），防止反向加仓'}
-          </span>
-        </div>
+            <span className="text-xs text-gray-600">
+              开启后，加仓时仍需满足当前信号条件（RSI/WaveTrend），防止反向加仓
+            </span>
+          </div>
+        )}
 
         {signalSource === 'trend_wt' && martingaleRsiEnabled && (
           <div>

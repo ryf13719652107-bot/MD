@@ -908,9 +908,7 @@ class PositionManager:
                 logger.warning("Strategy %d: %s invalid kline data, skipping", strategy_id, symbol)
                 strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
                 return None
-            if mutate_strategy and isinstance(strategy, Strategy):
-                strategy.last_signal = signal.value
-                strategy.last_signal_at = now_beijing()
+            # 不把 last_signal 写成 neutral，保留价流开仓写入的接针信息
             return klines, current_price, signal_label, signal, float(rsi or 0.0)
         if strategy.signal_source == "martingale_base":
             # 基础马丁：不看任何指标，每根 K 线开盘按策略方向直接开首单。
@@ -1227,7 +1225,7 @@ class PositionManager:
         auth_binance: BinanceService,
         leverage: float,
     ) -> OpenApiResult | None:
-        """接针热路径：仅市价开仓（杠杆仅缓存未命中时设置；无黑名单/止盈）。"""
+        """接针热路径：仅市价开仓（杠杆缓存；下单前黑名单热复检；无挂止盈）。"""
         strategy_id = strategy.id
         symbol = candidate.symbol
         signal = candidate.signal
@@ -1242,6 +1240,31 @@ class PositionManager:
         if not await self._ensure_leverage_before_open(
             auth_binance, strategy_id, symbol, lev_int, quiet_cache_hit=True
         ):
+            return None
+
+        try:
+            if await self._is_blacklisted_now(strategy_id, symbol):
+                logger.info(
+                    "Strategy %d: %s blacklisted before wick order; cancelled",
+                    strategy_id,
+                    symbol,
+                )
+                strategy_log_service.info(
+                    strategy_id,
+                    f"{symbol} 接针下单前黑名单复检命中，已取消开仓",
+                )
+                return None
+        except Exception as e:
+            logger.error(
+                "Strategy %d: wick blacklist recheck for %s failed; cancelled: %s",
+                strategy_id,
+                symbol,
+                e,
+            )
+            strategy_log_service.error(
+                strategy_id,
+                f"{symbol} 接针下单前黑名单复检失败，已安全取消开仓 — {e}",
+            )
             return None
 
         try:
@@ -2062,15 +2085,15 @@ class PositionManager:
         ps = "LONG" if pos_side == "long" else "SHORT"
 
         # Signal re-check for martingale add (if enabled).
-        # 基础马丁不看指标，加仓不做信号确认。
+        # 基础马丁 / 接针：不加仓信号确认，仅按价格跌幅加仓。
         if (
             strategy.martingale_rsi_enabled
-            and strategy.signal_source != "martingale_base"
+            and strategy.signal_source not in ("martingale_base", "wick_spike")
             and klines is not None
             and public_binance is not None
         ):
             klines_confirm = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
-            if strategy.signal_source in ("wavetrend", "wick_spike"):
+            if strategy.signal_source == "wavetrend":
                 wt = calculate_wavetrend(
                     klines_confirm, strategy.wt_channel_length, strategy.wt_average_length
                 )

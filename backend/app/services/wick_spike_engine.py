@@ -205,8 +205,15 @@ def enrich_snap_with_trades(
     trade_vol: float = 0.0,
     trade_high: float = 0.0,
     trade_low: float = 0.0,
+    trade_bar_open_ts: int | None = None,
 ) -> WickBarSnapshot:
-    """用成交流累计的量/高低补强 K 线快照（解决 K 线 WS 量能滞后）。"""
+    """用成交流累计的量/高低补强 K 线快照（解决 K 线 WS 量能滞后）。
+
+    trade_bar_open_ts 若与 snap.bar_open_ts 不一致（换根后尚未有新成交），
+    忽略成交聚合，避免上一根巨量/极值污染新根。
+    """
+    if trade_bar_open_ts is not None and int(trade_bar_open_ts) != int(snap.bar_open_ts):
+        return snap
     vol = max(float(snap.vol_now or 0), float(trade_vol or 0))
     hi = float(snap.kline_high or 0)
     lo = float(snap.kline_low or 0)

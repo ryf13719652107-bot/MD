@@ -188,7 +188,7 @@ def test_progress_relax_disabled_keeps_strict_volume():
 def test_enrich_snap_prefers_trade_volume_and_high():
     snap = _snap(vol_now=10.0, vol_sma=10.0, high=101.0, low=99.0)
     enriched = enrich_snap_with_trades(
-        snap, trade_vol=80.0, trade_high=106.0, trade_low=98.5
+        snap, trade_vol=80.0, trade_high=106.0, trade_low=98.5, trade_bar_open_ts=snap.bar_open_ts
     )
     assert enriched.vol_now == 80.0
     assert enriched.kline_high == 106.0
@@ -197,6 +197,21 @@ def test_enrich_snap_prefers_trade_volume_and_high():
     state = WickSymbolState()
     params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
     assert on_tick(state, params, enriched, last_price=102.0, now_ms=1) == Signal.SHORT
+
+
+def test_enrich_ignores_stale_trade_bar():
+    """换根后成交聚合仍属上一根 → 不得污染新根量/高低。"""
+    snap = _snap(ts=2_000_000, vol_now=1.0, vol_sma=10.0, high=100.5, low=99.5)
+    enriched = enrich_snap_with_trades(
+        snap,
+        trade_vol=999.0,
+        trade_high=120.0,
+        trade_low=80.0,
+        trade_bar_open_ts=1_000_000,  # 上一根
+    )
+    assert enriched is snap
+    assert enriched.vol_now == 1.0
+    assert enriched.kline_high == 100.5
 
 
 def test_min_move_pct_blocks_shallow_atr_pierce():

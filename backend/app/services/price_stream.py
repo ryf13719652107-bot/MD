@@ -2,6 +2,8 @@
 
 仅供 wick_spike 使用；不影响 K 线信号路径。订阅集按需增删，空闲回收。
 同时按 K 线周期累计本根成交量/高低，供接针放量判定（不依赖 K 线 WS 量能滞后）。
+
+多策略：按 owner 登记 wanted，取并集订阅；每 symbol 独立 timeframe（冲突时取更细周期）。
 """
 
 from __future__ import annotations
@@ -43,13 +45,16 @@ class PriceStreamManager:
         self._seq: dict[str, int] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._last_access: dict[str, float] = {}
+        # 多策略并集
+        self._wanted_by_owner: dict[str, set[str]] = {}
+        self._owner_tf_ms: dict[str, int] = {}
         self._wanted: set[str] = set()
+        self._tf_ms_by_sym: dict[str, int] = {}
         self._client = None
         self._lock = asyncio.Lock()
         self._janitor_task: Optional[asyncio.Task] = None
         self._global_seq = 0
-        # 本根（按 tf 对齐）从成交累计
-        self._tf_ms: int = 60_000
+        # 本根（按 per-symbol tf 对齐）从成交累计
         self._bar_open_ms: dict[str, int] = {}
         self._bar_vol: dict[str, float] = {}
         self._bar_high: dict[str, float] = {}
@@ -84,20 +89,48 @@ class PriceStreamManager:
     def global_seq(self) -> int:
         return self._global_seq
 
+    def _recompute_wanted_unlocked(self) -> None:
+        wanted: set[str] = set()
+        for syms in self._wanted_by_owner.values():
+            wanted |= syms
+        self._wanted = wanted
+
+        tf_map: dict[str, int] = {}
+        for owner, syms in self._wanted_by_owner.items():
+            tf = int(self._owner_tf_ms.get(owner, 60_000) or 60_000)
+            for s in syms:
+                prev = tf_map.get(s)
+                if prev is None:
+                    tf_map[s] = tf
+                elif prev != tf:
+                    chosen = min(prev, tf)
+                    logger.warning(
+                        "price_stream tf conflict %s: %sms vs %sms (owner=%s), using %sms",
+                        s,
+                        prev,
+                        tf,
+                        owner,
+                        chosen,
+                    )
+                    tf_map[s] = chosen
+        self._tf_ms_by_sym = tf_map
+
     async def set_wanted(
         self,
         client,
         symbols: set[str],
         *,
         timeframe: str = "1m",
+        owner: str = "default",
     ) -> None:
-        """Ensure watchers for `symbols`; drop others when idle janitor runs."""
+        """按 owner 登记订阅集；多策略取并集，互不覆盖。"""
         self._client = client
-        self._tf_ms = _timeframe_ms(timeframe)
-        wanted = {_norm_sym(s) for s in symbols if s}
+        norms = {_norm_sym(s) for s in symbols if s}
         async with self._lock:
-            self._wanted = wanted
-            for sym in wanted:
+            self._wanted_by_owner[owner] = norms
+            self._owner_tf_ms[owner] = _timeframe_ms(timeframe)
+            self._recompute_wanted_unlocked()
+            for sym in self._wanted:
                 self._last_access[sym] = time.time()
                 task = self._tasks.get(sym)
                 if task is None or task.done():
@@ -110,6 +143,13 @@ class PriceStreamManager:
                     self._janitor_loop(), name="price_stream_janitor"
                 )
 
+    async def clear_wanted(self, owner: str) -> None:
+        """策略停止时移除其订阅登记，并集自动收缩。"""
+        async with self._lock:
+            self._wanted_by_owner.pop(owner, None)
+            self._owner_tf_ms.pop(owner, None)
+            self._recompute_wanted_unlocked()
+
     def _apply_trade(self, symbol_norm: str, px: float, amount: float, ts_ms: int) -> None:
         self._prices[symbol_norm] = px
         self._ts_ms[symbol_norm] = ts_ms
@@ -117,7 +157,7 @@ class PriceStreamManager:
         self._global_seq += 1
         self._last_access[symbol_norm] = time.time()
 
-        tf = max(1, int(self._tf_ms))
+        tf = max(1, int(self._tf_ms_by_sym.get(symbol_norm, 60_000)))
         bar = (int(ts_ms) // tf) * tf
         if self._bar_open_ms.get(symbol_norm) != bar:
             self._bar_open_ms[symbol_norm] = bar
@@ -197,13 +237,17 @@ class PriceStreamManager:
                         self._bar_vol.pop(sym, None)
                         self._bar_high.pop(sym, None)
                         self._bar_low.pop(sym, None)
+                        self._tf_ms_by_sym.pop(sym, None)
                         logger.info("price_stream stopped idle %s", sym)
         except asyncio.CancelledError:
             raise
 
     async def shutdown(self) -> None:
         async with self._lock:
+            self._wanted_by_owner.clear()
+            self._owner_tf_ms.clear()
             self._wanted.clear()
+            self._tf_ms_by_sym.clear()
             tasks = list(self._tasks.values())
             self._tasks.clear()
             if self._janitor_task and not self._janitor_task.done():
