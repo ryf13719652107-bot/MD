@@ -644,7 +644,14 @@ class WickSpikeRunner:
                     api_res = await self._position_mgr.execute_open_api(
                         candidate, strategy, auth, leverage
                     )
-                open_api_ms = (time.perf_counter() - t_api0) * 1000.0
+                t_filled = time.perf_counter()
+                open_api_ms = (t_filled - t_api0) * 1000.0
+                # 捕捉信号 → 交易所下单返回（不含写库）
+                signal_to_order_ms = (
+                    (t_filled - signal_detect_perf) * 1000.0
+                    if signal_detect_perf > 0
+                    else -1.0
+                )
                 if api_res is None:
                     await session.rollback()
                     return "retryable_fail"
@@ -658,11 +665,13 @@ class WickSpikeRunner:
                     )
                     logger.info(
                         "wick_spike opened strategy=%d %s open_api_ms=%.0f "
-                        "trade_age_ms=%d px=%.6g open=%.6g ext=%.6g "
+                        "signal_to_order_ms=%.0f trade_age_ms=%d "
+                        "px=%.6g open=%.6g ext=%.6g "
                         "progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g",
                         strategy_id,
                         symbol,
                         open_api_ms,
+                        signal_to_order_ms,
                         trade_age_ms,
                         price,
                         snap.bar_open,

@@ -297,6 +297,7 @@ export default function WickStatsPage() {
               <p className="text-xs text-gray-500">三项越低越好；成交年龄大说明推送/处理偏慢</p>
               <div className="text-sm text-gray-300">成交推送年龄：{fmtMs(data.trade_age_ms)}</div>
               <div className="text-sm text-gray-300">检出→抢锁：{fmtMs(data.detect_to_lock_ms)}</div>
+              <div className="text-sm text-gray-300">信号→下单完成：{fmtMs(data.signal_to_order_ms)}</div>
               <div className="text-sm text-gray-300">
                 下单：{fmtMs(data.open_api_ms ?? data.open_api_db_ms)}
               </div>
@@ -337,6 +338,8 @@ export default function WickStatsPage() {
                   <div>距最终针尖：{fmtPct(oq.final_tip_gap)}</div>
                   <div>针尖捕获率(1=贴尖)：{fmtRatio(oq.capture_ratio)}</div>
                   <div>已平仓盈亏%：{fmtPct(oq.pnl_pct)}</div>
+                  <div>信号→下单完成：{fmtMs(oq.signal_to_order_ms)}</div>
+                  <div>下单：{fmtMs(oq.open_api_ms)}</div>
                 </div>
                 {(oq.pnl_by_tip_bucket || []).length > 0 && (
                   <div className="pt-2">
@@ -389,6 +392,12 @@ export default function WickStatsPage() {
                         <th className="text-left px-2 py-2">策略 / 信号</th>
                         <th className="text-left px-2 py-2">币种</th>
                         <th className="text-left px-2 py-2">方向</th>
+                        <th className="text-right px-2 py-2" title="捕捉信号 → 交易所下单返回">
+                          信号→下单ms
+                        </th>
+                        <th className="text-right px-2 py-2" title="账户下单锁 + 交易所 API">
+                          下单ms
+                        </th>
                         <th className="text-right px-2 py-2">触发贴尖%</th>
                         <th className="text-right px-2 py-2">最终贴尖%</th>
                         <th className="text-right px-2 py-2">捕获率</th>
@@ -399,7 +408,7 @@ export default function WickStatsPage() {
                     <tbody>
                       {(oq.rows || []).length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="px-3 py-8 text-center text-gray-600">
+                          <td colSpan={11} className="px-3 py-8 text-center text-gray-600">
                             无开仓可对齐（需有 opened 日志）
                           </td>
                         </tr>
@@ -410,6 +419,12 @@ export default function WickStatsPage() {
                             <td className="px-2 py-1.5">{strategyCell(r)}</td>
                             <td className="px-2 py-1.5 font-mono">{r.symbol}</td>
                             <td className="px-2 py-1.5">{r.side_zh || r.side}</td>
+                            <td className="px-2 py-1.5 text-right font-mono text-amber-200">
+                              {r.signal_to_order_ms == null ? '-' : Math.round(r.signal_to_order_ms)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono">
+                              {r.open_api_ms == null ? '-' : Math.round(r.open_api_ms)}
+                            </td>
                             <td className="px-2 py-1.5 text-right font-mono">
                               {r.tip_gap_at_trigger_pct == null ? '-' : r.tip_gap_at_trigger_pct.toFixed(3)}
                             </td>

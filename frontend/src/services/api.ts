@@ -283,6 +283,10 @@ export type WickStatsOpenRow = {
   final_tip_gap_pct: number | null;
   wick_range_pct: number | null;
   capture_ratio: number | null;
+  trade_age_ms?: number | null;
+  detect_to_lock_ms?: number | null;
+  open_api_ms?: number | null;
+  signal_to_order_ms?: number | null;
   trade_id: number | null;
   realized_pnl: number | null;
   pnl_pct: number | null;
@@ -310,6 +314,8 @@ export type WickStatsOpenQuality = {
   final_tip_gap?: WickStatsSummary;
   capture_ratio?: WickStatsSummary;
   pnl_pct?: WickStatsSummary;
+  signal_to_order_ms?: WickStatsSummary;
+  open_api_ms?: WickStatsSummary;
   pnl_by_tip_bucket?: WickStatsPnlBucket[];
   rows?: WickStatsOpenRow[];
   text?: string;
@@ -338,6 +344,7 @@ export type WickStatsAnalysis = {
   tip_gap_trigger?: WickStatsSummary;
   trade_age_ms?: WickStatsSummary;
   detect_to_lock_ms?: WickStatsSummary;
+  signal_to_order_ms?: WickStatsSummary;
   open_api_ms?: WickStatsSummary;
   /** @deprecated 同 open_api_ms，兼容旧响应 */
   open_api_db_ms?: WickStatsSummary;

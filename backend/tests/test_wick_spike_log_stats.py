@@ -79,6 +79,19 @@ def test_parse_opened_legacy_open_api_db_ms():
     assert abs(row.open_api_ms - 120) < 1e-9
 
 
+def test_parse_opened_signal_to_order_ms():
+    line = (
+        "2026-08-04 00:41:52 [INFO] x: wick_spike opened strategy=10 ICNTUSDT "
+        "open_api_ms=210 signal_to_order_ms=268 trade_age_ms=18 "
+        "px=0.1 open=0.101 ext=0.099 progress=2.0 tip_gap%=0.519 vol×=5.2 need×=5"
+    )
+    row = parse_line(line)
+    assert row.kind == "opened"
+    assert abs(row.open_api_ms - 210) < 1e-9
+    assert abs(row.signal_to_order_ms - 268) < 1e-9
+    assert abs(row.tip_gap_pct - 0.519) < 1e-9
+
+
 def test_vol_blocked_deep_filter(tmp_path):
     log = tmp_path / "bot.log"
     log.write_text(

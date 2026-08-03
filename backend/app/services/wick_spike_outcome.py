@@ -55,16 +55,21 @@ class OpenOutcome:
     final_tip_gap_pct: float | None
     wick_range_pct: float | None
     capture_ratio: float | None  # 1=贴最终针尖，0=停在开盘
+    # 速度（ms）
+    trade_age_ms: int | None = None
+    detect_to_lock_ms: float | None = None
+    open_api_ms: float | None = None
+    signal_to_order_ms: float | None = None  # 捕捉信号 → 下单返回
     # 对齐成交
-    trade_id: int | None
-    trade_entry: float | None
-    trade_exit: float | None
-    realized_pnl: float | None
-    pnl_pct: float | None
-    close_reason: str | None
-    layer: int | None
-    matched: bool
-    kline_ok: bool
+    trade_id: int | None = None
+    trade_entry: float | None = None
+    trade_exit: float | None = None
+    realized_pnl: float | None = None
+    pnl_pct: float | None = None
+    close_reason: str | None = None
+    layer: int | None = None
+    matched: bool = False
+    kline_ok: bool = False
     note: str = ""
 
 
@@ -107,15 +112,18 @@ def _final_tip_metrics(
     return final_ext, gap, wick, captured
 
 
-def pair_opened_with_side(report: WickLogReport) -> list[tuple[EntryRow, str]]:
-    """opened 行配方向：优先同策略同币、时间接近的 trigger.side。"""
+def pair_opened_with_side(
+    report: WickLogReport,
+) -> list[tuple[EntryRow, str, EntryRow | None]]:
+    """opened 行配方向：优先同策略同币、时间接近的 trigger；并带回 trigger 行。"""
     triggers = [e for e in report.entries if e.kind == "trigger"]
     opened = [e for e in report.entries if e.kind == "opened"]
-    out: list[tuple[EntryRow, str]] = []
+    out: list[tuple[EntryRow, str, EntryRow | None]] = []
     for op in opened:
         op_dt = _parse_ts(op.ts)
         best_side = ""
         best_dt = None
+        best_tr: EntryRow | None = None
         for tr in triggers:
             if tr.strategy_id != op.strategy_id:
                 continue
@@ -130,8 +138,15 @@ def pair_opened_with_side(report: WickLogReport) -> list[tuple[EntryRow, str]]:
             if best_dt is None or delta < best_dt:
                 best_dt = delta
                 best_side = (tr.side or "").lower()
-        out.append((op, best_side))
+                best_tr = tr
+        out.append((op, best_side, best_tr))
     return out
+
+
+def _finite_ms(v: float) -> float | None:
+    if v != v or v < 0:
+        return None
+    return float(v)
 
 
 def match_trade(
@@ -236,17 +251,17 @@ async def enrich_open_outcomes(
     """对齐 trades + 最终针尖，返回结构化结果。"""
     paired = pair_opened_with_side(report)
     # 只要有开仓价/开盘价的
-    candidates: list[tuple[EntryRow, str, datetime]] = []
-    for op, side in paired:
+    candidates: list[tuple[EntryRow, str, EntryRow | None, datetime]] = []
+    for op, side, tr in paired:
         dt = _parse_ts(op.ts)
         if dt is None:
             continue
         if not (op.px == op.px and op.px > 0):
             # 旧日志可能无 px，后面用 trade.entry
             pass
-        candidates.append((op, side, dt))
+        candidates.append((op, side, tr, dt))
     # 新在前
-    candidates.sort(key=lambda x: x[2], reverse=True)
+    candidates.sort(key=lambda x: x[3], reverse=True)
     candidates = candidates[:max_rows]
 
     if not candidates:
@@ -262,9 +277,9 @@ async def enrich_open_outcomes(
             "text": "无开仓日志可对齐（需有 wick_spike opened 记录）",
         }
 
-    strategy_ids = {op.strategy_id for op, _, _ in candidates}
-    t_min = min(dt.replace(tzinfo=None) for _, _, dt in candidates) - timedelta(minutes=5)
-    t_max = max(dt.replace(tzinfo=None) for _, _, dt in candidates) + timedelta(minutes=5)
+    strategy_ids = {op.strategy_id for op, _, _, _ in candidates}
+    t_min = min(dt.replace(tzinfo=None) for _, _, _, dt in candidates) - timedelta(minutes=5)
+    t_max = max(dt.replace(tzinfo=None) for _, _, _, dt in candidates) + timedelta(minutes=5)
 
     async with async_session() as session:
         result = await session.execute(
@@ -285,7 +300,9 @@ async def enrich_open_outcomes(
     # 串行拉 K 线，避免打爆 REST；少量并发
     sem = asyncio.Semaphore(3)
 
-    async def one(op: EntryRow, side: str, dt: datetime) -> OpenOutcome:
+    async def one(
+        op: EntryRow, side: str, tr: EntryRow | None, dt: datetime
+    ) -> OpenOutcome:
         trade = match_trade(
             trades,
             strategy_id=op.strategy_id,
@@ -339,6 +356,12 @@ async def enrich_open_outcomes(
 
         trig_gap = op.tip_gap_pct if op.tip_gap_pct == op.tip_gap_pct else None
         trig_ext = op.ext if op.ext == op.ext else None
+        detect_ms = None
+        if tr is not None:
+            detect_ms = _finite_ms(tr.detect_to_lock_ms)
+        trade_age = op.trade_age_ms if op.trade_age_ms >= 0 else None
+        open_api = _finite_ms(op.open_api_ms)
+        sig_ord = _finite_ms(op.signal_to_order_ms)
 
         return OpenOutcome(
             ts=op.ts,
@@ -354,6 +377,10 @@ async def enrich_open_outcomes(
             final_tip_gap_pct=tip_final if tip_final == tip_final else None,
             wick_range_pct=wick if wick == wick else None,
             capture_ratio=capture if capture == capture else None,
+            trade_age_ms=trade_age,
+            detect_to_lock_ms=detect_ms,
+            open_api_ms=open_api,
+            signal_to_order_ms=sig_ord,
             trade_id=trade.id if trade else None,
             trade_entry=float(trade.entry_price) if trade else None,
             trade_exit=float(trade.exit_price) if trade else None,
@@ -367,7 +394,7 @@ async def enrich_open_outcomes(
         )
 
     outcomes = list(
-        await asyncio.gather(*[one(op, side, dt) for op, side, dt in candidates])
+        await asyncio.gather(*[one(op, side, tr, dt) for op, side, tr, dt in candidates])
     )
 
     final_gaps = [
@@ -381,6 +408,15 @@ async def enrich_open_outcomes(
     pnls = [float(r.pnl_pct) for r in outcomes if r.matched and r.pnl_pct is not None]
     buckets = _pnl_buckets(outcomes)
 
+    sig_ords = [
+        float(r.signal_to_order_ms)
+        for r in outcomes
+        if r.signal_to_order_ms is not None
+    ]
+    open_apis = [
+        float(r.open_api_ms) for r in outcomes if r.open_api_ms is not None
+    ]
+
     text_lines = [
         "=== 开仓质量：相对最终针尖 + 盈亏 ===",
         f"分析开仓 {len(outcomes)} 笔；匹配成交 {sum(1 for r in outcomes if r.matched)}；"
@@ -389,6 +425,10 @@ async def enrich_open_outcomes(
         "--- 相对本根最终针尖（收盘后高低）---",
         f"距最终针尖%: { _fmt_summary(summarize_gaps(final_gaps), '%') }",
         f"针尖捕获率(1=贴尖): { _fmt_summary(summarize_gaps(captures), '') }",
+        "",
+        "--- 信号→下单速度 ---",
+        f"信号→下单完成: { _fmt_summary(summarize_gaps(sig_ords), 'ms') }",
+        f"下单(含账户锁): { _fmt_summary(summarize_gaps(open_apis), 'ms') }",
         "",
         "--- 与盈亏对齐 ---",
         f"已平仓盈亏%: { _fmt_summary(summarize_gaps(pnls), '%') }",
@@ -418,6 +458,10 @@ async def enrich_open_outcomes(
                 "final_tip_gap_pct": _round(r.final_tip_gap_pct),
                 "wick_range_pct": _round(r.wick_range_pct),
                 "capture_ratio": _round(r.capture_ratio),
+                "trade_age_ms": r.trade_age_ms,
+                "detect_to_lock_ms": _round(r.detect_to_lock_ms, 1),
+                "open_api_ms": _round(r.open_api_ms, 1),
+                "signal_to_order_ms": _round(r.signal_to_order_ms, 1),
                 "trade_id": r.trade_id,
                 "realized_pnl": _round(r.realized_pnl),
                 "pnl_pct": _round(r.pnl_pct),
@@ -436,6 +480,8 @@ async def enrich_open_outcomes(
         "final_tip_gap": summarize_gaps(final_gaps),
         "capture_ratio": summarize_gaps(captures),
         "pnl_pct": summarize_gaps(pnls),
+        "signal_to_order_ms": summarize_gaps(sig_ords),
+        "open_api_ms": summarize_gaps(open_apis),
         "pnl_by_tip_bucket": buckets,
         "rows": rows_out,
         "text": "\n".join(text_lines),
@@ -457,6 +503,11 @@ def _fmt_summary(s: dict, unit: str) -> str:
         return (
             f"样本{int(s['n'])} 均值{s['mean']:.3f}% "
             f"中位{s['p50']:.3f}% P90={s['p90']:.3f}%"
+        )
+    if unit == "ms":
+        return (
+            f"样本{int(s['n'])} 均值{s['mean']:.0f}ms "
+            f"中位{s['p50']:.0f}ms P90={s['p90']:.0f}ms"
         )
     return (
         f"样本{int(s['n'])} 均值{s['mean']:.3f} "

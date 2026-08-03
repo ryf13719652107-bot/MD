@@ -38,7 +38,9 @@ _OPENED_RE = re.compile(
     _TS
     + r".*wick_spike opened strategy=(?P<sid>\d+)\s+(?P<sym>\S+)\s+"
     # open_api_ms=仅下单；旧日志 open_api_db_ms=含写库，解析兼容
-    + r"(?:open_api_ms|open_api_db_ms)=(?P<open_ms>[^\s]+)\s+trade_age_ms=(?P<age>-?\d+)"
+    + r"(?:open_api_ms|open_api_db_ms)=(?P<open_ms>[^\s]+)"
+    + r"(?:\s+signal_to_order_ms=(?P<sig_ord>[^\s]+))?"
+    + r"\s+trade_age_ms=(?P<age>-?\d+)"
     + r"(?:\s+px=(?P<px>[^\s]+)\s+open=(?P<open>[^\s]+)\s+ext=(?P<ext>[^\s]+)"
     + r"\s+progress=(?P<progress>[^\s]+)\s+tip_gap%=(?P<tip_gap>[^\s]+))?"
     + r"\s+vol×=(?P<vol>[^\s]+)"
@@ -103,6 +105,7 @@ class EntryRow:
     need_x: float = float("nan")
     trade_age_ms: int = -1
     open_api_ms: float = float("nan")  # 仅下单（旧字段名 open_api_db_ms 亦写入此）
+    signal_to_order_ms: float = float("nan")  # 捕捉信号 → 下单返回
     detect_to_lock_ms: float = float("nan")
 
 
@@ -171,6 +174,7 @@ def parse_line(line: str) -> Optional[object]:
             need_x=_f(m.group("need")),
             trade_age_ms=int(m.group("age") or -1),
             open_api_ms=_f(m.group("open_ms")),
+            signal_to_order_ms=_f(m.group("sig_ord")),
         )
     m = _TRIGGER_RE.search(line)
     if m:
@@ -386,9 +390,15 @@ def build_analysis(
         for e in opened
         if e.open_api_ms == e.open_api_ms and e.open_api_ms >= 0
     ]
+    signal_to_orders = [
+        e.signal_to_order_ms
+        for e in opened
+        if e.signal_to_order_ms == e.signal_to_order_ms and e.signal_to_order_ms >= 0
+    ]
     trade_age_stat = summarize_gaps(trade_ages)
     detect_lock_stat = summarize_gaps(detect_locks)
     open_api_stat = summarize_gaps(open_apis)
+    signal_to_order_stat = summarize_gaps(signal_to_orders)
 
     shortfalls = [r.vol_shortfall for r in deep_u]
     vols = [r.vol_x for r in deep_u]
@@ -435,6 +445,7 @@ def build_analysis(
     text_lines.append("--- 接针速度（毫秒）---")
     text_lines.append(f"成交推送年龄: {_summary_zh(trade_age_stat, unit='ms')}")
     text_lines.append(f"检出→抢锁: {_summary_zh(detect_lock_stat, unit='ms')}")
+    text_lines.append(f"信号→下单完成: {_summary_zh(signal_to_order_stat, unit='ms')}")
     text_lines.append(f"下单: {_summary_zh(open_api_stat, unit='ms')}")
 
     text_lines.append("")
@@ -485,12 +496,14 @@ def build_analysis(
         "tip_gap_trigger": tip_trigger,
         "trade_age_ms": trade_age_stat,
         "detect_to_lock_ms": detect_lock_stat,
+        "signal_to_order_ms": signal_to_order_stat,
         "open_api_ms": open_api_stat,
         # 兼容旧前端字段名
         "open_api_db_ms": open_api_stat,
         "speed_labels": {
             "trade_age_ms": "成交推送年龄",
             "detect_to_lock_ms": "检出→抢锁",
+            "signal_to_order_ms": "信号→下单完成",
             "open_api_ms": "下单",
             "open_api_db_ms": "下单",
         },
