@@ -15,6 +15,7 @@ from ..services.log_service import strategy_log_service
 from ..services.wick_spike_log_stats import (
     analyze_paths,
     build_analysis,
+    build_symbol_monitor,
     clear_wick_spike_lines,
     filter_report_by_strategies,
     resolve_bot_log_paths,
@@ -214,6 +215,47 @@ async def analyze_wick_spike_logs(
             "log_files": [str(p) for p in paths],
             "text": f"分析失败: {e}",
         }
+
+
+@router.get("/symbol-monitor")
+async def wick_symbol_monitor(
+    account_id: int = Query(..., description="账户 ID（必选）"),
+    symbol: str = Query(..., min_length=2, description="币种，如 BLESS / BLESSUSDT"),
+    signal_source: str = Query("wick_spike", description="wick_spike | wavetrend | all"),
+    list_limit: int = Query(120, ge=1, le=500, description="时间线最多条数"),
+    include_rotated: bool = Query(True, description="是否包含 bot.log.*"),
+    db: AsyncSession = Depends(get_db),
+):
+    """按币种查询接针监控（near-miss / trigger / opened），解释未满足条件的原因。"""
+    acc, _strategies, strategy_ids, meta = await _load_account_strategies(
+        db, account_id, signal_source
+    )
+    paths = resolve_bot_log_paths(include_rotated=include_rotated)
+    if not paths:
+        raise HTTPException(status_code=404, detail="未找到 logs/bot.log")
+    if not strategy_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"账户「{acc.name}」下没有匹配信号源「{signal_source}」的策略",
+        )
+
+    report = filter_report_by_strategies(analyze_paths(paths), strategy_ids)
+    mon = build_symbol_monitor(report, symbol, list_limit=list_limit)
+    for row in mon.get("rows") or []:
+        info = meta.get(int(row.get("strategy_id") or 0)) or {}
+        row["strategy_name"] = info.get("name")
+        row["signal_source"] = info.get("signal_source")
+        row["signal_source_zh"] = info.get("signal_source_zh")
+
+    return {
+        "ok": True,
+        "account_id": account_id,
+        "account_name": acc.name,
+        "signal_source": signal_source,
+        "strategy_ids": sorted(strategy_ids),
+        "log_files": [str(p) for p in paths],
+        **mon,
+    }
 
 
 @router.delete("/logs")

@@ -529,6 +529,152 @@ def build_analysis(
     }
 
 
+def _norm_sym_key(s: str) -> str:
+    """统一为 XXXUSDT，便于 BLESS / BLESSUSDT 互匹配。"""
+    k = (s or "").upper().replace("/", "").replace(":USDT", "").replace("_", "")
+    if k and not k.endswith("USDT"):
+        k = f"{k}USDT"
+    return k
+
+
+def _near_miss_reason_zh(r: NearMissRow) -> str:
+    """把 near-miss 字段翻译成可读卡点。"""
+    if r.pierce and r.vol_x < r.need_x:
+        return (
+            f"已刺破但量能不足：vol×={r.vol_x:.2f} < need×={r.need_x:g}"
+            f"（还差 {max(0.0, r.need_x - r.vol_x):.2f}×）"
+        )
+    if (not r.pierce) and r.vol_x >= r.need_x:
+        return (
+            f"量能够但深度不够：progress={r.progress:.2f}（需≥1 才刺破）"
+            f"；极值={r.ext:.6g} 刺破线={r.thr:.6g}"
+        )
+    if (not r.pierce) and r.vol_x < r.need_x:
+        return (
+            f"深度与量能都不够：progress={r.progress:.2f}（需≥1）；"
+            f"vol×={r.vol_x:.2f} < need×={r.need_x:g}"
+        )
+    if r.pierce and r.vol_x >= r.need_x:
+        return "接近触发（已刺破且量能达标，可能被节流/占锁/同根已开）"
+    return "接近但未开仓（详见 progress / vol×）"
+
+
+def build_symbol_monitor(
+    report: WickLogReport,
+    symbol: str,
+    *,
+    list_limit: int = 120,
+) -> dict:
+    """按币种汇总接针监控时间线，解释为何未满足条件。"""
+    key = _norm_sym_key(symbol)
+    if not key:
+        return {
+            "symbol": "",
+            "symbol_norm": "",
+            "near_miss_n": 0,
+            "trigger_n": 0,
+            "opened_n": 0,
+            "reason_counts": {},
+            "rows": [],
+            "note": "请输入币种，如 BLESS 或 BLESSUSDT",
+        }
+
+    events: list[dict] = []
+    reason_counts: Counter[str] = Counter()
+
+    for r in report.near_misses:
+        if _norm_sym_key(r.symbol) != key:
+            continue
+        why = _near_miss_reason_zh(r)
+        reason_counts[why.split("：")[0]] += 1
+        events.append(
+            {
+                "ts": r.ts,
+                "kind": "near_miss",
+                "kind_zh": "近失",
+                "strategy_id": r.strategy_id,
+                "symbol": r.symbol,
+                "direction": r.direction,
+                "direction_zh": _dir_zh(r.direction),
+                "px": r.px,
+                "open": r.open,
+                "ext": r.ext,
+                "thr": r.thr,
+                "pierce": r.pierce,
+                "progress": r.progress,
+                "atr_n": r.atr_n,
+                "vol_x": r.vol_x,
+                "need_x": r.need_x,
+                "tip_gap_pct": r.tip_gap_pct if r.tip_gap_pct == r.tip_gap_pct else None,
+                "reason": why,
+            }
+        )
+
+    for e in report.entries:
+        if _norm_sym_key(e.symbol) != key:
+            continue
+        if e.kind == "trigger":
+            why = "条件已满足 → 触发下单"
+            kind_zh = "触发"
+        else:
+            why = "已开仓成交"
+            kind_zh = "开仓"
+        reason_counts[kind_zh] += 1
+        events.append(
+            {
+                "ts": e.ts,
+                "kind": e.kind,
+                "kind_zh": kind_zh,
+                "strategy_id": e.strategy_id,
+                "symbol": e.symbol,
+                "direction": e.side,
+                "direction_zh": _dir_zh(e.side),
+                "px": e.px if e.px == e.px else None,
+                "open": e.open if e.open == e.open else None,
+                "ext": e.ext if e.ext == e.ext else None,
+                "thr": None,
+                "pierce": True if e.kind in ("trigger", "opened") else None,
+                "progress": e.progress if e.progress == e.progress else None,
+                "atr_n": e.atr_n if e.atr_n == e.atr_n else None,
+                "vol_x": e.vol_x if e.vol_x == e.vol_x else None,
+                "need_x": e.need_x if e.need_x == e.need_x else None,
+                "tip_gap_pct": e.tip_gap_pct if e.tip_gap_pct == e.tip_gap_pct else None,
+                "reason": why,
+            }
+        )
+
+    events.sort(key=lambda x: x["ts"], reverse=True)
+    listed = events[: max(1, list_limit)]
+    near_n = sum(1 for x in events if x["kind"] == "near_miss")
+    trig_n = sum(1 for x in events if x["kind"] == "trigger")
+    open_n = sum(1 for x in events if x["kind"] == "opened")
+
+    if not events:
+        note = (
+            f"日志中没有 {_norm_sym_key(symbol)} 的接针监控行。"
+            "常见原因：未进选币池/未订阅、策略方向与针向不符、"
+            "progress 过低（<0.5）未写 near-miss、或日志已清除/轮转。"
+        )
+    else:
+        note = (
+            f"共 {len(events)} 条（近失 {near_n} / 触发 {trig_n} / 开仓 {open_n}），"
+            f"展示最近 {len(listed)} 条。无记录的分钟 = 当时未接近条件或未监控。"
+        )
+
+    return {
+        "symbol": symbol.strip().upper(),
+        "symbol_norm": key if key.endswith("USDT") else f"{key}USDT" if key else "",
+        "near_miss_n": near_n,
+        "trigger_n": trig_n,
+        "opened_n": open_n,
+        "reason_counts": dict(reason_counts),
+        "listed": len(listed),
+        "total": len(events),
+        "rows": listed,
+        "note": note,
+    }
+
+
 def resolve_bot_log_paths(*, include_rotated: bool = True) -> list[Path]:
     """定位 backend/logs/bot.log（兼容 cwd=backend 或项目根）。"""
     roots = [

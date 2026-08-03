@@ -236,6 +236,21 @@ export const api = {
     if (params.include_rotated != null) qs.set('include_rotated', String(params.include_rotated));
     return request(`/wick-stats/logs?${qs.toString()}`, { method: 'DELETE' });
   },
+  wickSymbolMonitor: (params: {
+    account_id: number;
+    symbol: string;
+    signal_source?: 'wick_spike' | 'wavetrend' | 'all';
+    list_limit?: number;
+    include_rotated?: boolean;
+  }): Promise<WickSymbolMonitor> => {
+    const qs = new URLSearchParams();
+    qs.set('account_id', String(params.account_id));
+    qs.set('symbol', params.symbol);
+    if (params.signal_source) qs.set('signal_source', params.signal_source);
+    if (params.list_limit != null) qs.set('list_limit', String(params.list_limit));
+    if (params.include_rotated != null) qs.set('include_rotated', String(params.include_rotated));
+    return request<WickSymbolMonitor>(`/wick-stats/symbol-monitor?${qs.toString()}`);
+  },
 };
 
 export type WickStatsSummary = {
@@ -369,4 +384,44 @@ export type WickStatsAnalysis = {
   };
   open_quality?: WickStatsOpenQuality | null;
   text: string;
+};
+
+export type WickSymbolMonitorRow = {
+  ts: string;
+  kind: string;
+  kind_zh: string;
+  strategy_id: number;
+  strategy_name?: string;
+  signal_source_zh?: string;
+  symbol: string;
+  direction: string;
+  direction_zh?: string;
+  px?: number | null;
+  open?: number | null;
+  ext?: number | null;
+  thr?: number | null;
+  pierce?: boolean | null;
+  progress?: number | null;
+  atr_n?: number | null;
+  vol_x?: number | null;
+  need_x?: number | null;
+  tip_gap_pct?: number | null;
+  reason: string;
+};
+
+export type WickSymbolMonitor = {
+  ok: boolean;
+  account_id: number;
+  account_name: string;
+  signal_source: string;
+  symbol: string;
+  symbol_norm: string;
+  near_miss_n: number;
+  trigger_n: number;
+  opened_n: number;
+  reason_counts: Record<string, number>;
+  listed: number;
+  total: number;
+  rows: WickSymbolMonitorRow[];
+  note: string;
 };

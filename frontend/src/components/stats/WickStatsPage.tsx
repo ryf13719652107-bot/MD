@@ -1,6 +1,11 @@
 import { useCallback, useState } from 'react';
-import { BarChart3, Play, RefreshCw, Trash2 } from 'lucide-react';
-import { api, type WickStatsAnalysis, type WickStatsSummary } from '../../services/api';
+import { BarChart3, Play, RefreshCw, Search, Trash2 } from 'lucide-react';
+import {
+  api,
+  type WickStatsAnalysis,
+  type WickStatsSummary,
+  type WickSymbolMonitor,
+} from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 
 type SignalFilter = 'wick_spike' | 'wavetrend' | 'all';
@@ -59,6 +64,10 @@ export default function WickStatsPage() {
   const [clearing, setClearing] = useState(false);
   const [data, setData] = useState<WickStatsAnalysis | null>(null);
   const [error, setError] = useState('');
+  const [symbolQuery, setSymbolQuery] = useState('');
+  const [symLoading, setSymLoading] = useState(false);
+  const [symMon, setSymMon] = useState<WickSymbolMonitor | null>(null);
+  const [symError, setSymError] = useState('');
 
   const run = useCallback(async () => {
     if (selectedAccountId == null) {
@@ -125,6 +134,35 @@ export default function WickStatsPage() {
     }
   }, [selectedAccountId, signalSource, includeRotated]);
 
+  const runSymbolMonitor = useCallback(async () => {
+    if (selectedAccountId == null) {
+      setSymError('请先在顶栏选择账户');
+      return;
+    }
+    const sym = symbolQuery.trim();
+    if (sym.length < 2) {
+      setSymError('请输入币种，如 BLESS 或 BLESSUSDT');
+      return;
+    }
+    setSymLoading(true);
+    setSymError('');
+    try {
+      const res = await api.wickSymbolMonitor({
+        account_id: selectedAccountId,
+        symbol: sym,
+        signal_source: signalSource,
+        list_limit: 120,
+        include_rotated: includeRotated,
+      });
+      setSymMon(res);
+    } catch (e: any) {
+      setSymMon(null);
+      setSymError(e?.message || '查询失败');
+    } finally {
+      setSymLoading(false);
+    }
+  }, [selectedAccountId, symbolQuery, signalSource, includeRotated]);
+
   const deep = data?.vol_blocked_deep;
   const cf = deep?.counterfactual;
   const oq = data?.open_quality;
@@ -177,6 +215,108 @@ export default function WickStatsPage() {
             {loading ? '分析中…' : '运行统计'}
           </button>
         </div>
+      </div>
+
+      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 space-y-3">
+        <div className="flex flex-wrap gap-3 items-end">
+          <div className="flex-1 min-w-[180px]">
+            <label className="text-xs text-gray-400 block mb-1">查币种监控（为什么没开仓）</label>
+            <input
+              type="text"
+              value={symbolQuery}
+              onChange={(e) => setSymbolQuery(e.target.value.toUpperCase())}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') runSymbolMonitor();
+              }}
+              placeholder="如 BLESS / 1000RATSUSDT"
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm w-full font-mono"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={runSymbolMonitor}
+            disabled={symLoading || noAccount}
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-700/80 hover:bg-amber-600 disabled:opacity-50 text-sm"
+          >
+            {symLoading ? <RefreshCw size={14} className="animate-spin" /> : <Search size={14} />}
+            查询监控
+          </button>
+        </div>
+        {symError && <p className="text-sm text-red-400">{symError}</p>}
+        {symMon && (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-400">
+              <span className="text-gray-200 font-mono">{symMon.symbol_norm || symMon.symbol}</span>
+              {' · '}近失 {symMon.near_miss_n} / 触发 {symMon.trigger_n} / 开仓 {symMon.opened_n}
+              {' · '}
+              {symMon.note}
+            </p>
+            {Object.keys(symMon.reason_counts || {}).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-[11px]">
+                {Object.entries(symMon.reason_counts).map(([k, n]) => (
+                  <span key={k} className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">
+                    {k}: {n}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="overflow-x-auto max-h-80 overflow-y-auto border border-gray-800 rounded">
+              <table className="w-full text-xs">
+                <thead className="text-gray-500 sticky top-0 bg-gray-900">
+                  <tr>
+                    <th className="px-2 py-1.5 text-left">时间</th>
+                    <th className="px-2 py-1.5 text-left">类型</th>
+                    <th className="px-2 py-1.5 text-left">策略</th>
+                    <th className="px-2 py-1.5 text-left">方向</th>
+                    <th className="px-2 py-1.5 text-right">progress</th>
+                    <th className="px-2 py-1.5 text-right">量能×</th>
+                    <th className="px-2 py-1.5 text-right">门槛×</th>
+                    <th className="px-2 py-1.5 text-left">原因</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(symMon.rows || []).map((r, i) => (
+                    <tr key={`${r.ts}-${r.kind}-${i}`} className="border-t border-gray-800/80 text-gray-300">
+                      <td className="px-2 py-1 font-mono text-gray-500 whitespace-nowrap">{r.ts?.slice(5, 19)}</td>
+                      <td className="px-2 py-1">
+                        <span
+                          className={
+                            r.kind === 'opened'
+                              ? 'text-emerald-400'
+                              : r.kind === 'trigger'
+                                ? 'text-cyan-400'
+                                : 'text-amber-400/90'
+                          }
+                        >
+                          {r.kind_zh}
+                        </span>
+                      </td>
+                      <td className="px-2 py-1 font-mono">#{r.strategy_id}</td>
+                      <td className="px-2 py-1">{r.direction_zh || r.direction || '-'}</td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {r.progress == null ? '-' : r.progress.toFixed(2)}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {r.vol_x == null ? '-' : r.vol_x.toFixed(2)}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {r.need_x == null ? '-' : r.need_x.toFixed(2)}
+                      </td>
+                      <td className="px-2 py-1 text-gray-400 max-w-md">{r.reason}</td>
+                    </tr>
+                  ))}
+                  {(symMon.rows || []).length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="px-2 py-6 text-center text-gray-600">
+                        无监控记录
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex flex-wrap gap-4 items-end">
