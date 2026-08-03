@@ -348,8 +348,10 @@ async def enrich_open_outcomes(
                     ohlc = None
 
         trig_ext = op.ext if op.ext == op.ext else None
-        # 日志 tip_gap 用的是信号价；展示时改用成交价 vs 触发极值，与最终贴尖同口径
+        # 触发贴尖：信号触发价 vs 触发时极值（看决策质量）
+        # 最终贴尖：成交均价 vs 收盘后 K 线极值（看执行质量）
         trig_gap = None
+        signal_px = float(op.px) if op.px == op.px and op.px > 0 else float("nan")
         if ohlc:
             o, h, l, _c = ohlc
             # 最终贴尖一律用交易所 K 线 O/H/L，禁止混用日志 open
@@ -362,12 +364,14 @@ async def enrich_open_outcomes(
             else:
                 note_parts.append("无法算最终针尖")
             if (
-                entry_px == entry_px
-                and entry_px > 0
+                signal_px == signal_px
+                and signal_px > 0
                 and trig_ext is not None
                 and bar_open > 0
             ):
-                trig_gap = tip_gap_pct(bar_open, float(trig_ext), entry_px)
+                trig_gap = tip_gap_pct(bar_open, float(trig_ext), signal_px)
+            elif op.tip_gap_pct == op.tip_gap_pct:
+                trig_gap = float(op.tip_gap_pct)
         else:
             note_parts.append("无K线")
             if op.tip_gap_pct == op.tip_gap_pct:

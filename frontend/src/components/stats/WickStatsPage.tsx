@@ -398,8 +398,12 @@ export default function WickStatsPage() {
                         <th className="text-right px-2 py-2" title="账户下单锁 + 交易所 API">
                           下单ms
                         </th>
-                        <th className="text-right px-2 py-2">触发贴尖%</th>
-                        <th className="text-right px-2 py-2">最终贴尖%</th>
+                        <th className="text-right px-2 py-2" title="信号触发价相对触发时极值">
+                          触发贴尖%
+                        </th>
+                        <th className="text-right px-2 py-2" title="成交均价相对本根最终高低">
+                          最终贴尖%
+                        </th>
                         <th className="text-right px-2 py-2">捕获率</th>
                         <th className="text-right px-2 py-2">盈亏%</th>
                         <th className="text-left px-3 py-2">平仓原因</th>
