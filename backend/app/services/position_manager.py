@@ -44,6 +44,35 @@ def _open_signal_log_suffix(signal_label: str, rsi: float) -> str:
     return f"{signal_label}={round(rsi, 1)}"
 
 
+def _order_fill_avg_price(order: dict, fallback: float = 0.0) -> float:
+    """从成交回报解析均价；优先 average / info.avgPrice，避免误用信号价。"""
+    if not isinstance(order, dict):
+        return float(fallback or 0)
+    for key in ("average", "price"):
+        try:
+            v = float(order.get(key) or 0)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    info = order.get("info") if isinstance(order.get("info"), dict) else {}
+    for key in ("avgPrice", "averagePrice", "price"):
+        raw = info.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    try:
+        fb = float(fallback or 0)
+    except (TypeError, ValueError):
+        fb = 0.0
+    return fb if fb > 0 else 0.0
+
+
 async def _fetch_order(client, order_id: str, symbol: str) -> dict:
     """查订单：币安保持原 exchange.fetch_order；GATE 走服务层（settle + 张→币）。"""
     if getattr(client, "exchange_id", None) == "gate":
@@ -1190,11 +1219,11 @@ class PositionManager:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
             )
-            avg_price = float(order.get("average") or order.get("price") or 0)
+            avg_price = _order_fill_avg_price(order, current_price)
             if avg_price <= 0:
                 avg_price = current_price
                 logger.warning(
-                    "Strategy %d: %s order filled but no average/price in response, using kline close",
+                    "Strategy %d: %s order filled but no average/price in response, using signal px",
                     strategy_id, symbol,
                 )
             filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
@@ -1287,11 +1316,11 @@ class PositionManager:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
             )
-            avg_price = float(order.get("average") or order.get("price") or 0)
+            avg_price = _order_fill_avg_price(order, current_price)
             if avg_price <= 0:
                 avg_price = current_price
                 logger.warning(
-                    "Strategy %d: %s order filled but no average/price in response, using kline close",
+                    "Strategy %d: %s order filled but no average/price in response, using signal px",
                     strategy_id, symbol,
                 )
             filled_qty = float(order.get("filled") or order.get("amount") or base_qty)

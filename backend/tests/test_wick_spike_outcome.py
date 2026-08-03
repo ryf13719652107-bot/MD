@@ -28,6 +28,23 @@ def test_final_tip_metrics_long():
     assert abs(cap - 0.8) < 1e-9
 
 
+def test_final_tip_metrics_icnt_chart_fill():
+    """实盘 ICNT：开0.1156 低0.1115 成交0.1131 → 最终贴尖≈1.384 捕获≈0.610。"""
+    ext, gap, wick, cap = _final_tip_metrics("long", 0.1156, 0.1131, 0.1158, 0.1115)
+    assert abs(ext - 0.1115) < 1e-9
+    assert abs(gap - 1.384083) < 1e-3
+    assert abs(wick - 3.546713) < 1e-3
+    assert abs(cap - 0.609756) < 1e-3
+
+
+def test_order_fill_avg_price_prefers_info_avg():
+    from app.services.position_manager import _order_fill_avg_price
+
+    order = {"average": 0, "price": 0, "info": {"avgPrice": "0.1131"}}
+    assert abs(_order_fill_avg_price(order, fallback=0.1121) - 0.1131) < 1e-9
+    assert abs(_order_fill_avg_price({"average": 0.11}, 0.01) - 0.11) < 1e-9
+
+
 def test_match_trade_prefers_layer0():
     trades = [
         SimpleNamespace(

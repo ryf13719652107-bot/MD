@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
@@ -16,6 +16,7 @@ from ..models.strategy import Strategy
 from ..models.trade import Trade
 from .binance_service import get_public_binance
 from .position_manager import _norm_sym
+from .wick_spike_engine import tip_gap_pct
 from .wick_spike_log_stats import EntryRow, WickLogReport, summarize_gaps
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,8 @@ async def _fetch_bar_ohlc(
     timeframe: str = "1m",
 ) -> Optional[tuple[float, float, float, float]]:
     """取该分钟 K 的 open/high/low/close。"""
-    since_ms = int(bar_dt.timestamp() * 1000)
+    aware = bar_dt if bar_dt.tzinfo else bar_dt.replace(tzinfo=BEIJING_TZ)
+    since_ms = int(aware.astimezone(timezone.utc).timestamp() * 1000)
     try:
         rows = await exchange.fetch_klines(symbol, timeframe, limit=3, since=since_ms)
     except Exception as e:
@@ -318,7 +320,8 @@ async def enrich_open_outcomes(
             entry_px = float(op.px)
         else:
             entry_px = float("nan")
-        bar_open = float(op.open) if op.open == op.open and op.open > 0 else float("nan")
+        log_open = float(op.open) if op.open == op.open and op.open > 0 else float("nan")
+        bar_open = log_open
 
         note_parts = []
         if not trade:
@@ -333,17 +336,24 @@ async def enrich_open_outcomes(
 
         async with sem:
             ohlc = None
-            if side and ((bar_open == bar_open and bar_open > 0) or trade is not None):
+            if side and (
+                (log_open == log_open and log_open > 0)
+                or (entry_px == entry_px and entry_px > 0)
+                or trade is not None
+            ):
                 try:
                     ohlc = await _fetch_bar_ohlc(public, op.symbol, bar_dt, tf)
                 except Exception as e:
                     note_parts.append(f"K线失败:{e}")
                     ohlc = None
 
+        trig_ext = op.ext if op.ext == op.ext else None
+        # 日志 tip_gap 用的是信号价；展示时改用成交价 vs 触发极值，与最终贴尖同口径
+        trig_gap = None
         if ohlc:
             o, h, l, _c = ohlc
-            if bar_open != bar_open or bar_open <= 0:
-                bar_open = o
+            # 最终贴尖一律用交易所 K 线 O/H/L，禁止混用日志 open
+            bar_open = o
             if entry_px == entry_px and entry_px > 0 and bar_open > 0 and side:
                 final_ext, tip_final, wick, capture = _final_tip_metrics(
                     side, bar_open, entry_px, h, l
@@ -351,11 +361,18 @@ async def enrich_open_outcomes(
                 kline_ok = True
             else:
                 note_parts.append("无法算最终针尖")
+            if (
+                entry_px == entry_px
+                and entry_px > 0
+                and trig_ext is not None
+                and bar_open > 0
+            ):
+                trig_gap = tip_gap_pct(bar_open, float(trig_ext), entry_px)
         else:
             note_parts.append("无K线")
+            if op.tip_gap_pct == op.tip_gap_pct:
+                trig_gap = float(op.tip_gap_pct)
 
-        trig_gap = op.tip_gap_pct if op.tip_gap_pct == op.tip_gap_pct else None
-        trig_ext = op.ext if op.ext == op.ext else None
         detect_ms = None
         if tr is not None:
             detect_ms = _finite_ms(tr.detect_to_lock_ms)
