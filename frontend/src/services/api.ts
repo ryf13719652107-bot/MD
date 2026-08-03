@@ -194,4 +194,126 @@ export const api = {
   // Bot toggle
   toggleBot: (enabled: boolean): Promise<{ master_switch: boolean }> =>
     request('/bot/toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
+
+  // Wick spike log stats
+  analyzeWickStats: (params?: {
+    progress_min?: number;
+    list_limit?: number;
+    include_rotated?: boolean;
+    enrich_opens?: boolean;
+    max_enrich?: number;
+  }): Promise<WickStatsAnalysis> => {
+    const qs = new URLSearchParams();
+    if (params?.progress_min != null) qs.set('progress_min', String(params.progress_min));
+    if (params?.list_limit != null) qs.set('list_limit', String(params.list_limit));
+    if (params?.include_rotated != null) qs.set('include_rotated', String(params.include_rotated));
+    if (params?.enrich_opens != null) qs.set('enrich_opens', String(params.enrich_opens));
+    if (params?.max_enrich != null) qs.set('max_enrich', String(params.max_enrich));
+    const q = qs.toString();
+    return request<WickStatsAnalysis>(`/wick-stats/analyze${q ? `?${q}` : ''}`);
+  },
+};
+
+export type WickStatsSummary = {
+  n: number;
+  min?: number;
+  p25?: number;
+  p50?: number;
+  p75?: number;
+  p90?: number;
+  max?: number;
+  mean?: number;
+};
+
+export type WickStatsDeepRow = {
+  ts: string;
+  strategy_id: number;
+  symbol: string;
+  direction: string;
+  direction_zh?: string;
+  progress: number;
+  vol_x: number;
+  need_x: number;
+  vol_shortfall: number;
+  tip_gap_pct: number | null;
+  px: number;
+  open: number;
+  ext: number;
+};
+
+export type WickStatsOpenRow = {
+  ts: string;
+  strategy_id: number;
+  symbol: string;
+  side: string;
+  side_zh: string;
+  entry_px: number | null;
+  bar_open: number | null;
+  tip_gap_at_trigger_pct: number | null;
+  final_tip_gap_pct: number | null;
+  wick_range_pct: number | null;
+  capture_ratio: number | null;
+  trade_id: number | null;
+  realized_pnl: number | null;
+  pnl_pct: number | null;
+  close_reason: string | null;
+  layer: number | null;
+  matched: boolean;
+  kline_ok: boolean;
+  note: string;
+};
+
+export type WickStatsPnlBucket = {
+  bucket: string;
+  n: number;
+  win_rate?: number;
+  avg_pnl_pct?: number;
+  median_pnl_pct?: number;
+  avg_final_tip_gap_pct?: number;
+};
+
+export type WickStatsOpenQuality = {
+  n: number;
+  matched_trades?: number;
+  kline_ok?: number;
+  error?: string;
+  final_tip_gap?: WickStatsSummary;
+  capture_ratio?: WickStatsSummary;
+  pnl_pct?: WickStatsSummary;
+  pnl_by_tip_bucket?: WickStatsPnlBucket[];
+  rows?: WickStatsOpenRow[];
+  text?: string;
+};
+
+export type WickStatsAnalysis = {
+  ok: boolean;
+  error?: string | null;
+  log_files?: string[];
+  near_miss_total: number;
+  entry_total: number;
+  opened_total?: number;
+  trigger_total?: number;
+  block_reasons: Record<string, number>;
+  tip_gap_opened?: WickStatsSummary;
+  tip_gap_trigger?: WickStatsSummary;
+  trade_age_ms?: WickStatsSummary;
+  detect_to_lock_ms?: WickStatsSummary;
+  open_api_db_ms?: WickStatsSummary;
+  speed_labels?: Record<string, string>;
+  vol_blocked_deep?: {
+    progress_min: number;
+    count: number;
+    listed: number;
+    vol_summary: WickStatsSummary;
+    shortfall_summary: WickStatsSummary;
+    progress_summary: WickStatsSummary;
+    counterfactual: {
+      need_5_pass: number;
+      need_4_5_pass: number;
+      total: number;
+    };
+    rows: WickStatsDeepRow[];
+  };
+  open_quality?: WickStatsOpenQuality | null;
+  text: string;
 };

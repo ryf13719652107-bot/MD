@@ -12,7 +12,7 @@ from .config import settings, BEIJING_TZ
 from .database import init_db, get_db, async_session
 from .models.bot_config import BotConfig
 from .models.strategy import Strategy
-from .routers import account, strategies, positions, trades, dashboard, coin_pool, websocket, equity
+from .routers import account, strategies, positions, trades, dashboard, coin_pool, websocket, equity, wick_stats
 from .services.scheduler import strategy_scheduler
 from .services.binance_service import get_public_binance
 from .services.coin_pool_service import coin_pool_service
@@ -187,6 +187,7 @@ app.include_router(dashboard.router)
 app.include_router(coin_pool.router)
 app.include_router(websocket.router)
 app.include_router(equity.router)
+app.include_router(wick_stats.router)
 
 # Serve frontend static files
 # __file__ = backend/app/main.py → go up 3 levels to project root

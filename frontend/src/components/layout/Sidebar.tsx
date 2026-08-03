@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard, CandlestickChart, BrainCircuit,
+  LayoutDashboard, BarChart3, BrainCircuit,
   ListOrdered, History, Database, Settings,
   LogOut,
 } from 'lucide-react';
@@ -8,7 +8,7 @@ import { useAuthStore } from '../../store/authStore';
 
 const links = [
   { to: '/', icon: LayoutDashboard, label: '仪表盘', guestAllowed: true },
-  { to: '/chart', icon: CandlestickChart, label: '图表分析', guestAllowed: false },
+  { to: '/stats', icon: BarChart3, label: '接针统计', guestAllowed: false },
   { to: '/strategies', icon: BrainCircuit, label: '策略管理', guestAllowed: false },
   { to: '/positions', icon: ListOrdered, label: '当前持仓', guestAllowed: true },
   { to: '/trades', icon: History, label: '交易历史', guestAllowed: true },

@@ -123,6 +123,25 @@ def spike_progress(direction: str, bar_open: float, extreme: float, n: float) ->
     return 0.0
 
 
+def tip_gap_pct(bar_open: float, extreme: float, entry_px: float) -> float:
+    """进场价相对本根极值的距离（占开盘价 %）。越小越贴针尖。"""
+    if bar_open <= 0:
+        return 0.0
+    return abs(float(entry_px) - float(extreme)) / bar_open * 100.0
+
+
+def snapshot_extreme(direction: str, snap: WickBarSnapshot, last_price: float) -> float:
+    """用 K 线高低 + 最新价估本根接针方向极值。"""
+    d = (direction or "").lower()
+    if d == "short":
+        hi = snap.kline_high if snap.kline_high > 0 else last_price
+        return max(hi, last_price)
+    if d == "long":
+        lo = snap.kline_low if snap.kline_low > 0 else last_price
+        return min(lo, last_price) if lo > 0 else last_price
+    return last_price
+
+
 def effective_volume_mult(params: WickSpikeParams, progress: float) -> float:
     """progress 量能放宽下的有效放量倍数。"""
     if not params.vol_relax_enabled:

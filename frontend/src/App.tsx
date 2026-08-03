@@ -1,8 +1,8 @@
 import { Component, ReactNode } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Navigate, Routes, Route } from 'react-router-dom';
 import AppShell from './components/layout/AppShell';
 import DashboardPage from './components/dashboard/DashboardPage';
-import ChartPage from './components/chart/ChartPage';
+import WickStatsPage from './components/stats/WickStatsPage';
 import StrategyPage from './components/strategy/StrategyPage';
 import StrategyDetailPage from './components/strategy/StrategyDetailPage';
 import PositionsPage from './components/positions/PositionsPage';
@@ -54,13 +54,14 @@ export default function App() {
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route
-            path="/chart/:symbol?"
+            path="/stats"
             element={
               <RoleRoute allowedRoles={['owner']}>
-                <ChartPage />
+                <WickStatsPage />
               </RoleRoute>
             }
           />
+          <Route path="/chart/:symbol?" element={<Navigate to="/stats" replace />} />
           <Route
             path="/strategies"
             element={

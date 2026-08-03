@@ -469,10 +469,17 @@ class BinanceService:
         formatted = [self._format_symbol(s) for s in symbols] if symbols else None
         return await self.exchange.fetch_tickers(formatted)
 
-    async def fetch_klines(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list:
-        return await self.exchange.fetch_ohlcv(
-            self._format_symbol(symbol), timeframe=timeframe, limit=limit
-        )
+    async def fetch_klines(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 100,
+        since: int | None = None,
+    ) -> list:
+        kwargs: dict = {"timeframe": timeframe, "limit": limit}
+        if since is not None:
+            kwargs["since"] = since
+        return await self.exchange.fetch_ohlcv(self._format_symbol(symbol), **kwargs)
 
     async def fetch_positions(self, symbols: list[str] | None = None) -> list[dict]:
         if not symbols:

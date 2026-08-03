@@ -49,10 +49,14 @@ from .wick_spike_engine import (
     WickSymbolState,
     build_bar_snapshot,
     enrich_snap_with_trades,
-    mark_bar_triggered,
+    effective_volume_mult,
     near_miss_diag,
     on_tick,
+    mark_bar_triggered,
     release_bar_trigger,
+    spike_progress,
+    snapshot_extreme,
+    tip_gap_pct,
 )
 from .strategy_engine import Signal
 
@@ -554,6 +558,11 @@ class WickSpikeRunner:
 
         vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
         n = snap.atr * params.atr_mult
+        direction = (signal.value or "").lower()
+        extreme = snapshot_extreme(direction, snap, price)
+        progress = spike_progress(direction, snap.bar_open, extreme, n)
+        need = effective_volume_mult(params, progress)
+        gap = tip_gap_pct(snap.bar_open, extreme, price)
         trade_age_ms = (
             max(0, int(time.time() * 1000) - int(trade_ts_ms)) if trade_ts_ms > 0 else -1
         )
@@ -565,17 +574,25 @@ class WickSpikeRunner:
         strategy_log_service.info(
             strategy_id,
             f"{symbol} 毫秒接针触发 → {signal.value} "
-            f"价={price:.6g} open={snap.bar_open:.6g} N={n:.6g} "
-            f"ATR={snap.atr:.6g} vol×={vol_ratio:.1f}",
+            f"价={price:.6g} open={snap.bar_open:.6g} ext={extreme:.6g} "
+            f"N={n:.6g} progress={progress:.2f} tip_gap%={gap:.3f} "
+            f"ATR={snap.atr:.6g} vol×={vol_ratio:.1f} need×={need:g}",
         )
         logger.info(
-            "wick_spike trigger strategy=%d %s %s px=%.6g vol×=%.2f "
+            "wick_spike trigger strategy=%d %s %s px=%.6g open=%.6g ext=%.6g "
+            "atrN=%.6g progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g "
             "trade_age_ms=%d detect_to_lock_ms=%.1f",
             strategy_id,
             symbol,
             signal.value,
             price,
+            snap.bar_open,
+            extreme,
+            n,
+            progress,
+            gap,
             vol_ratio,
+            need,
             trade_age_ms,
             detect_ms,
         )
@@ -640,12 +657,19 @@ class WickSpikeRunner:
                     open_ms = (time.perf_counter() - t_open0) * 1000.0
                     logger.info(
                         "wick_spike opened strategy=%d %s open_api_db_ms=%.0f "
-                        "trade_age_ms=%d vol×=%.2f",
+                        "trade_age_ms=%d px=%.6g open=%.6g ext=%.6g "
+                        "progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g",
                         strategy_id,
                         symbol,
                         open_ms,
                         trade_age_ms,
+                        price,
+                        snap.bar_open,
+                        extreme,
+                        progress,
+                        gap,
                         vol_ratio,
+                        need,
                     )
                     return "opened"
                 except Exception as e:
