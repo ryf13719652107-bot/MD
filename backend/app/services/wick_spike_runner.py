@@ -100,6 +100,11 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             if getattr(strategy, "wick_min_move_pct", None) is not None
             else 3.0
         ),
+        max_retrace_pct=float(
+            getattr(strategy, "wick_max_retrace_pct", 50.0)
+            if getattr(strategy, "wick_max_retrace_pct", None) is not None
+            else 50.0
+        ),
     )
     atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
     vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)

@@ -10,6 +10,7 @@ progress 量能放宽（可选，默认开）：
   progress ≥ full 时 need = vol_relax_mult。
 
 min_move_pct（默认 3）：本根极值相对开盘的涨跌幅 % 须 ≥ 该值才允许触发；0=关闭。
+max_retrace_pct（默认 50）：现价相对「开盘→极值」已回撤的比例 %；超过则跳过（收回一半不做）；0=关闭。
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ _VOL_RELAX_MULT = 5.0
 
 
 _MIN_MOVE_PCT = 3.0
+_MAX_RETRACE_PCT = 50.0
 
 
 @dataclass
@@ -41,6 +43,8 @@ class WickSpikeParams:
     vol_relax_mult: float = _VOL_RELAX_MULT
     # 本根相对开盘最小涨跌幅 %（0=关闭）
     min_move_pct: float = _MIN_MOVE_PCT
+    # 开盘→极值方向上回撤占比上限 %（0=关闭）
+    max_retrace_pct: float = _MAX_RETRACE_PCT
 
 
 @dataclass
@@ -161,10 +165,46 @@ def _move_ok(params: WickSpikeParams, direction: str, bar_open: float, extreme: 
 
 
 def tip_gap_pct(bar_open: float, extreme: float, entry_px: float) -> float:
-    """进场价相对本根极值的距离（占开盘价 %）。越小越贴针尖。"""
+    """进场价相对本根极值的距离（占开盘价 %）。越小越贴针尖。仅用于日志/统计。"""
     if bar_open <= 0:
         return 0.0
     return abs(float(entry_px) - float(extreme)) / bar_open * 100.0
+
+
+def wick_retrace_pct(
+    direction: str, bar_open: float, extreme: float, last_price: float
+) -> float:
+    """现价相对「开盘→极值」已回撤的比例 %。
+
+    0 = 仍在极值；100 = 已回到开盘。做多：从低点往上收回；做空：从高点往下收回。
+    """
+    d = (direction or "").lower()
+    if d == "long":
+        span = float(bar_open) - float(extreme)
+        if span <= 0:
+            return 0.0
+        recovered = float(last_price) - float(extreme)
+        return max(0.0, min(100.0, recovered / span * 100.0))
+    if d == "short":
+        span = float(extreme) - float(bar_open)
+        if span <= 0:
+            return 0.0
+        recovered = float(extreme) - float(last_price)
+        return max(0.0, min(100.0, recovered / span * 100.0))
+    return 0.0
+
+
+def _retrace_ok(
+    params: WickSpikeParams,
+    direction: str,
+    bar_open: float,
+    extreme: float,
+    last_price: float,
+) -> bool:
+    max_r = float(params.max_retrace_pct or 0)
+    if max_r <= 0:
+        return True
+    return wick_retrace_pct(direction, bar_open, extreme, last_price) <= max_r + 1e-12
 
 
 def snapshot_extreme(direction: str, snap: WickBarSnapshot, last_price: float) -> float:
@@ -348,6 +388,8 @@ def on_tick(
     if not _volume_hot(params, snap, volume_mult=need):
         return None
     if not _move_ok(params, direction, snap.bar_open, extreme):
+        return None
+    if not _retrace_ok(params, direction, snap.bar_open, extreme, last_price):
         return None
 
     if direction == "long":

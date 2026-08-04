@@ -44,6 +44,10 @@ class Strategy(Base):
     wick_min_move_pct: Mapped[float] = mapped_column(
         Float, default=3.0, server_default="3.0"
     )
+    # 开盘→极值回撤占比上限 %；超过则跳过；0=关闭
+    wick_max_retrace_pct: Mapped[float] = mapped_column(
+        Float, default=50.0, server_default="50.0"
+    )
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)

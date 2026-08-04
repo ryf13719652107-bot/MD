@@ -14,6 +14,8 @@ from app.services.wick_spike_engine import (
     release_bar_trigger,
     spike_move_pct,
     spike_progress,
+    tip_gap_pct,
+    wick_retrace_pct,
 )
 
 
@@ -49,7 +51,9 @@ def test_no_volume_no_trigger_even_if_pierced():
 def test_volume_then_extreme_retroactive_long():
     """价先刺穿、量后到 — 放量瞬间用 bar_low 追认。"""
     state = WickSymbolState()
-    params = WickSpikeParams(direction="long", volume_mult=8.0, atr_mult=5.0)
+    params = WickSpikeParams(
+        direction="long", volume_mult=8.0, atr_mult=5.0, max_retrace_pct=0
+    )
     # First: no volume, track extreme (open-5*ATR = 95)
     snap_cold = _snap(vol_now=10.0, vol_sma=10.0, low=94.0)
     assert on_tick(state, params, snap_cold, last_price=94.0, now_ms=1) is None
@@ -63,7 +67,7 @@ def test_volume_then_extreme_retroactive_long():
 
 def test_volume_then_later_touch_long():
     state = WickSymbolState()
-    params = WickSpikeParams(direction="long", volume_mult=8.0, atr_mult=5.0)
+    params = WickSpikeParams(direction="long", volume_mult=8.0, atr_mult=5.0, max_retrace_pct=0)
     snap = _snap(vol_now=80.0, vol_sma=10.0, low=99.0, high=101.0)
     assert on_tick(state, params, snap, last_price=99.0, now_ms=1) is None
     sig = on_tick(state, params, snap, last_price=94.5, now_ms=2)
@@ -119,7 +123,9 @@ def test_release_allows_retry_same_bar():
 def test_new_bar_seeds_extremes_from_kline():
     """换 K 时用 K 线高低初始化，避免只靠 last_price 丢掉本根已走出的针。"""
     state = WickSymbolState()
-    params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
+    params = WickSpikeParams(
+        direction="short", volume_mult=8.0, atr_mult=5.0, max_retrace_pct=0
+    )
     snap = _snap(ts=1, vol_now=80.0, vol_sma=10.0, open_=100.0, high=106.0, low=99.0)
     assert on_tick(state, params, snap, last_price=101.0, now_ms=1) == Signal.SHORT
     assert state.bar_high == 106.0
@@ -195,7 +201,9 @@ def test_enrich_snap_prefers_trade_volume_and_high():
     assert enriched.kline_low == 98.5
     # 成交流量够热 + 刺破 → 立刻空头
     state = WickSymbolState()
-    params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0)
+    params = WickSpikeParams(
+        direction="short", volume_mult=8.0, atr_mult=5.0, max_retrace_pct=0
+    )
     assert on_tick(state, params, enriched, last_price=102.0, now_ms=1) == Signal.SHORT
 
 
@@ -232,6 +240,38 @@ def test_min_move_pct_zero_disables():
     params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0, min_move_pct=0)
     snap = _snap(open_=100.0, atr=0.2, vol_now=80.0, vol_sma=10.0, high=101.5, low=100.0)
     assert on_tick(state, params, snap, last_price=101.5, now_ms=1) == Signal.SHORT
+
+
+def test_max_retrace_blocks_half_recovery():
+    """极值已刺破且量够，但从极值向开盘已回撤超过 50% → 不开。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+    )
+    # open=100, low=90 → 针长 10；现价 96 → 回撤 60% > 50%
+    snap = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert wick_retrace_pct("long", 100.0, 90.0, 96.0) == 60.0
+    assert on_tick(state, params, snap, last_price=96.0, now_ms=1) is None
+    # 现价 94 → 回撤 40% ≤ 50% → 放行
+    release_bar_trigger(state)
+    assert on_tick(state, params, snap, last_price=94.0, now_ms=2) == Signal.LONG
+
+
+def test_max_retrace_zero_disables():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=0,
+    )
+    snap = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap, last_price=96.0, now_ms=1) == Signal.LONG
 
 
 def test_pierce_vol_view_pierced_but_cold():

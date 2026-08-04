@@ -26,6 +26,8 @@ export interface Strategy {
   wick_vol_relax_mult: number;
   /** 本根相对开盘最小涨跌幅%；0=关闭 */
   wick_min_move_pct: number;
+  /** 开盘→极值回撤占比上限%；0=关闭 */
+  wick_max_retrace_pct: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -95,6 +97,7 @@ export interface StrategyFormData {
   wick_vol_relax_progress_full: number;
   wick_vol_relax_mult: number;
   wick_min_move_pct: number;
+  wick_max_retrace_pct: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;

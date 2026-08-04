@@ -39,6 +39,7 @@ const schema = z.object({
   wick_vol_relax_progress_full: z.number().min(0).max(10),
   wick_vol_relax_mult: z.number().min(0).max(100),
   wick_min_move_pct: z.number().min(0).max(50),
+  wick_max_retrace_pct: z.number().min(0).max(100),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -121,6 +122,7 @@ function toFormDefaults(
       wick_vol_relax_progress_full: initialData.wick_vol_relax_progress_full ?? 1.5,
       wick_vol_relax_mult: initialData.wick_vol_relax_mult ?? 5,
       wick_min_move_pct: initialData.wick_min_move_pct ?? 3,
+      wick_max_retrace_pct: initialData.wick_max_retrace_pct ?? 50,
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -189,6 +191,7 @@ function toFormDefaults(
     wick_vol_relax_progress_full: 1.5,
     wick_vol_relax_mult: 5,
     wick_min_move_pct: 3,
+    wick_max_retrace_pct: 50,
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -397,6 +400,11 @@ export default function StrategyForm({
                 <label className={labelClass}>最小涨跌幅 %</label>
                 <input type="number" step="0.1" {...register('wick_min_move_pct', { valueAsNumber: true })} className={inputClass} />
                 <span className="text-xs text-gray-600">相对本根开盘；默认 3，填 0 关闭</span>
+              </div>
+              <div>
+                <label className={labelClass}>最大回撤 %</label>
+                <input type="number" step="1" {...register('wick_max_retrace_pct', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">相对开盘→极值；默认 50（收回一半跳过）；填 0 关闭</span>
               </div>
               <div>
                 <label className={labelClass}>开始放宽 progress</label>
