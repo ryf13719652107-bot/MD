@@ -1540,7 +1540,7 @@ class PositionManager:
             strategy_log_service.error(
                 strategy_id, f"{symbol} 开仓已成交但DB记录失败 — 请手动检查交易所仓位!"
             )
-            return
+            raise
 
         logger.info(
             "Strategy %d: opened %s %s qty=%.4f price=%.4f %s",

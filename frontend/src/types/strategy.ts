@@ -28,6 +28,12 @@ export interface Strategy {
   wick_min_move_pct: number;
   /** 开盘→极值回撤占比上限%；0=关闭 */
   wick_max_retrace_pct: number;
+  /** 刺破后等量窗口秒数；0=关闭武装 */
+  wick_arm_wait_sec: number;
+  /** 武装时量不够，确认前 N 秒免回撤 */
+  wick_arm_retrace_grace_sec: number;
+  /** grace 免回撤时 tip_gap% 上限；0=不限制 */
+  wick_arm_grace_max_tip_gap_pct: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -100,6 +106,9 @@ export interface StrategyFormData {
   wick_vol_relax_mult: number;
   wick_min_move_pct: number;
   wick_max_retrace_pct: number;
+  wick_arm_wait_sec: number;
+  wick_arm_retrace_grace_sec: number;
+  wick_arm_grace_max_tip_gap_pct: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;

@@ -307,3 +307,160 @@ def test_pierce_vol_view_not_pierced():
     view = pierce_vol_view(params, snap, state, 101.0)
     assert view is not None
     assert view.pierced is False
+
+
+def test_arm_then_volume_within_grace_ignores_retrace():
+    """刺破时装量不够 → 武装；grace 内量到了即使回撤>50% 也开（须 tip_gap 合格）。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=12.0,
+        arm_retrace_grace_sec=3.0,
+        arm_grace_max_tip_gap_pct=2.0,
+    )
+    # open=100, low=90 刺破；量不够
+    snap_cold = _snap(vol_now=20.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap_cold, last_price=90.0, now_ms=1_000) is None
+    assert state.armed_bar_ts == snap_cold.bar_open_ts
+    assert state.armed_awaiting_vol is True
+
+    # 1s 后量够：现价 91.5 → 回撤 15% 本可过，但即使放到更高回撤，tip_gap=1.5%≤2
+    # 用 91.8：回撤 18%，tip_gap=1.8%≤2，且若按 50% 回撤也过；改用人为更高回撤场景：
+    # tip_gap 1.5%、回撤=(91.5-90)/10=15% — 为测 grace，把 max_retrace 调到 10%
+    params.max_retrace_pct = 10.0
+    snap_hot = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert wick_retrace_pct("long", 100.0, 90.0, 91.5) == 15.0
+    assert tip_gap_pct(100.0, 90.0, 91.5) == 1.5
+    assert on_tick(state, params, snap_hot, last_price=91.5, now_ms=2_000) == Signal.LONG
+
+
+def test_arm_grace_blocked_by_tip_gap():
+    """grace 内量够但 tip_gap 超上限 → 不开。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=10.0,
+        arm_wait_sec=12.0,
+        arm_retrace_grace_sec=3.0,
+        arm_grace_max_tip_gap_pct=2.0,
+    )
+    snap_cold = _snap(vol_now=20.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap_cold, last_price=90.0, now_ms=1_000) is None
+    snap_hot = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    # tip_gap=6% > 2
+    assert tip_gap_pct(100.0, 90.0, 96.0) == 6.0
+    assert on_tick(state, params, snap_hot, last_price=96.0, now_ms=2_000) is None
+
+
+def test_arm_volume_after_grace_still_needs_retrace():
+    """grace 过后量才够，回撤超限 → 仍不开。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=12.0,
+        arm_retrace_grace_sec=3.0,
+        arm_grace_max_tip_gap_pct=0,  # 本测只看回撤
+    )
+    snap_cold = _snap(vol_now=20.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap_cold, last_price=90.0, now_ms=1_000) is None
+
+    snap_hot = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    # 4s 后超过 grace
+    assert on_tick(state, params, snap_hot, last_price=96.0, now_ms=5_000) is None
+    # 回撤合格仍可开
+    assert on_tick(state, params, snap_hot, last_price=94.0, now_ms=5_100) == Signal.LONG
+
+
+def test_arm_expires_without_volume_same_depth_no_rearm():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        arm_wait_sec=2.0,
+        arm_retrace_grace_sec=3.0,
+    )
+    snap_cold = _snap(vol_now=20.0, vol_sma=10.0, low=90.0)
+    assert on_tick(state, params, snap_cold, last_price=90.0, now_ms=1_000) is None
+    # 超时
+    assert on_tick(state, params, snap_cold, last_price=90.0, now_ms=4_000) is None
+    assert state.armed_bar_ts is None
+    assert state.armed_expired_bar_ts == snap_cold.bar_open_ts
+    # 同深度量后来够了也不再武装
+    snap_hot = _snap(vol_now=80.0, vol_sma=10.0, low=90.0)
+    assert on_tick(state, params, snap_hot, last_price=90.0, now_ms=4_100) is None
+
+
+def test_arm_expires_then_deeper_progress_rearms():
+    """超时作废后，更深针（progress 创新高）可再武装并开仓。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=0,
+        arm_wait_sec=2.0,
+        arm_retrace_grace_sec=3.0,
+    )
+    # atr=1 → N=5；low=94 → progress=(100-94)/5=1.2
+    snap1 = _snap(vol_now=20.0, vol_sma=10.0, low=94.0, high=100.0)
+    assert on_tick(state, params, snap1, last_price=94.0, now_ms=1_000) is None
+    assert on_tick(state, params, snap1, last_price=94.0, now_ms=4_000) is None
+    assert abs(state.armed_expired_progress - 1.2) < 1e-9
+
+    # 更深 low=90 → progress=2.0 > 1.2 → 再武装；量够即开
+    snap2 = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap2, last_price=90.0, now_ms=4_100) == Signal.LONG
+
+
+def test_same_tick_hot_volume_still_respects_retrace():
+    """同刻量已够时不走 grace，回撤超限直接拒绝（不误开）。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=12.0,
+        arm_retrace_grace_sec=3.0,
+    )
+    snap = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap, last_price=96.0, now_ms=1) is None
+    assert state.armed_awaiting_vol is False
+    assert on_tick(state, params, snap, last_price=94.0, now_ms=2) == Signal.LONG
+
+
+def test_volume_flicker_does_not_enable_grace():
+    """武装时量已够：随后量短暂掉下去再回来，不得靠 grace 绕过回撤。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=12.0,
+        arm_retrace_grace_sec=3.0,
+    )
+    snap_hot = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap_hot, last_price=96.0, now_ms=1_000) is None
+    assert state.armed_awaiting_vol is False
+    snap_cold = _snap(vol_now=20.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap_cold, last_price=96.0, now_ms=1_500) is None
+    assert state.armed_awaiting_vol is False
+    # 量回来但仍在坏回撤 → 仍拒绝
+    assert on_tick(state, params, snap_hot, last_price=96.0, now_ms=2_000) is None

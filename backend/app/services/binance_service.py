@@ -875,6 +875,11 @@ class BinanceService:
         """Public aggTrade / trades stream for millisecond last price."""
         return await self.ws_exchange.watch_trades(self._format_symbol(symbol))
 
+    async def watch_positions(self, symbols: list[str] | None = None):
+        """User Data Stream 持仓推送（需有效 API Key 的 pro 客户端）。"""
+        formatted = [self._format_symbol(s) for s in symbols] if symbols else None
+        return await self.ws_exchange.watch_positions(formatted)
+
     # ---- Helpers ----
 
     async def close(self):

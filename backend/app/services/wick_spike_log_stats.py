@@ -574,9 +574,9 @@ def _near_miss_reason_zh(r: NearMissRow) -> str:
         if mv == mv:
             return (
                 f"已刺破且量能达标但未开仓：amp%={mv:.2f}"
-                f"（可能未达最小涨跌幅/节流/占锁/同根已开）"
+                f"（可能回撤超限/节流/占锁/同根已开/武装已过期）"
             )
-        return "接近触发（已刺破且量能达标，可能被节流/占锁/同根已开）"
+        return "接近触发（已刺破且量能达标，可能回撤超限/节流/占锁）"
     return "接近但未开仓（详见 progress / vol×）"
 
 

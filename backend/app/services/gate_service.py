@@ -860,6 +860,9 @@ class GateService:
     async def watch_klines(self, symbol: str, timeframe: str = "1m"):
         return await self.ws_exchange.watch_ohlcv(self._format_symbol(symbol), timeframe)
 
+    async def watch_positions(self, symbols: list[str] | None = None):
+        raise NotImplementedError("Gate 账户持仓推送未接入")
+
     async def watch_trades(self, symbol: str):
         raise NotImplementedError("毫秒接针价流暂不支持 Gate")
 

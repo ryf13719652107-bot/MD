@@ -196,6 +196,11 @@ class StrategyScheduler:
                 "Resumed scheduler jobs for strategy %d (%s)",
                 s.id, s.name,
             )
+        # 重启后补一轮杠杆预热（不阻塞 resume）
+        if rows:
+            from .leverage_prewarm import prewarm_running_strategies_leverage
+
+            asyncio.create_task(prewarm_running_strategies_leverage())
 
     def _register_strategy_jobs(
         self,

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,21 @@ class PriceStreamManager:
         self._bar_vol: dict[str, float] = {}
         self._bar_high: dict[str, float] = {}
         self._bar_low: dict[str, float] = {}
+        # owner → Event：成交到达时 set，供接针 runner 事件驱动唤醒
+        self._wake_events: dict[str, asyncio.Event] = {}
+        # 可选轻量回调（禁止在回调里 await 下单）
+        self._trade_hooks: list[Callable[[str, float, float, int], None]] = []
+
+    def subscribe_wake(self, owner: str) -> asyncio.Event:
+        """为 owner 登记唤醒事件；成交写入后 set。"""
+        ev = self._wake_events.get(owner)
+        if ev is None:
+            ev = asyncio.Event()
+            self._wake_events[owner] = ev
+        return ev
+
+    def unsubscribe_wake(self, owner: str) -> None:
+        self._wake_events.pop(owner, None)
 
     def get(self, symbol: str) -> tuple[float, int] | None:
         """Return (price, event_ts_ms) or None."""
@@ -149,6 +164,7 @@ class PriceStreamManager:
             self._wanted_by_owner.pop(owner, None)
             self._owner_tf_ms.pop(owner, None)
             self._recompute_wanted_unlocked()
+        self.unsubscribe_wake(owner)
 
     def _apply_trade(self, symbol_norm: str, px: float, amount: float, ts_ms: int) -> None:
         self._prices[symbol_norm] = px
@@ -170,6 +186,14 @@ class PriceStreamManager:
         lo = self._bar_low.get(symbol_norm, px)
         self._bar_high[symbol_norm] = max(hi, px)
         self._bar_low[symbol_norm] = min(lo, px) if lo > 0 else px
+
+        for ev in self._wake_events.values():
+            ev.set()
+        for hook in self._trade_hooks:
+            try:
+                hook(symbol_norm, px, amount, ts_ms)
+            except Exception:
+                logger.debug("price_stream trade hook failed", exc_info=True)
 
     async def _run_symbol(self, symbol_norm: str) -> None:
         backoff = _RECONNECT_INITIAL_BACKOFF

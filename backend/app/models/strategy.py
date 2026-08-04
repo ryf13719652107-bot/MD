@@ -48,6 +48,18 @@ class Strategy(Base):
     wick_max_retrace_pct: Mapped[float] = mapped_column(
         Float, default=50.0, server_default="50.0"
     )
+    # 刺破后等量窗口（秒）；0=关闭武装
+    wick_arm_wait_sec: Mapped[float] = mapped_column(
+        Float, default=12.0, server_default="12.0"
+    )
+    # 武装时量不够，确认阶段前 N 秒免回撤；0=不放宽
+    wick_arm_retrace_grace_sec: Mapped[float] = mapped_column(
+        Float, default=3.0, server_default="3.0"
+    )
+    # grace 免回撤时 tip_gap% 上限；0=不限制
+    wick_arm_grace_max_tip_gap_pct: Mapped[float] = mapped_column(
+        Float, default=2.0, server_default="2.0"
+    )
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)
