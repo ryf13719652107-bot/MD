@@ -207,7 +207,11 @@ export default function StrategyDetailPage() {
           </div>
           <div>
             <span className={labelClass}>首单仓位</span>
-            <div className={valClass}>{strategy.base_qty_type === 'margin_pct' ? `保证金${strategy.base_qty_value}%` : `${strategy.base_qty_value} USDT`}</div>
+            <div className={valClass}>
+              {strategy.base_qty_type === 'margin_pct' ? `保证金${strategy.base_qty_value}%` : `${strategy.base_qty_value} USDT`}
+              {' · '}
+              {(strategy.skip_min_qty_exceeds ?? true) ? '最小数量跳过开' : '最小数量跳过关'}
+            </div>
           </div>
           <div>
             <span className={labelClass}>加仓倍数 / 最大层数</span>

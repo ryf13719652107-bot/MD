@@ -176,7 +176,7 @@ export default function StrategyPage() {
                 <div>RSI周期: <span className="text-gray-200">{s.rsi_period}</span></div>
               )}
               <div>信号: <span className="text-gray-200">{formatSignalSourceLabel(s.signal_source, s.direction, s.rsi_entry_threshold)}</span></div>
-              <div>首单仓位: <span className="text-gray-200">{s.base_qty_type === 'margin_pct' ? `保证金${s.base_qty_value}%` : `${s.base_qty_value} USDT`}</span></div>
+              <div>首单仓位: <span className="text-gray-200">{s.base_qty_type === 'margin_pct' ? `保证金${s.base_qty_value}%` : `${s.base_qty_value} USDT`}{(s.skip_min_qty_exceeds ?? true) ? ' · 最小跳过' : ''}</span></div>
               <div>加仓倍数: <span className="text-gray-200">x{s.martingale_mult}</span></div>
               <div>最大层数: <span className="text-gray-200">{s.max_layers}</span></div>
               <div>跌幅触发: <span className="text-gray-200">{s.price_drop_pct}%{s.price_drop_multiplier != null && s.price_drop_multiplier !== 1 ? ` (x${s.price_drop_multiplier} 递增)` : ''}</span></div>

@@ -8,6 +8,14 @@ def exclude_delisting_enabled(strategy) -> bool:
     return bool(v)
 
 
+def skip_min_qty_exceeds_enabled(strategy) -> bool:
+    """交易所最小开仓名义大于意图名义时跳过；NULL 默认开启。"""
+    v = getattr(strategy, "skip_min_qty_exceeds", None)
+    if v is None:
+        return True
+    return bool(v)
+
+
 def exclude_mainstream_enabled(strategy) -> bool:
     v = getattr(strategy, "exclude_mainstream", None)
     if v is None:

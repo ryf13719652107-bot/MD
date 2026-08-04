@@ -292,3 +292,133 @@ async def test_gate_base_to_contracts():
     contracts, cs = await svc._base_amount_to_contracts("BTC/USDT:USDT", 0.01)
     assert cs == 0.0001
     assert contracts == 100.0
+
+
+@pytest.mark.asyncio
+async def test_gate_prefers_quanto_multiplier_over_wrong_contract_size():
+    """BTW 类：ccxt contractSize=1 但 Gate quanto=100 → 必须用 100，否则 6U→~600U。"""
+    svc = GateService()
+    svc._pinned = True
+    svc._created_at = 0
+    svc._markets_loaded = True
+
+    class FakeEx:
+        def market(self, _sym):
+            return {
+                "contractSize": 1,
+                "info": {"quanto_multiplier": "100", "name": "BTW_USDT"},
+            }
+
+        def amount_to_precision(self, _sym, amount):
+            # Gate enable_decimal=false：整数张
+            return str(int(float(amount)))
+
+    svc._exchange = FakeEx()
+    # 6 USDT @ 0.1312 → base≈45.73 BTW → /100 ≈ 0.457 → 精度后 0 → 应拒绝而非抬到 1 张
+    base = 6.0 / 0.1312
+    with pytest.raises(RuntimeError, match="过小"):
+        await svc._base_amount_to_contracts("BTW/USDT:USDT", base, guard_open=True)
+
+    # 足够大的名义：60 USDT → base≈457 → 4 张
+    base60 = 60.0 / 0.1312
+    contracts, cs = await svc._base_amount_to_contracts(
+        "BTW/USDT:USDT", base60, guard_open=True
+    )
+    assert cs == 100.0
+    assert contracts == 4.0
+
+
+@pytest.mark.asyncio
+async def test_gate_estimate_min_open_notional_btw():
+    """1 张 BTW ≈ 100×price；6U 意图时最小名义应 > 6。"""
+    svc = GateService()
+    svc._pinned = True
+    svc._created_at = 0
+    svc._markets_loaded = True
+
+    class FakeEx:
+        def market(self, _sym):
+            return {
+                "contractSize": 1,
+                "limits": {"amount": {"min": 1}},
+                "info": {"quanto_multiplier": "100", "order_size_min": "1"},
+            }
+
+    svc._exchange = FakeEx()
+    price = 0.1312
+    min_n = await svc.estimate_min_open_notional("BTWUSDT", price)
+    assert min_n is not None
+    assert abs(min_n - 100 * price) < 1e-9
+    assert min_n > 6.0
+
+
+@pytest.mark.asyncio
+async def test_gate_open_requires_quanto_multiplier():
+    svc = GateService()
+    svc._pinned = True
+    svc._created_at = 0
+    svc._markets_loaded = True
+
+    class FakeEx:
+        def market(self, _sym):
+            return {"contractSize": 1, "info": {}}
+
+        def amount_to_precision(self, _sym, amount):
+            return str(int(float(amount)))
+
+    svc._exchange = FakeEx()
+    with pytest.raises(RuntimeError, match="quanto_multiplier"):
+        await svc._base_amount_to_contracts("XXX/USDT:USDT", 10.0, guard_open=True)
+
+
+@pytest.mark.asyncio
+async def test_gate_open_rejects_inflated_contracts():
+    """精度/异常路径若把张数抬爆，开仓护栏拒单。"""
+    svc = GateService()
+    svc._pinned = True
+    svc._created_at = 0
+    svc._markets_loaded = True
+
+    class FakeEx:
+        def market(self, _sym):
+            return {
+                "contractSize": 1,
+                "info": {"quanto_multiplier": "1"},
+            }
+
+        def amount_to_precision(self, _sym, amount):
+            # 故意放大
+            return str(int(float(amount) * 100))
+
+    svc._exchange = FakeEx()
+    with pytest.raises(RuntimeError, match="异常放大"):
+        await svc._base_amount_to_contracts("AAA/USDT:USDT", 10.0, guard_open=True)
+
+
+def test_gate_normalize_uses_quanto_not_row_contract_size():
+    svc = GateService()
+    svc._markets_loaded = True
+
+    class FakeEx:
+        def market(self, _sym):
+            return {
+                "contractSize": 1,
+                "info": {"quanto_multiplier": "100"},
+            }
+
+    svc._exchange = FakeEx()
+    rows = svc._normalize_positions_to_base(
+        [
+            {
+                "symbol": "BTW/USDT:USDT",
+                "side": "short",
+                "contracts": 46,  # Gate 张数
+                "contractSize": 1,  # ccxt 错误
+                "markPrice": 0.1312,
+                "info": {"mode": "dual_short"},
+            }
+        ]
+    )
+    assert rows[0]["side"] == "short"
+    assert abs(rows[0]["contracts"] - 4600.0) < 1e-6  # 46×100
+    assert abs(rows[0]["notional"] - 4600.0 * 0.1312) < 1e-3

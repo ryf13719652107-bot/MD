@@ -31,6 +31,8 @@ export interface Strategy {
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
+  /** 交易所最小开仓名义 > 意图名义时跳过，默认 true */
+  skip_min_qty_exceeds: boolean;
   rsi_entry_threshold: number;
   price_drop_pct: number;
   price_drop_multiplier: number;
@@ -101,6 +103,8 @@ export interface StrategyFormData {
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
+  /** 交易所最小开仓名义 > 意图名义时跳过，默认 true */
+  skip_min_qty_exceeds: boolean;
   rsi_entry_threshold: number;
   price_drop_pct: number;
   price_drop_multiplier: number;

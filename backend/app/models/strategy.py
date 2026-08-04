@@ -69,6 +69,10 @@ class Strategy(Base):
     # Entry position params
     base_qty_type: Mapped[str] = mapped_column(String(20), default="margin_pct")  # 'margin_pct' or 'usdt'
     base_qty_value: Mapped[float] = mapped_column(Float, default=6.0)  # 6% margin or USDT amount
+    # True: 交易所最小开仓名义 > 意图名义时跳过（不抬仓、不报错硬开）
+    skip_min_qty_exceeds: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="1"
+    )
     rsi_entry_threshold: Mapped[float] = mapped_column(Float, default=30.0)  # long=30, short=75
 
     # Martingale params

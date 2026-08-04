@@ -43,6 +43,7 @@ const schema = z.object({
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
+  skip_min_qty_exceeds: z.coerce.boolean(),
   rsi_entry_threshold: z.number().min(0).max(100),
   price_drop_pct: z.number().min(0.1).max(100),
   price_drop_multiplier: z.number().min(1).max(5),
@@ -126,6 +127,7 @@ function toFormDefaults(
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
+      skip_min_qty_exceeds: initialData.skip_min_qty_exceeds ?? true,
       rsi_entry_threshold: initialData.rsi_entry_threshold,
       price_drop_pct: initialData.price_drop_pct,
       price_drop_multiplier: initialData.price_drop_multiplier ?? 1,
@@ -195,6 +197,7 @@ function toFormDefaults(
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
+    skip_min_qty_exceeds: true,
     rsi_entry_threshold: 30,
     price_drop_pct: 30,
     price_drop_multiplier: 1,
@@ -528,6 +531,19 @@ export default function StrategyForm({
               </label>
               <span className="text-xs text-gray-500">{watch('use_coin_pool') ? '选币池自动' : '固定交易对'}</span>
             </label>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-sky-500/35 bg-sky-950/20 px-3 py-2.5 flex items-start gap-3">
+          <label className="relative inline-flex items-center cursor-pointer mt-0.5 shrink-0">
+            <input type="checkbox" {...register('skip_min_qty_exceeds')} className="sr-only peer" />
+            <div className="w-9 h-5 bg-gray-600 peer-checked:bg-sky-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
+          </label>
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-sky-100/95">最小数量跳过</div>
+            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+              <strong className="text-gray-300">默认开启</strong>：若交易所最小开仓名义大于首单意图（如设 6U，而 1 张就要 13U），则跳过该币，不会抬仓硬开。
+            </p>
           </div>
         </div>
 

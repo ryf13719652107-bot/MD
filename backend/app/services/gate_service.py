@@ -36,6 +36,9 @@ _GATE_TRADEFI_CONTRACT_TYPES = frozenset({
     "bonds",
 })
 
+# 开仓：换算后币数量 / 意图币数量 超过此倍数则拒单（防 contractSize 错误放大）
+_GATE_OPEN_SIZE_MAX_RATIO = 2.5
+
 
 def gate_cache_clear() -> None:
     _TRADEFI_CACHE.clear()
@@ -380,27 +383,163 @@ class GateService:
             self._format_symbol(symbol), timeframe=timeframe, limit=limit
         )
 
-    def _contract_size(self, formatted: str) -> float:
+    def _contract_size(self, formatted: str, *, require_quanto: bool = False) -> float:
+        """一张合约对应的标的币数量。
+
+        Gate 真实规格在 info.quanto_multiplier；部分币种 ccxt 的 contractSize 会落成 1，
+        若误用会导致下单张数放大数十～上百倍（如 BTW quanto=100 → 6U 变成 ~600U）。
+
+        require_quanto=True（开仓）：没有 quanto 直接拒绝，禁止静默 fallback。
+        """
         try:
             market = self.exchange.market(formatted)
-            cs = float(market.get("contractSize") or 1) or 1.0
-            return cs if cs > 0 else 1.0
         except Exception:
+            if require_quanto:
+                raise RuntimeError(
+                    f"Gate {formatted} 无法读取市场信息，拒绝开仓以防数量错误"
+                ) from None
+            logger.error("Gate %s market lookup failed; contractSize fallback 1.0", formatted)
             return 1.0
+        info = market.get("info") if isinstance(market.get("info"), dict) else {}
+        for key in ("quanto_multiplier", "quantoMultiplier"):
+            raw = info.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                q = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if q > 0:
+                try:
+                    cs_ccxt = float(market.get("contractSize") or 0) or 0.0
+                except (TypeError, ValueError):
+                    cs_ccxt = 0.0
+                if cs_ccxt > 0 and abs(cs_ccxt - q) / max(q, 1e-12) > 0.01:
+                    logger.warning(
+                        "Gate %s contractSize mismatch: ccxt=%s quanto_multiplier=%s; using quanto",
+                        formatted,
+                        cs_ccxt,
+                        q,
+                    )
+                return q
+        if require_quanto:
+            raise RuntimeError(
+                f"Gate {formatted} 缺少 quanto_multiplier，拒绝开仓以防数量错误"
+            )
+        try:
+            cs = float(market.get("contractSize") or 1) or 1.0
+        except (TypeError, ValueError):
+            cs = 1.0
+        if cs <= 0:
+            cs = 1.0
+        if abs(cs - 1.0) < 1e-12:
+            logger.warning(
+                "Gate %s missing quanto_multiplier and contractSize=1; size may be wrong",
+                formatted,
+            )
+        return cs
 
-    async def _base_amount_to_contracts(self, formatted: str, base_amount: float) -> tuple[float, float]:
+    @staticmethod
+    def _assert_open_contracts_not_inflated(
+        formatted: str,
+        base_amount: float,
+        contracts: float,
+        cs: float,
+    ) -> None:
+        """开仓前核对：张×乘数 不得远超意图币数量。"""
+        intended = float(base_amount)
+        if intended <= 0 or contracts <= 0 or cs <= 0:
+            return
+        actual = float(contracts) * float(cs)
+        ratio = actual / intended
+        if ratio > _GATE_OPEN_SIZE_MAX_RATIO:
+            raise RuntimeError(
+                f"Gate 开仓数量异常放大已拒绝 {formatted}: "
+                f"意图币数={intended:.6g} 实际={actual:.6g} "
+                f"(张={contracts:g}×乘数={cs:g}) ratio={ratio:.2f} "
+                f"> {_GATE_OPEN_SIZE_MAX_RATIO}"
+            )
+
+    def _min_open_contracts(self, formatted: str) -> float:
+        """交易所允许的最小开仓张数（默认 1）。"""
+        min_contracts = 1.0
+        try:
+            market = self.exchange.market(formatted)
+        except Exception:
+            return min_contracts
+        limits = market.get("limits") if isinstance(market.get("limits"), dict) else {}
+        amount_lim = limits.get("amount") if isinstance(limits.get("amount"), dict) else {}
+        raw_min = amount_lim.get("min")
+        if raw_min is not None and raw_min != "":
+            try:
+                v = float(raw_min)
+                if v > 0:
+                    min_contracts = max(min_contracts, v)
+            except (TypeError, ValueError):
+                pass
+        info = market.get("info") if isinstance(market.get("info"), dict) else {}
+        for key in ("order_size_min", "order_size"):
+            raw = info.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                min_contracts = max(min_contracts, v)
+                break
+        return min_contracts
+
+    async def estimate_min_open_notional(self, symbol: str, price: float) -> float | None:
+        """最小开仓名义(USDT) ≈ min_contracts × quanto × price。"""
+        if price is None or float(price) <= 0:
+            return None
+        await self.ensure_markets_loaded()
+        formatted = self._format_symbol(symbol)
+        try:
+            cs = self._contract_size(formatted, require_quanto=True)
+        except RuntimeError:
+            return None
+        if cs <= 0:
+            return None
+        min_contracts = self._min_open_contracts(formatted)
+        min_n = float(min_contracts) * float(cs) * float(price)
+        try:
+            market = self.exchange.market(formatted)
+            limits = market.get("limits") if isinstance(market.get("limits"), dict) else {}
+            cost_lim = limits.get("cost") if isinstance(limits.get("cost"), dict) else {}
+            cost_min = cost_lim.get("min")
+            if cost_min is not None and cost_min != "":
+                cm = float(cost_min)
+                if cm > 0:
+                    min_n = max(min_n, cm)
+        except Exception:
+            pass
+        return min_n if min_n > 0 else None
+
+    async def _base_amount_to_contracts(
+        self,
+        formatted: str,
+        base_amount: float,
+        *,
+        guard_open: bool = False,
+    ) -> tuple[float, float]:
         """业务层按币数量传入；Gate/ccxt 下单要「张」。返回 (contracts, contractSize)。"""
         await self.ensure_markets_loaded()
-        cs = self._contract_size(formatted)
+        cs = self._contract_size(formatted, require_quanto=guard_open)
         raw = float(base_amount) / cs
         try:
             contracts = float(self.exchange.amount_to_precision(formatted, raw))
         except Exception:
             contracts = raw
+        # enable_decimal=false 时精度可能把 <1 张打成 0；勿静默抬到 1 张（会放大名义）
         if contracts <= 0:
             raise RuntimeError(
-                f"Gate 下单数量过小无法换算为合约张数: base={base_amount} cs={cs}"
+                f"Gate 下单数量过小无法换算为合约张数: base={base_amount} cs={cs} raw={raw}"
             )
+        if guard_open:
+            self._assert_open_contracts_not_inflated(formatted, base_amount, contracts, cs)
         return contracts, cs
 
     @staticmethod
@@ -430,7 +569,10 @@ class GateService:
         return None
 
     def _normalize_positions_to_base(self, positions: list[dict]) -> list[dict]:
-        """contracts→币数量；强制 dual_long/dual_short → side；contractSize 置 1。"""
+        """contracts→币数量；强制 dual_long/dual_short → side；contractSize 置 1。
+
+        乘数一律走 _contract_size（优先 quanto），不信任仓位行里可能错误的 contractSize=1。
+        """
         out: list[dict] = []
         for p in positions or []:
             row = dict(p)
@@ -441,24 +583,24 @@ class GateService:
                 contracts = float(row.get("contracts", 0) or 0)
             except (TypeError, ValueError):
                 contracts = 0.0
+            sym = row.get("symbol") or ""
             try:
-                cs = float(row.get("contractSize", 0) or 0) or 0.0
-            except (TypeError, ValueError):
-                cs = 0.0
+                cs = self._contract_size(self._format_symbol(sym))
+            except Exception:
+                cs = 1.0
             if cs <= 0:
-                sym = row.get("symbol") or ""
-                try:
-                    cs = self._contract_size(self._format_symbol(sym))
-                except Exception:
-                    cs = 1.0
+                cs = 1.0
             if contracts != 0:
-                row["contracts"] = abs(contracts) * (cs if cs != 1.0 else 1.0)
-                if cs != 1.0:
-                    row["contractSize"] = 1.0
-                if row.get("notional") in (None, 0, 0.0):
-                    mark = float(row.get("markPrice", 0) or 0)
-                    if mark > 0:
-                        row["notional"] = float(row["contracts"]) * mark
+                row["contracts"] = abs(contracts) * cs
+                row["contractSize"] = 1.0
+                mark = float(row.get("markPrice", 0) or 0)
+                if mark <= 0:
+                    try:
+                        mark = float(row.get("entryPrice", 0) or 0)
+                    except (TypeError, ValueError):
+                        mark = 0.0
+                if mark > 0 and row.get("notional") in (None, 0, 0.0):
+                    row["notional"] = float(row["contracts"]) * mark
             out.append(row)
         return out
 
@@ -579,7 +721,9 @@ class GateService:
         if not reduce_only:
             await self.ensure_dual_mode()
         formatted = self._format_symbol(symbol)
-        contracts, cs = await self._base_amount_to_contracts(formatted, amount)
+        contracts, cs = await self._base_amount_to_contracts(
+            formatted, amount, guard_open=not reduce_only
+        )
         params = self._order_params(position_side, reduce_only)
 
         if slippage_pct and slippage_pct > 0:
@@ -629,7 +773,9 @@ class GateService:
         if not reduce_only:
             await self.ensure_dual_mode()
         formatted = self._format_symbol(symbol)
-        contracts, cs = await self._base_amount_to_contracts(formatted, amount)
+        contracts, cs = await self._base_amount_to_contracts(
+            formatted, amount, guard_open=not reduce_only
+        )
         order = await self.exchange.create_order(
             formatted,
             "limit",

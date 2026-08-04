@@ -787,6 +787,61 @@ class PositionManager:
         return base_qty
 
     @staticmethod
+    def _is_min_qty_order_error(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return (
+            "过小" in str(exc)
+            or "无法换算为合约张数" in str(exc)
+            or "min_notional" in msg
+            or "min notional" in msg
+            or ("notional" in msg and "too small" in msg)
+        )
+
+    async def _should_skip_min_qty_exceeds(
+        self,
+        auth_binance: BinanceService,
+        strategy: Strategy,
+        strategy_id: int,
+        symbol: str,
+        base_qty: float,
+        current_price: float,
+        *,
+        action: str = "开仓",
+    ) -> bool:
+        """意图名义 < 交易所最小开仓名义时跳过（开关默认开）。"""
+        from ..services.strategy_flags import skip_min_qty_exceeds_enabled
+
+        if not skip_min_qty_exceeds_enabled(strategy):
+            return False
+        if base_qty is None or base_qty <= 0 or current_price is None or current_price <= 0:
+            return False
+        estimator = getattr(auth_binance, "estimate_min_open_notional", None)
+        if not callable(estimator):
+            return False
+        try:
+            min_n = await estimator(symbol, current_price)
+        except Exception as e:
+            logger.warning(
+                "Strategy %d: %s min-notional estimate failed for %s: %s",
+                strategy_id,
+                action,
+                symbol,
+                e,
+            )
+            return False
+        if min_n is None or min_n <= 0:
+            return False
+        intended = float(base_qty) * float(current_price)
+        if min_n <= intended * 1.001:
+            return False
+        msg = (
+            f"{symbol} 跳过{action} — 交易所最小约 {min_n:.2f}U > 意图 {intended:.2f}U"
+        )
+        logger.info("Strategy %d: %s", strategy_id, msg)
+        strategy_log_service.info(strategy_id, msg)
+        return True
+
+    @staticmethod
     def _wt_like_limit(signal_source: str) -> int:
         return 200 if signal_source in ("wavetrend", "trend_wt", "wick_spike") else 100
 
@@ -1267,6 +1322,12 @@ class PositionManager:
             )
             return None
 
+        if await self._should_skip_min_qty_exceeds(
+            auth_binance, strategy, strategy_id, symbol, base_qty, current_price,
+            action="开仓",
+        ):
+            return None
+
         try:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
@@ -1292,6 +1353,13 @@ class PositionManager:
                 )
             filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
         except Exception as e:
+            from ..services.strategy_flags import skip_min_qty_exceeds_enabled
+
+            if skip_min_qty_exceeds_enabled(strategy) and self._is_min_qty_order_error(e):
+                msg = f"{symbol} 跳过开仓 — 数量低于交易所最小要求"
+                logger.info("Strategy %d: %s (%s)", strategy_id, msg, e)
+                strategy_log_service.info(strategy_id, msg)
+                return None
             logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
             strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
             return None
@@ -1376,6 +1444,12 @@ class PositionManager:
             )
             return None
 
+        if await self._should_skip_min_qty_exceeds(
+            auth_binance, strategy, strategy_id, symbol, base_qty, current_price,
+            action="开仓",
+        ):
+            return None
+
         try:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
@@ -1389,6 +1463,13 @@ class PositionManager:
                 )
             filled_qty = float(order.get("filled") or order.get("amount") or base_qty)
         except Exception as e:
+            from ..services.strategy_flags import skip_min_qty_exceeds_enabled
+
+            if skip_min_qty_exceeds_enabled(strategy) and self._is_min_qty_order_error(e):
+                msg = f"{symbol} 跳过开仓 — 数量低于交易所最小要求"
+                logger.info("Strategy %d: %s (%s)", strategy_id, msg, e)
+                strategy_log_service.info(strategy_id, msg)
+                return None
             logger.error("Strategy %d: failed to open %s: %s", strategy_id, symbol, e)
             strategy_log_service.error(strategy_id, f"{symbol} 开仓失败 — {e}")
             return None
@@ -2152,6 +2233,17 @@ class PositionManager:
                     strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓RSI确认 — RSI={round(rsi_val,1)}")
 
         # Step 1: execute add order FIRST
+        if await self._should_skip_min_qty_exceeds(
+            auth_binance,
+            strategy,
+            strategy_id,
+            symbol,
+            float(result.next_quantity),
+            current_price,
+            action="马丁加仓",
+        ):
+            return
+
         try:
             order = await auth_binance.create_market_order(
                 symbol, side, result.next_quantity, position_side=ps,
@@ -2162,6 +2254,13 @@ class PositionManager:
                 logger.warning("Strategy %d: %s martingale order filled but no average/price in response, using kline close", strategy_id, symbol)
             filled_qty = float(order.get("filled") or order.get("amount") or result.next_quantity)
         except Exception as e:
+            from ..services.strategy_flags import skip_min_qty_exceeds_enabled
+
+            if skip_min_qty_exceeds_enabled(strategy) and self._is_min_qty_order_error(e):
+                msg = f"{symbol} 跳过马丁加仓 — 数量低于交易所最小要求"
+                logger.info("Strategy %d: %s (%s)", strategy_id, msg, e)
+                strategy_log_service.info(strategy_id, msg)
+                return
             logger.error("Strategy %d: martingale add failed: %s", strategy_id, e)
             strategy_log_service.error(strategy_id, f"{symbol} 马丁加仓失败 — {e}")
             return

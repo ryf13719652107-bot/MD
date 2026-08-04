@@ -700,6 +700,41 @@ class BinanceService:
         formatted_symbol = self._format_symbol(symbol)
         return await self.exchange.cancel_order(order_id, formatted_symbol)
 
+    async def estimate_min_open_notional(self, symbol: str, price: float) -> float | None:
+        """币安最小开仓名义(USDT)：取 cost.min 与 amount.min×price 的较大值。"""
+        if price is None or float(price) <= 0:
+            return None
+        await self.ensure_markets_loaded()
+        formatted = self._format_symbol(symbol)
+        try:
+            market = self.exchange.market(formatted)
+        except Exception:
+            return None
+        candidates: list[float] = []
+        limits = market.get("limits") if isinstance(market.get("limits"), dict) else {}
+        cost_lim = limits.get("cost") if isinstance(limits.get("cost"), dict) else {}
+        amount_lim = limits.get("amount") if isinstance(limits.get("amount"), dict) else {}
+        for raw in (cost_lim.get("min"),):
+            if raw is None or raw == "":
+                continue
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                candidates.append(v)
+        raw_amt = amount_lim.get("min")
+        if raw_amt is not None and raw_amt != "":
+            try:
+                am = float(raw_amt)
+            except (TypeError, ValueError):
+                am = 0.0
+            if am > 0:
+                candidates.append(am * float(price))
+        if not candidates:
+            return None
+        return max(candidates)
+
     async def create_market_order(
         self, symbol: str, side: str, amount: float,
         reduce_only: bool = False, position_side: str = "LONG",

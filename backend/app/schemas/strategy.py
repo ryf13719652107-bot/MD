@@ -23,6 +23,10 @@ class StrategyCreate(BaseModel):
     # Entry
     base_qty_type: Literal["margin_pct", "usdt"] = "margin_pct"
     base_qty_value: float = Field(default=6.0, gt=0)
+    skip_min_qty_exceeds: bool = Field(
+        default=True,
+        description="交易所最小开仓名义大于意图名义时跳过该币",
+    )
     rsi_entry_threshold: float = Field(default=30.0, ge=0, le=100)
     # Martingale
     price_drop_pct: float = Field(default=30.0, gt=0, le=100)
@@ -117,6 +121,7 @@ class StrategyUpdate(BaseModel):
     st_timeframe_2: Optional[Literal["5m", "15m", "30m", "1h", "4h"]] = None
     base_qty_type: Optional[Literal["margin_pct", "usdt"]] = None
     base_qty_value: Optional[float] = Field(default=None, gt=0)
+    skip_min_qty_exceeds: Optional[bool] = None
     rsi_entry_threshold: Optional[float] = Field(default=None, ge=0, le=100)
     price_drop_pct: Optional[float] = Field(default=None, gt=0, le=100)
     price_drop_multiplier: Optional[float] = Field(default=None, ge=1.0, le=5.0)
@@ -178,6 +183,7 @@ class StrategyResponse(BaseModel):
     margin_threshold: float
     base_qty_type: str
     base_qty_value: float
+    skip_min_qty_exceeds: bool = True
     rsi_entry_threshold: float
     price_drop_pct: float
     price_drop_multiplier: float
