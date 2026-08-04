@@ -9,7 +9,7 @@ progress 量能放宽（可选，默认开）：
   start→full(1.5) 时 need 从 volume_mult 线性降到 vol_relax_mult(5×)；
   progress ≥ full 时 need = vol_relax_mult。
 
-min_move_pct（默认 2.4）：本根极值相对开盘的涨跌幅 % 须 ≥ 该值才允许触发；0=关闭。
+min_move_pct（默认 3）：本根极值相对开盘的涨跌幅 % 须 ≥ 该值才允许触发；0=关闭。
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ _VOL_RELAX_PROGRESS_FULL = 1.5
 _VOL_RELAX_MULT = 5.0
 
 
-_MIN_MOVE_PCT = 2.4
+_MIN_MOVE_PCT = 3.0
 
 
 @dataclass

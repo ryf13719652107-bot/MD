@@ -217,7 +217,7 @@ def test_enrich_ignores_stale_trade_bar():
 def test_min_move_pct_blocks_shallow_atr_pierce():
     """ATR 已刺破但相对开盘涨幅不足最小门槛 → 不开仓。"""
     state = WickSymbolState()
-    # atr=0.2 → N=1；开盘 100 刺破线 101；涨 1.5% < 默认 2.4%
+    # atr=0.2 → N=1；开盘 100 刺破线 101；涨 1.5% < 门槛 2.4%
     params = WickSpikeParams(direction="short", volume_mult=8.0, atr_mult=5.0, min_move_pct=2.4)
     snap = _snap(open_=100.0, atr=0.2, vol_now=80.0, vol_sma=10.0, high=101.5, low=100.0)
     assert spike_move_pct("short", 100.0, 101.5) == 1.5

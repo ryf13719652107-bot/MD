@@ -86,7 +86,7 @@ class StrategyCreate(BaseModel):
     wick_vol_relax_progress_full: float = Field(default=1.5, ge=0, le=10)
     wick_vol_relax_mult: float = Field(default=5.0, ge=0, le=100)
     wick_min_move_pct: float = Field(
-        default=2.4,
+        default=3.0,
         ge=0,
         le=50,
         description="本根相对开盘最小涨跌幅%；0=关闭",
@@ -208,7 +208,7 @@ class StrategyResponse(BaseModel):
     wick_vol_relax_progress_start: float = 1.0
     wick_vol_relax_progress_full: float = 1.5
     wick_vol_relax_mult: float = 5.0
-    wick_min_move_pct: float = 2.4
+    wick_min_move_pct: float = 3.0
     blacklisted_symbols: list[str] = Field(default_factory=list)
     status: str
     started_at: Optional[datetime] = None

@@ -42,7 +42,7 @@ class Strategy(Base):
     )
     # 本根相对开盘最小涨跌幅 %（接针方向）；0=关闭
     wick_min_move_pct: Mapped[float] = mapped_column(
-        Float, default=2.4, server_default="2.4"
+        Float, default=3.0, server_default="3.0"
     )
 
     # General params
