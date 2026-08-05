@@ -708,6 +708,26 @@ class BinanceService:
         formatted_symbol = self._format_symbol(symbol)
         return await self.exchange.cancel_order(order_id, formatted_symbol)
 
+    async def fetch_my_trades(
+        self,
+        symbol: str,
+        *,
+        order_id: str | None = None,
+        limit: int = 50,
+    ) -> list:
+        """拉取成交明细；可按 orderId 过滤（市价 closePosition 回报无均价时用）。"""
+        formatted = self._format_symbol(symbol)
+        params: dict = {}
+        if order_id:
+            oid = str(order_id).strip()
+            if oid.isdigit():
+                params["orderId"] = int(oid)
+            else:
+                params["orderId"] = oid
+        return await self.exchange.fetch_my_trades(
+            formatted, limit=limit, params=params or None
+        )
+
     async def estimate_min_open_notional(self, symbol: str, price: float) -> float | None:
         """币安最小开仓名义(USDT)：取 cost.min 与 amount.min×price 的较大值。"""
         if price is None or float(price) <= 0:

@@ -85,6 +85,19 @@ def test_order_fill_avg_price_tp_never_uses_limit_price():
     assert abs(_parse_order_exit_price(with_quote) - 0.019019) < 1e-12
 
 
+def test_vwap_from_my_trades_for_market_tp():
+    from app.services.position_manager import _vwap_from_my_trades
+
+    trades = [
+        {"price": "0.2210", "amount": "20"},
+        {"price": "0.2211", "amount": "25.1"},
+    ]
+    # (0.2210*20 + 0.2211*25.1) / 45.1
+    expect = (0.2210 * 20 + 0.2211 * 25.1) / 45.1
+    assert abs(_vwap_from_my_trades(trades) - expect) < 1e-12
+    assert _vwap_from_my_trades([]) == 0.0
+
+
 def test_match_trade_prefers_layer0():
     trades = [
         SimpleNamespace(

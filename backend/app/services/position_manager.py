@@ -135,22 +135,42 @@ async def _live_last_price(client, symbol: str, fallback: float = 0.0) -> float:
         return 0.0
 
 
+def _vwap_from_my_trades(trades: list) -> float:
+    """从成交明细算 VWAP。"""
+    num = 0.0
+    den = 0.0
+    for t in trades or []:
+        if not isinstance(t, dict):
+            continue
+        try:
+            px = float(t.get("price") or 0)
+            amt = float(t.get("amount") or 0)
+        except (TypeError, ValueError):
+            continue
+        if px > 0 and amt > 0:
+            num += px * amt
+            den += amt
+    return (num / den) if den > 0 else 0.0
+
+
 async def _resolve_market_close_exit(
     client, symbol: str, order: dict, fallback: float = 0.0
 ) -> tuple[float, dict]:
-    """市价平仓出场价：优先成交均价；closePosition 回报常无 average，需重查订单。
+    """市价平仓出场价：必须尽量拿到真实市价成交均价再写库。
 
-    禁止直接用滞后 K 线 close 冒充市价成交价（HEI：记 0.2041 vs 币安 0.221）。
+    顺序：回报 average/avgPrice/cumQuote → 重查订单 → fetch_my_trades(orderId) VWAP
+    → ticker last。禁止用滞后 K 线 close（HEI：记 0.2041 vs 币安 0.221）。
     """
     fill_order = order if isinstance(order, dict) else {}
     px = _order_fill_avg_price(fill_order, 0.0, allow_order_price=False)
     if px > 0:
         return px, fill_order
+
     oid = str(fill_order.get("id") or "").strip()
     if oid:
-        for attempt in range(4):
+        for attempt in range(5):
             try:
-                await asyncio.sleep(0.12 * (attempt + 1))
+                await asyncio.sleep(0.15 * (attempt + 1))
                 oi = await _fetch_order(client, oid, symbol)
                 px = _order_fill_avg_price(oi, 0.0, allow_order_price=False)
                 if px > 0:
@@ -159,10 +179,43 @@ async def _resolve_market_close_exit(
                     fill_order = oi
             except Exception:
                 pass
-    live = await _live_last_price(client, symbol, fallback)
+
+        # closePosition 常无 average：按 orderId 拉成交明细算 VWAP
+        fetch_trades = getattr(client, "fetch_my_trades", None)
+        if callable(fetch_trades):
+            for attempt in range(3):
+                try:
+                    await asyncio.sleep(0.2 * (attempt + 1))
+                    trades = await fetch_trades(symbol, order_id=oid, limit=50)
+                    px = _vwap_from_my_trades(trades if isinstance(trades, list) else [])
+                    if px > 0:
+                        merged = dict(fill_order)
+                        merged["average"] = px
+                        merged["filled"] = sum(
+                            float(t.get("amount") or 0)
+                            for t in (trades or [])
+                            if isinstance(t, dict)
+                        )
+                        logger.info(
+                            "market close %s: exit avg %.8f from my_trades orderId=%s",
+                            symbol,
+                            px,
+                            oid,
+                        )
+                        return px, merged
+                except Exception as e:
+                    logger.debug(
+                        "market close %s fetch_my_trades orderId=%s: %s",
+                        symbol,
+                        oid,
+                        e,
+                    )
+
+    live = await _live_last_price(client, symbol, 0.0)
     if live > 0:
         logger.warning(
-            "market close %s: no fill avg on order %s, using live ticker %.8f",
+            "market close %s: no fill avg on order %s, using live ticker %.8f "
+            "(not kline fallback)",
             symbol,
             oid or "?",
             live,
@@ -2243,11 +2296,21 @@ class PositionManager:
                 try:
                     result = await auth_binance.close_position(symbol, pos_side)
                     if result and result.get("id"):
+                        # fallback=0：禁止用 K 线价写库，必须解析市价成交均价
                         exit_price, fill_order = await _resolve_market_close_exit(
-                            auth_binance, symbol, result, current_price
+                            auth_binance, symbol, result, 0.0
                         )
+                        if exit_price <= 0:
+                            strategy_log_service.error(
+                                strategy_id,
+                                f"{symbol} 市价止盈已提交但未解析到成交均价 — 请核对交易所后手动处理",
+                            )
+                            return
                         close_reason = "take_profit"
-                        strategy_log_service.success(strategy_id, f"{symbol} 兜底市价止盈 @{exit_price:.4f}")
+                        strategy_log_service.success(
+                            strategy_id,
+                            f"{symbol} 兜底市价止盈 成交均价@{exit_price:.8g}",
+                        )
                     else:
                         strategy_log_service.warning(strategy_id, f"{symbol} 兜底平仓失败 — 未找到交易所仓位")
                         return
@@ -2295,8 +2358,14 @@ class PositionManager:
                     result = await auth_binance.close_position(symbol, pos_side)
                     if result and result.get("id"):
                         exit_price, fill_order = await _resolve_market_close_exit(
-                            auth_binance, symbol, result, current_price
+                            auth_binance, symbol, result, 0.0
                         )
+                        if exit_price <= 0:
+                            strategy_log_service.error(
+                                strategy_id,
+                                f"{symbol} 市价平仓已提交但未解析到成交均价 — 请核对交易所",
+                            )
+                            return
                     else:
                         strategy_log_service.warning(strategy_id, f"{symbol} 平仓失败 — 未找到交易所仓位")
                         return
