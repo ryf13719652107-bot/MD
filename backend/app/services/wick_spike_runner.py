@@ -591,23 +591,34 @@ class WickSpikeRunner:
                         if st.armed_extreme is not None
                         else None
                     )
-                    outcome = await self._try_open(
-                        strategy_id=strategy_id,
-                        strategy=filter_strategy,
-                        symbol=sym,
-                        signal=signal,
-                        price=price,
-                        snap=snap,
-                        params=params,
-                        auth=auth,
-                        public=public,
-                        total_margin=total_margin,
-                        leverage=leverage,
-                        tick_ctx=tick_ctx,
-                        trade_ts_ms=trade_ts_ms,
-                        signal_detect_perf=t_signal0,
-                        extreme_override=armed_ext,
-                    )
+                    try:
+                        outcome = await self._try_open(
+                            strategy_id=strategy_id,
+                            strategy=filter_strategy,
+                            symbol=sym,
+                            signal=signal,
+                            price=price,
+                            snap=snap,
+                            params=params,
+                            auth=auth,
+                            public=public,
+                            total_margin=total_margin,
+                            leverage=leverage,
+                            tick_ctx=tick_ctx,
+                            trade_ts_ms=trade_ts_ms,
+                            signal_detect_perf=t_signal0,
+                            extreme_override=armed_ext,
+                        )
+                    except Exception as e:
+                        # 单币下单异常不得打崩整条接针循环
+                        logger.exception(
+                            "wick_spike _try_open strategy=%d %s: %s",
+                            strategy_id,
+                            sym_key,
+                            e,
+                        )
+                        release_bar_trigger(st)
+                        continue
                     if outcome == "opened":
                         mark_bar_triggered(st, params, snap.bar_open_ts, now_ms)
                         next_refresh = min(next_refresh, time.time() + 1.0)
@@ -929,7 +940,7 @@ class WickSpikeRunner:
                 "wick_spike trigger strategy=%d %s %s px=%.6g open=%.6g ext=%.6g "
                 "atrN=%.6g progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g "
                 "trade_age_ms=%d detect_to_lock_ms=%.1f "
-                "kline_vol=%s trade_vol=%s vol_now=%s sma=%s",
+                "vol_now=%s sma=%s",
                 strategy_id,
                 symbol,
                 signal.value,
@@ -943,8 +954,6 @@ class WickSpikeRunner:
                 need,
                 trade_age_ms,
                 detect_ms,
-                f"{kline_vol_raw:.1f}",
-                f"{trade_vol_raw:.1f}",
                 f"{snap.vol_now:.1f}",
                 f"{snap.vol_sma:.1f}",
             )
