@@ -208,6 +208,7 @@ class WickSpikeRunner:
         last_kline_fp: dict[str, tuple] = {}
         last_bg_rest: dict[str, float] = {}
         last_arm_rest: dict[str, float] = {}
+        arm_rest_inflight: set[str] = set()
         last_near_miss_log: dict[str, float] = {}
         last_arm_force_ms: dict[str, int] = {}
         symbols: list[str] = []
@@ -297,12 +298,14 @@ class WickSpikeRunner:
             except Exception:
                 pass
 
-        async def _bg_arm_rest(pub, sym: str, tf: str) -> None:
+        async def _bg_arm_rest(pub, sym: str, tf: str, sym_key: str) -> None:
             """武装后轻量 REST 补强本根 K 线（只拉 2 根），覆盖 WS 量能/极值滞后。"""
             try:
                 await kline_stream_manager.refresh_forming(pub, sym, tf, limit=2)
             except Exception:
                 pass
+            finally:
+                arm_rest_inflight.discard(sym_key)
 
         def _apply_strategy_pack(pack: dict) -> None:
             nonlocal params, atr_period, vol_period, timeframe, direction, filter_strategy
@@ -541,10 +544,14 @@ class WickSpikeRunner:
                         if (
                             st.armed_bar_ts == snap.bar_open_ts
                             and st.armed_awaiting_vol
+                            and sym_key not in arm_rest_inflight
                             and now - last_arm_rest.get(sym_key, 0.0) >= _ARM_REST_SEC
                         ):
                             last_arm_rest[sym_key] = now
-                            self._fire_bg(_bg_arm_rest(public, sym, timeframe))
+                            arm_rest_inflight.add(sym_key)
+                            self._fire_bg(
+                                _bg_arm_rest(public, sym, timeframe, sym_key)
+                            )
                         if now - last_near_miss_log.get(sym_key, 0.0) >= _NEAR_MISS_LOG_SEC:
                             diag = near_miss_diag(
                                 params, snap, st, price, now_ms=now_ms
