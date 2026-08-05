@@ -237,14 +237,52 @@ class KlineStreamManager:
     ) -> None:
         """轻量 REST 拉最近 N 根并合并；武装后补强本根 K 线真实 high/volume 专用。
 
-        比 refresh_rest 轻：只拉 limit 根（默认 2），用于覆盖 WS 量能/极值滞后。
+        对本根（未收盘）的 high/low/volume 取极值（只增不减），避免 REST 网络延迟
+        期间 WS 已推送更高 high 时被 REST 旧值覆盖倒退。close/open/ts 不动。
         """
         key = self._key(public_client, symbol, timeframe)
         self._last_access[key] = time.time()
         try:
             data = await public_client.fetch_klines(symbol, timeframe, limit=limit)
-            if data:
-                self._merge(key, data)
+            if not data:
+                return
+            rows = _normalize_candles(data)
+            buf = self._buffers.get(key) or []
+            if not buf:
+                # 冷启动：直接灌入
+                self._buffers[key] = list(rows)[-self._max_bars:]
+                return
+            idx = {int(r[0]): i for i, r in enumerate(buf)}
+            for r in rows:
+                try:
+                    ts = int(r[0])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                rest_high = float(r[2]) if len(r) > 2 else 0.0
+                rest_low = float(r[3]) if len(r) > 3 else 0.0
+                rest_vol = float(r[5]) if len(r) > 5 else 0.0
+                if ts in idx:
+                    cur = buf[idx[ts]]
+                    try:
+                        cur_high = float(cur[2]) if len(cur) > 2 else 0.0
+                        cur_low = float(cur[3]) if len(cur) > 3 else 0.0
+                        cur_vol = float(cur[5]) if len(cur) > 5 else 0.0
+                    except (TypeError, ValueError, IndexError):
+                        cur_high = cur_low = cur_vol = 0.0
+                    # 极值只增不减，防 REST 旧值覆盖 WS 新值倒退
+                    new_high = max(cur_high, rest_high) if cur_high > 0 else rest_high
+                    new_low = min(cur_low, rest_low) if cur_low > 0 else rest_low
+                    new_vol = max(cur_vol, rest_vol)
+                    buf[idx[ts]] = [
+                        cur[0], cur[1], new_high, new_low, cur[4], new_vol
+                    ]
+                else:
+                    buf.append(list(r))
+                    idx[ts] = len(buf) - 1
+            buf.sort(key=lambda x: int(x[0]))
+            if len(buf) > self._max_bars:
+                buf = buf[-self._max_bars:]
+            self._buffers[key] = buf
         except Exception as e:
             logger.debug(
                 "kline_stream refresh_forming failed for %s %s: %s", symbol, timeframe, e

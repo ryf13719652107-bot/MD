@@ -40,7 +40,7 @@ from .strategy_flags import (
 )
 from .coin_pool_service import coin_pool_service
 from .log_service import strategy_log_service
-from .kline_stream import kline_stream_manager
+from .kline_stream import kline_stream_manager, _timeframe_ms
 from .price_stream import price_stream_manager
 from .account_position_stream import account_position_stream
 from .position_manager import PositionManager, _norm_sym, RECONCILE_CREATED
@@ -462,6 +462,21 @@ class WickSpikeRunner:
                         continue
 
                     last = klines[-1]
+                    # forming 停滞检测：WS 断连时 forming 停在旧根，会导致
+                    # snap.bar_open_ts 与 price_stream.bar_open_ms 不一致，
+                    # enrich 忽略成交聚合。检测到停滞则后台 REST 纠偏并跳过。
+                    try:
+                        forming_ts = int(last[0])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    tf_ms = _timeframe_ms(timeframe)
+                    current_bar_ts = (now_ms // tf_ms) * tf_ms
+                    if forming_ts < current_bar_ts:
+                        if now - last_bg_rest.get(sym_key, 0.0) >= _BG_REST_SEC:
+                            last_bg_rest[sym_key] = now
+                            self._fire_bg(_bg_rest_one(public, sym, timeframe))
+                        continue
+
                     try:
                         fp = (
                             int(last[0]),
