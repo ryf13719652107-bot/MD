@@ -228,6 +228,28 @@ class KlineStreamManager:
             )
         return list((self._buffers.get(key) or [])[-self._max_bars :])
 
+    async def refresh_forming(
+        self,
+        public_client,
+        symbol: str,
+        timeframe: str,
+        limit: int = 2,
+    ) -> None:
+        """轻量 REST 拉最近 N 根并合并；武装后补强本根 K 线真实 high/volume 专用。
+
+        比 refresh_rest 轻：只拉 limit 根（默认 2），用于覆盖 WS 量能/极值滞后。
+        """
+        key = self._key(public_client, symbol, timeframe)
+        self._last_access[key] = time.time()
+        try:
+            data = await public_client.fetch_klines(symbol, timeframe, limit=limit)
+            if data:
+                self._merge(key, data)
+        except Exception as e:
+            logger.debug(
+                "kline_stream refresh_forming failed for %s %s: %s", symbol, timeframe, e
+            )
+
     async def get(
         self,
         public_client,

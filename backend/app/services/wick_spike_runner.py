@@ -80,6 +80,8 @@ _ARM_FORCE_RETRY_MS = 80
 _WAKE_TIMEOUT_SEC = 0.08
 # 缓冲不足时后台 REST 纠偏节流
 _BG_REST_SEC = 5.0
+# 武装且等量时后台 REST 补强本根 K 线间隔（秒）；解决 WS 量能/极值滞后
+_ARM_REST_SEC = 1.0
 # 抢策略锁最长等待（毫秒级 TP 检测），超时则 release 重试
 _LOCK_WAIT_SEC = 0.12
 # 成交后写库重试
@@ -205,6 +207,7 @@ class WickSpikeRunner:
         last_seq: dict[str, int] = {}
         last_kline_fp: dict[str, tuple] = {}
         last_bg_rest: dict[str, float] = {}
+        last_arm_rest: dict[str, float] = {}
         last_near_miss_log: dict[str, float] = {}
         last_arm_force_ms: dict[str, int] = {}
         symbols: list[str] = []
@@ -291,6 +294,13 @@ class WickSpikeRunner:
         async def _bg_rest_one(pub, sym: str, tf: str) -> None:
             try:
                 await kline_stream_manager.refresh_rest(pub, sym, tf, _KLINE_MIN_BARS)
+            except Exception:
+                pass
+
+        async def _bg_arm_rest(pub, sym: str, tf: str) -> None:
+            """武装后轻量 REST 补强本根 K 线（只拉 2 根），覆盖 WS 量能/极值滞后。"""
+            try:
+                await kline_stream_manager.refresh_forming(pub, sym, tf, limit=2)
             except Exception:
                 pass
 
@@ -527,6 +537,14 @@ class WickSpikeRunner:
                             f"{snap.vol_sma:.1f}",
                         )
                     if signal is None:
+                        # 武装且等量时后台 REST 补强本根 K 线，解决 WS 量能/极值滞后
+                        if (
+                            st.armed_bar_ts == snap.bar_open_ts
+                            and st.armed_awaiting_vol
+                            and now - last_arm_rest.get(sym_key, 0.0) >= _ARM_REST_SEC
+                        ):
+                            last_arm_rest[sym_key] = now
+                            self._fire_bg(_bg_arm_rest(public, sym, timeframe))
                         if now - last_near_miss_log.get(sym_key, 0.0) >= _NEAR_MISS_LOG_SEC:
                             diag = near_miss_diag(
                                 params, snap, st, price, now_ms=now_ms
