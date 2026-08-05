@@ -108,6 +108,73 @@ async def _fetch_order(client, order_id: str, symbol: str) -> dict:
     return await client.exchange.fetch_order(order_id, client._format_symbol(symbol))
 
 
+async def _live_last_price(client, symbol: str, fallback: float = 0.0) -> float:
+    """交易所最新价（ticker last），用于止盈穿越判定；勿用滞后 K 线 close。"""
+    try:
+        t = await client.fetch_ticker(symbol)
+        for k in ("last", "close", "mark"):
+            try:
+                v = float(t.get(k) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v > 0:
+                return v
+        info = t.get("info") if isinstance(t.get("info"), dict) else {}
+        for k in ("lastPrice", "markPrice"):
+            try:
+                v = float(info.get(k) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v > 0:
+                return v
+    except Exception:
+        pass
+    try:
+        return float(fallback or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def _resolve_market_close_exit(
+    client, symbol: str, order: dict, fallback: float = 0.0
+) -> tuple[float, dict]:
+    """市价平仓出场价：优先成交均价；closePosition 回报常无 average，需重查订单。
+
+    禁止直接用滞后 K 线 close 冒充市价成交价（HEI：记 0.2041 vs 币安 0.221）。
+    """
+    fill_order = order if isinstance(order, dict) else {}
+    px = _order_fill_avg_price(fill_order, 0.0, allow_order_price=False)
+    if px > 0:
+        return px, fill_order
+    oid = str(fill_order.get("id") or "").strip()
+    if oid:
+        for attempt in range(4):
+            try:
+                await asyncio.sleep(0.12 * (attempt + 1))
+                oi = await _fetch_order(client, oid, symbol)
+                px = _order_fill_avg_price(oi, 0.0, allow_order_price=False)
+                if px > 0:
+                    return px, oi
+                if isinstance(oi, dict) and oi:
+                    fill_order = oi
+            except Exception:
+                pass
+    live = await _live_last_price(client, symbol, fallback)
+    if live > 0:
+        logger.warning(
+            "market close %s: no fill avg on order %s, using live ticker %.8f",
+            symbol,
+            oid or "?",
+            live,
+        )
+        return live, fill_order
+    try:
+        fb = float(fallback or 0)
+    except (TypeError, ValueError):
+        fb = 0.0
+    return fb, fill_order
+
+
 def _tp_limit_reduce_only(client) -> bool:
     """止盈限价是否带 reduceOnly。
 
@@ -969,6 +1036,8 @@ class PositionManager:
         last_rsi_val: float | None = None
         if strategy.signal_source == "wick_spike":
             # 首仓由 WickSpikeRunner 负责；此处仅供持仓管理取价/K线，信号恒为中性。
+            # 优先成交流最新价：forming K 线 close 在接针后常滞后（停在开盘附近），
+            # 会误触发「现价已过止盈」市价兜底（HEI：K线0.204 vs 真实~0.221）。
             signal = Signal.NEUTRAL
             signal_label = "毫秒接针"
             try:
@@ -977,6 +1046,14 @@ class PositionManager:
                 logger.warning("Strategy %d: %s invalid kline data, skipping", strategy_id, symbol)
                 strategy_log_service.warning(strategy_id, f"{symbol} K线数据异常，跳过")
                 return None
+            try:
+                from .price_stream import price_stream_manager
+
+                got = price_stream_manager.get(symbol)
+                if got and float(got[0]) > 0:
+                    current_price = float(got[0])
+            except Exception:
+                pass
             # 不把 last_signal 写成 neutral，保留价流开仓写入的接针信息
             return klines, current_price, signal_label, signal, float(rsi or 0.0)
         if strategy.signal_source == "martingale_base":
@@ -1818,6 +1895,11 @@ class PositionManager:
         # --- Check SL / TP by price ---
         close_reason = None
         exit_price_override = current_price
+        # 已挂限价止盈时：禁止用 K 线 close 软触发市价止盈（接针后 close 常滞后，
+        # 会误判「已过止盈」→ 市价兜底，出场价还可能写成滞后 K 线价）。
+        has_open_tp_limit = bool(strategy.take_profit_limit_order) and any(
+            (p.tp_limit_order_id or "").strip() for p in open_positions
+        )
         exchange_upnl = _symbol_unrealized_pnl_from_exchange(
             ctx.raw_exchange_positions if ctx else [],
             symbol,
@@ -1861,7 +1943,10 @@ class PositionManager:
             close_reason = "single_symbol_stop_loss"
         elif strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
             close_reason = "stop_loss"
-        elif eng.check_take_profit(avg_entry, current_price, pos_side):
+        elif (
+            not has_open_tp_limit
+            and eng.check_take_profit(avg_entry, current_price, pos_side)
+        ):
             close_reason = "take_profit"
 
         if close_reason:
@@ -1901,6 +1986,42 @@ class PositionManager:
                         pass
             if tp_filled:
                 return
+
+            # 限价仍 open：用交易所最新价确认是否已穿越；穿越才市价兜底。
+            # （禁止用滞后 K 线 close，HEI 案例：K线0.204误触发，真实~0.221未到止盈）
+            tp_target = next(
+                (
+                    float(p.take_profit_price)
+                    for p in open_positions
+                    if p.take_profit_price and float(p.take_profit_price) > 0
+                ),
+                0.0,
+            )
+            if tp_target > 0:
+                live_px = await _live_last_price(auth_binance, symbol, current_price)
+                through = (
+                    live_px >= tp_target
+                    if pos_side == "long"
+                    else live_px <= tp_target
+                ) if live_px > 0 else False
+                if through:
+                    strategy_log_service.warning(
+                        strategy_id,
+                        f"{symbol} 最新价{live_px:.6g}已过止盈{tp_target:.6g}但限价未成 — 兜底市价平仓",
+                    )
+                    await self._close_positions(
+                        session,
+                        strategy,
+                        symbol,
+                        auth_binance,
+                        open_positions,
+                        eng,
+                        avg_entry,
+                        pos_side,
+                        "take_profit",
+                        live_px,
+                    )
+                    return
 
         # --- 补挂/补关联止盈限价单（重启丢单等）---
         await self._ensure_tp_limit_orders(
@@ -2063,7 +2184,7 @@ class PositionManager:
                             for p in open_positions:
                                 p.tp_limit_order_id = None
                         else:
-                            # 现价已穿过本地止盈价但仍未成交 → 挂单价可能错/精度/腿不对，兜底市价
+                            # 穿越判定必须用交易所最新价，禁止用滞后 K 线 close
                             tp_target = next(
                                 (
                                     float(p.take_profit_price)
@@ -2072,22 +2193,26 @@ class PositionManager:
                                 ),
                                 0.0,
                             )
+                            live_px = await _live_last_price(
+                                auth_binance, symbol, current_price
+                            )
                             through = False
-                            if tp_target > 0 and current_price > 0:
+                            if tp_target > 0 and live_px > 0:
                                 through = (
-                                    current_price >= tp_target
+                                    live_px >= tp_target
                                     if pos_side == "long"
-                                    else current_price <= tp_target
+                                    else live_px <= tp_target
                                 )
                             if not through:
                                 strategy_log_service.info(
                                     strategy_id,
-                                    f"{symbol} 止盈限价单状态={order_status}，等待成交",
+                                    f"{symbol} 止盈限价单状态={order_status}，"
+                                    f"最新价={live_px:.6g} 未过止盈{tp_target:.6g}，等待成交",
                                 )
                                 return
                             strategy_log_service.warning(
                                 strategy_id,
-                                f"{symbol} 现价已过止盈价{tp_target:.6g}但限价未成"
+                                f"{symbol} 最新价{live_px:.6g}已过止盈价{tp_target:.6g}但限价未成"
                                 f"(状态={order_status}) — 兜底市价平仓",
                             )
                             for p in open_positions:
@@ -2116,10 +2241,9 @@ class PositionManager:
                 try:
                     result = await auth_binance.close_position(symbol, pos_side)
                     if result and result.get("id"):
-                        fill_order = result
-                        exit_price = _order_fill_avg_price(
-                            result, current_price, allow_order_price=False
-                        ) or float(current_price or 0)
+                        exit_price, fill_order = await _resolve_market_close_exit(
+                            auth_binance, symbol, result, current_price
+                        )
                         close_reason = "take_profit"
                         strategy_log_service.success(strategy_id, f"{symbol} 兜底市价止盈 @{exit_price:.4f}")
                     else:
@@ -2168,10 +2292,9 @@ class PositionManager:
                 try:
                     result = await auth_binance.close_position(symbol, pos_side)
                     if result and result.get("id"):
-                        fill_order = result
-                        exit_price = _order_fill_avg_price(
-                            result, current_price, allow_order_price=False
-                        ) or float(current_price or 0)
+                        exit_price, fill_order = await _resolve_market_close_exit(
+                            auth_binance, symbol, result, current_price
+                        )
                     else:
                         strategy_log_service.warning(strategy_id, f"{symbol} 平仓失败 — 未找到交易所仓位")
                         return
