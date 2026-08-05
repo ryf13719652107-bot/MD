@@ -1996,11 +1996,14 @@ class PositionManager:
             close_reason = "single_symbol_stop_loss"
         elif strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
             close_reason = "stop_loss"
-        elif (
-            not has_open_tp_limit
-            and eng.check_take_profit(avg_entry, current_price, pos_side)
-        ):
-            close_reason = "take_profit"
+        elif not has_open_tp_limit:
+            # 将走市价止盈：触发判定必须用交易所最新价，禁止滞后 K 线 close
+            live_for_tp = await _live_last_price(auth_binance, symbol, 0.0)
+            if live_for_tp > 0 and eng.check_take_profit(
+                avg_entry, live_for_tp, pos_side
+            ):
+                close_reason = "take_profit"
+                exit_price_override = live_for_tp
 
         if close_reason:
             await self._close_positions(session, strategy, symbol, auth_binance, open_positions, eng, avg_entry, pos_side, close_reason, exit_price_override)
