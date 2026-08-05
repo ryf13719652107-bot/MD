@@ -1878,11 +1878,18 @@ class PositionManager:
                             _fetch_order(auth_binance, p.tp_limit_order_id, symbol),
                             timeout=2.0,
                         )
-                        status = order_info.get("status", "")
+                        status = (order_info.get("status") or "").lower()
                         avg_fill = _order_fill_avg_price(
                             order_info, 0.0, allow_order_price=False
                         )
-                        if status in ("closed", "filled") and avg_fill > 0:
+                        if status in ("closed", "filled"):
+                            if avg_fill <= 0:
+                                logger.warning(
+                                    "Strategy %d: %s TP filled but no avg/cumQuote — wait sync",
+                                    strategy_id,
+                                    symbol,
+                                )
+                                return
                             await self._close_positions(
                                 session, strategy, symbol, auth_binance, open_positions, eng,
                                 avg_entry, pos_side, "take_profit", current_price,
@@ -1935,7 +1942,8 @@ class PositionManager:
 
         processed_symbols: set[tuple[str, str]] = set()
         for p in open_positions:
-            if not p.tp_limit_order_id or not p.take_profit_price:
+            # 有止盈单 ID 即检测；不依赖 take_profit_price（补关联后可能为空）
+            if not p.tp_limit_order_id:
                 continue
             symbol_side_key = (p.symbol, p.side)
             if symbol_side_key in processed_symbols:
@@ -1945,11 +1953,19 @@ class PositionManager:
                     _fetch_order(auth_binance, p.tp_limit_order_id, p.symbol),
                     timeout=2.0,
                 )
-                status = order_info.get("status", "")
+                status = (order_info.get("status") or "").lower()
                 avg_fill = _order_fill_avg_price(
                     order_info, 0.0, allow_order_price=False
                 )
-                if status in ("closed", "filled") and avg_fill > 0:
+                if status in ("closed", "filled"):
+                    if avg_fill <= 0:
+                        logger.warning(
+                            "Strategy %d: TP order %s filled but no avg/cumQuote for %s — skip close, retry",
+                            strategy_id,
+                            p.tp_limit_order_id,
+                            p.symbol,
+                        )
+                        continue
                     symbol_positions = [op for op in open_positions if op.symbol == p.symbol and op.side == p.side]
                     if not symbol_positions:
                         continue
@@ -2018,15 +2034,29 @@ class PositionManager:
                             _fetch_order(auth_binance, tp_order_id, symbol),
                             timeout=3.0,
                         )
-                        order_status = order_info.get("status", "")
+                        order_status = (order_info.get("status") or "").lower()
                         avg_fill = _order_fill_avg_price(
                             order_info, 0.0, allow_order_price=False
                         )
-                        if order_status in ("closed", "filled") and avg_fill > 0:
-                            exit_price = avg_fill
-                            fill_order = order_info
-                            strategy_log_service.success(strategy_id, f"{symbol} 止盈限价单已成交 @{exit_price:.4f}")
-                            logger.info("Strategy %d: TP limit already filled for %s @%.4f", strategy_id, symbol, exit_price)
+                        if order_status in ("closed", "filled"):
+                            if avg_fill > 0:
+                                exit_price = avg_fill
+                                fill_order = order_info
+                                strategy_log_service.success(strategy_id, f"{symbol} 止盈限价单已成交 @{exit_price:.4f}")
+                                logger.info("Strategy %d: TP limit already filled for %s @%.4f", strategy_id, symbol, exit_price)
+                            else:
+                                # 已成交但均价字段缺失：禁止市价兜底（仓已平），等 sync/下次解析
+                                strategy_log_service.warning(
+                                    strategy_id,
+                                    f"{symbol} 止盈单已成交但无成交均价 — 暂不写库，等待同步",
+                                )
+                                logger.warning(
+                                    "Strategy %d: %s TP filled status=%s but avg=0 — skip market fallback",
+                                    strategy_id,
+                                    symbol,
+                                    order_status,
+                                )
+                                return
                         elif order_status in ("canceled", "cancelled", "expired"):
                             strategy_log_service.warning(strategy_id, f"{symbol} 止盈限价单已取消/过期 — 兜底市价平仓")
                             logger.warning("Strategy %d: %s TP order %s, falling back to market close", strategy_id, symbol, order_status)
@@ -2107,17 +2137,25 @@ class PositionManager:
                             _fetch_order(auth_binance, p.tp_limit_order_id, symbol),
                             timeout=2.0,
                         )
-                        order_status = order_info.get("status", "")
+                        order_status = (order_info.get("status") or "").lower()
                         avg_fill = _order_fill_avg_price(
                             order_info, 0.0, allow_order_price=False
                         )
-                        if order_status in ("closed", "filled") and avg_fill > 0:
-                            exit_price = avg_fill
-                            fill_order = order_info
-                            strategy_log_service.success(strategy_id, f"{symbol} 止盈限价单已成交 @{exit_price:.4f}（止损检查时发现）")
-                            logger.info("Strategy %d: TP limit already filled during SL check for %s @%.4f", strategy_id, symbol, exit_price)
-                            close_reason = "take_profit"
-                            break
+                        if order_status in ("closed", "filled"):
+                            if avg_fill > 0:
+                                exit_price = avg_fill
+                                fill_order = order_info
+                                strategy_log_service.success(strategy_id, f"{symbol} 止盈限价单已成交 @{exit_price:.4f}（止损检查时发现）")
+                                logger.info("Strategy %d: TP limit already filled during SL check for %s @%.4f", strategy_id, symbol, exit_price)
+                                close_reason = "take_profit"
+                                break
+                            # 已成交无均价：勿撤单/市价（仓可能已平）
+                            logger.warning(
+                                "Strategy %d: %s TP filled during SL check but avg=0 — skip",
+                                strategy_id,
+                                symbol,
+                            )
+                            return
                     except (Exception, asyncio.TimeoutError):
                         pass
                     try:
@@ -2274,7 +2312,7 @@ class PositionManager:
             order = await auth_binance.create_market_order(
                 symbol, side, result.next_quantity, position_side=ps,
             )
-            new_avg = float(order.get("average") or order.get("price") or 0)
+            new_avg = _order_fill_avg_price(order, 0.0, allow_order_price=False)
             if new_avg <= 0:
                 new_avg = current_price
                 logger.warning("Strategy %d: %s martingale order filled but no average/price in response, using kline close", strategy_id, symbol)

@@ -62,6 +62,14 @@ async def _exit_from_tp_orders(
                 exit_time = exit_time_from_order(oi, fallback=None)
                 logger.info("Sync: TP order %s filled @%.8f (from exchange)", oid, px)
                 return px, "take_profit", exit_time
+            # 已成交但无均价：勿用挂单价；交给上层 mark 兜底并打警告
+            logger.warning(
+                "Sync: TP order %s filled for %s but no avg/cumQuote (limit price ignored)",
+                oid,
+                symbol,
+            )
+            exit_time = exit_time_from_order(oi, fallback=None)
+            return None, "take_profit", exit_time
         except Exception as e:
             logger.debug("Sync: fetch_order %s for %s: %s", oid, symbol, e)
     return None, "sync", None

@@ -65,7 +65,9 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
     if not result or not result.get("id"):
         raise HTTPException(status_code=500, detail="Exchange did not confirm the close order")
 
-    exit_price = float(result.get("average", 0) or result.get("price", 0) or 0)
+    from ..services.position_manager import _order_fill_avg_price
+
+    exit_price = _order_fill_avg_price(result, 0.0, allow_order_price=False)
     if exit_price <= 0:
         exit_price = position.mark_price or position.entry_price
 

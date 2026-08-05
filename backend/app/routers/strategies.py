@@ -445,7 +445,9 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
                     remaining,
                 )
                 continue
-        exit_price = float((order or {}).get("average", 0) or (order or {}).get("price", 0) or 0)
+        from ..services.position_manager import _order_fill_avg_price
+
+        exit_price = _order_fill_avg_price(order or {}, 0.0, allow_order_price=False)
         results.append({"symbol": sym_key, "side": side, "status": "ok", "exit_price": exit_price, "order": order})
         logging.info("Panic close: closed %s %s", sym_key, side)
 

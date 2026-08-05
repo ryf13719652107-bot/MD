@@ -681,7 +681,9 @@ class BinanceService:
             filled = float(order.get("filled") or 0)
             if filled <= 0:
                 filled = float(order.get("amount") or chunk)
-            avg = float(order.get("average") or order.get("price") or 0)
+            from .position_manager import _order_fill_avg_price
+
+            avg = _order_fill_avg_price(order, 0.0, allow_order_price=False)
             if filled > 0 and avg > 0:
                 vwap_num += avg * filled
             total_filled += filled
@@ -689,7 +691,13 @@ class BinanceService:
 
         if last_order is None:
             return {}
-        out_avg = (vwap_num / total_filled) if total_filled > 0 else float(last_order.get("average") or 0)
+        from .position_manager import _order_fill_avg_price as _fill_avg
+
+        out_avg = (
+            (vwap_num / total_filled)
+            if total_filled > 0
+            else _fill_avg(last_order, 0.0, allow_order_price=False)
+        )
         merged = dict(last_order)
         merged["average"] = out_avg
         merged["filled"] = total_filled

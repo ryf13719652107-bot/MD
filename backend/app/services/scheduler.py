@@ -493,7 +493,11 @@ class StrategyScheduler:
                                             sym, side, contracts,
                                         )
                                         continue
-                                    exit_price = float(order.get("average", 0) or order.get("price", 0) or 0)
+                                    from .position_manager import _order_fill_avg_price
+
+                                    exit_price = _order_fill_avg_price(
+                                        order, 0.0, allow_order_price=False
+                                    )
                                     exit_time = exit_time_from_order(order)
                                     sk = _norm_sym(sym)
                                     sd = side.lower()
