@@ -54,11 +54,17 @@ def _open_signal_log_suffix(signal_label: str, rsi: float) -> str:
     return f"{signal_label}={round(rsi, 1)}"
 
 
-def _order_fill_avg_price(order: dict, fallback: float = 0.0) -> float:
+def _order_fill_avg_price(
+    order: dict,
+    fallback: float = 0.0,
+    *,
+    allow_order_price: bool = True,
+) -> float:
     """从成交回报解析均价。
 
-    优先 ccxt ``average`` 与币安 ``info.avgPrice``；不要先用顶层 ``price``——
-    市价单里它常是下单参考价/信号价，会把最终贴尖算歪。
+    优先 ccxt ``average`` 与币安 ``info.avgPrice``，其次 ``cost/filled``。
+    顶层/info ``price`` 常是限价挂单价或市价参考价，**不得**在止盈出场路径启用
+    （``allow_order_price=False``）；开仓等场景可作最后兜底。
     """
     if not isinstance(order, dict):
         return float(fallback or 0)
@@ -78,11 +84,19 @@ def _order_fill_avg_price(order: dict, fallback: float = 0.0) -> float:
         avg = _pos(info.get(key))
         if avg > 0:
             return avg
-    # 最后才用 price（可能非成交均价）
-    for raw in (order.get("price"), info.get("price")):
-        avg = _pos(raw)
-        if avg > 0:
-            return avg
+    # cost/filled 推算 VWAP（部分回报 average 为空但仍有累计）
+    filled = _pos(order.get("filled")) or _pos(info.get("executedQty"))
+    cost = _pos(order.get("cost"))
+    if cost <= 0 and filled > 0:
+        # 币安 info.cumQuote ≈ 成交额（USDT）
+        cost = _pos(info.get("cumQuote")) or _pos(info.get("cum_quote"))
+    if filled > 0 and cost > 0:
+        return cost / filled
+    if allow_order_price:
+        for raw in (order.get("price"), info.get("price")):
+            avg = _pos(raw)
+            if avg > 0:
+                return avg
     fb = _pos(fallback)
     return fb
 
@@ -1865,7 +1879,9 @@ class PositionManager:
                             timeout=2.0,
                         )
                         status = order_info.get("status", "")
-                        avg_fill = float(order_info.get("average", 0) or 0)
+                        avg_fill = _order_fill_avg_price(
+                            order_info, 0.0, allow_order_price=False
+                        )
                         if status in ("closed", "filled") and avg_fill > 0:
                             await self._close_positions(
                                 session, strategy, symbol, auth_binance, open_positions, eng,
@@ -1930,7 +1946,9 @@ class PositionManager:
                     timeout=2.0,
                 )
                 status = order_info.get("status", "")
-                avg_fill = float(order_info.get("average", 0) or 0)
+                avg_fill = _order_fill_avg_price(
+                    order_info, 0.0, allow_order_price=False
+                )
                 if status in ("closed", "filled") and avg_fill > 0:
                     symbol_positions = [op for op in open_positions if op.symbol == p.symbol and op.side == p.side]
                     if not symbol_positions:
@@ -2001,7 +2019,9 @@ class PositionManager:
                             timeout=3.0,
                         )
                         order_status = order_info.get("status", "")
-                        avg_fill = float(order_info.get("average", 0) or 0)
+                        avg_fill = _order_fill_avg_price(
+                            order_info, 0.0, allow_order_price=False
+                        )
                         if order_status in ("closed", "filled") and avg_fill > 0:
                             exit_price = avg_fill
                             fill_order = order_info
@@ -2067,7 +2087,9 @@ class PositionManager:
                     result = await auth_binance.close_position(symbol, pos_side)
                     if result and result.get("id"):
                         fill_order = result
-                        exit_price = float(result.get("average", 0) or result.get("price", 0) or current_price)
+                        exit_price = _order_fill_avg_price(
+                            result, current_price, allow_order_price=False
+                        ) or float(current_price or 0)
                         close_reason = "take_profit"
                         strategy_log_service.success(strategy_id, f"{symbol} 兜底市价止盈 @{exit_price:.4f}")
                     else:
@@ -2086,7 +2108,9 @@ class PositionManager:
                             timeout=2.0,
                         )
                         order_status = order_info.get("status", "")
-                        avg_fill = float(order_info.get("average", 0) or 0)
+                        avg_fill = _order_fill_avg_price(
+                            order_info, 0.0, allow_order_price=False
+                        )
                         if order_status in ("closed", "filled") and avg_fill > 0:
                             exit_price = avg_fill
                             fill_order = order_info
@@ -2107,7 +2131,9 @@ class PositionManager:
                     result = await auth_binance.close_position(symbol, pos_side)
                     if result and result.get("id"):
                         fill_order = result
-                        exit_price = float(result.get("average", 0) or result.get("price", 0) or current_price)
+                        exit_price = _order_fill_avg_price(
+                            result, current_price, allow_order_price=False
+                        ) or float(current_price or 0)
                     else:
                         strategy_log_service.warning(strategy_id, f"{symbol} 平仓失败 — 未找到交易所仓位")
                         return

@@ -31,20 +31,14 @@ def _order_filled(oi: dict) -> bool:
 
 
 def _parse_order_exit_price(oi: dict) -> float:
-    avg = float(oi.get("average", 0) or 0)
-    if avg > 0:
-        return avg
-    info = oi.get("info") or {}
-    for k in ("avgPrice", "averagePrice", "price"):
-        v = info.get(k)
-        if v is not None and str(v):
-            try:
-                f = float(v)
-                if f > 0:
-                    return f
-            except (TypeError, ValueError):
-                pass
-    return float(oi.get("price", 0) or 0)
+    """止盈出场价：只认成交均价，禁止回退到限价挂单价 ``price``。
+
+    历史 bug：average 缺失时用 order.price（挂单价）写 Trade，
+    空单会出现出场=理论止盈价、盈亏被夸大（如 BLESS 0.018519 vs 真实 0.019019）。
+    """
+    from .position_manager import _order_fill_avg_price
+
+    return _order_fill_avg_price(oi, 0.0, allow_order_price=False)
 
 
 async def _exit_from_tp_orders(

@@ -52,6 +52,39 @@ def test_order_fill_avg_price_prefers_info_avg():
     assert abs(_order_fill_avg_price(mixed, fallback=0.06824) - 0.0683397) < 1e-9
 
 
+def test_order_fill_avg_price_tp_never_uses_limit_price():
+    """止盈出场：禁止用挂单价；可用 cost/filled 推算。"""
+    from app.services.position_manager import _order_fill_avg_price
+    from app.services.sync_service import _parse_order_exit_price
+
+    # BLESS 类：average 空，price=理论止盈挂单价 → 不得采用
+    limit_only = {
+        "average": 0,
+        "price": 0.018519,
+        "filled": 522,
+        "info": {"price": "0.018519", "avgPrice": "0", "executedQty": "522"},
+    }
+    assert _order_fill_avg_price(limit_only, 0.0, allow_order_price=False) == 0.0
+    assert _parse_order_exit_price(limit_only) == 0.0
+
+    # cumQuote/executedQty 推算真实均价
+    with_quote = {
+        "average": 0,
+        "price": 0.018519,
+        "filled": 522,
+        "info": {
+            "price": "0.018519",
+            "avgPrice": "0",
+            "executedQty": "522",
+            "cumQuote": str(522 * 0.019019),
+        },
+    }
+    assert abs(
+        _order_fill_avg_price(with_quote, 0.0, allow_order_price=False) - 0.019019
+    ) < 1e-12
+    assert abs(_parse_order_exit_price(with_quote) - 0.019019) < 1e-12
+
+
 def test_match_trade_prefers_layer0():
     trades = [
         SimpleNamespace(
