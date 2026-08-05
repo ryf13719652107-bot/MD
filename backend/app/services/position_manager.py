@@ -1956,6 +1956,7 @@ class PositionManager:
         # --- Check TP limit order fill (before martingale, since position may already be closed) ---
         if strategy.take_profit_limit_order:
             tp_filled = False
+            tp_still_open = False  # 仅确认 open 后才允许穿越市价兜底
             for p in open_positions:
                 if p.tp_limit_order_id:
                     try:
@@ -1982,13 +1983,15 @@ class PositionManager:
                             )
                             tp_filled = True
                             break
+                        if status in ("open", "new", "partially_filled", "partial"):
+                            tp_still_open = True
                     except (Exception, asyncio.TimeoutError):
                         pass
             if tp_filled:
                 return
 
-            # 限价仍 open：用交易所最新价确认是否已穿越；穿越才市价兜底。
-            # （禁止用滞后 K 线 close，HEI 案例：K线0.204误触发，真实~0.221未到止盈）
+            # 必须先确认限价仍 open：fetch 失败时勿穿越兜底（避免已成交却再市价）
+            # 穿越用 ticker 最新价，禁止滞后 K 线 close（HEI：0.204 误触发）
             tp_target = next(
                 (
                     float(p.take_profit_price)
@@ -1997,8 +2000,8 @@ class PositionManager:
                 ),
                 0.0,
             )
-            if tp_target > 0:
-                live_px = await _live_last_price(auth_binance, symbol, current_price)
+            if tp_still_open and tp_target > 0:
+                live_px = await _live_last_price(auth_binance, symbol, 0.0)
                 through = (
                     live_px >= tp_target
                     if pos_side == "long"
@@ -2193,9 +2196,8 @@ class PositionManager:
                                 ),
                                 0.0,
                             )
-                            live_px = await _live_last_price(
-                                auth_binance, symbol, current_price
-                            )
+                            # fallback=0：ticker 失败时不得用滞后 K 线 current_price 判穿越
+                            live_px = await _live_last_price(auth_binance, symbol, 0.0)
                             through = False
                             if tp_target > 0 and live_px > 0:
                                 through = (
