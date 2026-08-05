@@ -492,10 +492,12 @@ class WickSpikeRunner:
                     )
                     if snap is None:
                         continue
+                    kline_vol_raw = float(snap.vol_now or 0)
+                    trade_vol_raw = price_stream_manager.bar_volume(sym_key)
                     # 成交流量/高低补强；bar 未对齐则忽略（防换根串量）
                     snap = enrich_snap_with_trades(
                         snap,
-                        trade_vol=price_stream_manager.bar_volume(sym_key),
+                        trade_vol=trade_vol_raw,
                         trade_high=price_stream_manager.bar_high(sym_key),
                         trade_low=price_stream_manager.bar_low(sym_key),
                         trade_bar_open_ts=price_stream_manager.bar_open_ms(sym_key),
@@ -511,13 +513,18 @@ class WickSpikeRunner:
                     ):
                         logger.info(
                             "wick_spike armed strategy=%d %s await_vol=%s "
-                            "ext=%s arm_wait=%.1fs grace=%.1fs",
+                            "ext=%s arm_wait=%.1fs grace=%.1fs "
+                            "kline_vol=%s trade_vol=%s vol_now=%s sma=%s",
                             strategy_id,
                             sym_key,
                             st.armed_awaiting_vol,
                             f"{st.armed_extreme:.6g}" if st.armed_extreme else "?",
                             float(params.arm_wait_sec or 0),
                             float(params.arm_retrace_grace_sec or 0),
+                            f"{kline_vol_raw:.1f}",
+                            f"{trade_vol_raw:.1f}",
+                            f"{snap.vol_now:.1f}",
+                            f"{snap.vol_sma:.1f}",
                         )
                     if signal is None:
                         if now - last_near_miss_log.get(sym_key, 0.0) >= _NEAR_MISS_LOG_SEC:
@@ -527,10 +534,15 @@ class WickSpikeRunner:
                             if diag:
                                 last_near_miss_log[sym_key] = now
                                 logger.info(
-                                    "wick_spike near-miss strategy=%d %s %s",
+                                    "wick_spike near-miss strategy=%d %s %s "
+                                    "kline_vol=%s trade_vol=%s vol_now=%s sma=%s",
                                     strategy_id,
                                     sym_key,
                                     diag,
+                                    f"{kline_vol_raw:.1f}",
+                                    f"{trade_vol_raw:.1f}",
+                                    f"{snap.vol_now:.1f}",
+                                    f"{snap.vol_sma:.1f}",
                                 )
                         continue
 
@@ -876,7 +888,8 @@ class WickSpikeRunner:
             logger.info(
                 "wick_spike trigger strategy=%d %s %s px=%.6g open=%.6g ext=%.6g "
                 "atrN=%.6g progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g "
-                "trade_age_ms=%d detect_to_lock_ms=%.1f",
+                "trade_age_ms=%d detect_to_lock_ms=%.1f "
+                "kline_vol=%s trade_vol=%s vol_now=%s sma=%s",
                 strategy_id,
                 symbol,
                 signal.value,
@@ -890,6 +903,10 @@ class WickSpikeRunner:
                 need,
                 trade_age_ms,
                 detect_ms,
+                f"{kline_vol_raw:.1f}",
+                f"{trade_vol_raw:.1f}",
+                f"{snap.vol_now:.1f}",
+                f"{snap.vol_sma:.1f}",
             )
 
             base_qty = self._position_mgr._compute_base_qty(strategy, total_margin, price)
