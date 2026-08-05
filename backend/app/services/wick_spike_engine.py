@@ -37,7 +37,7 @@ _VOL_RELAX_MULT = 5.0
 _MIN_MOVE_PCT = 3.0
 _MAX_RETRACE_PCT = 50.0
 _ARM_WAIT_SEC = 12.0
-_ARM_RETRACE_GRACE_SEC = 3.0
+_ARM_RETRACE_GRACE_SEC = 6.0
 _ARM_GRACE_MAX_TIP_GAP_PCT = 2.0
 
 
@@ -274,21 +274,26 @@ def enrich_snap_with_trades(
     trade_high: float = 0.0,
     trade_low: float = 0.0,
     trade_bar_open_ts: int | None = None,
+    trade_instant_vol: float = 0.0,
 ) -> WickBarSnapshot:
     """用成交流累计的量/高低补强 K 线快照（解决 K 线 WS 量能滞后）。
 
     trade_bar_open_ts 若与 snap.bar_open_ts 不一致（换根后尚未有新成交），
-    忽略成交聚合，避免上一根巨量/极值污染新根。
+    忽略本根累计量/高低，避免上一根巨量/极值污染新根。
+    trade_instant_vol（最近 N 秒折算到分钟的瞬时量）不受 bar 对齐约束：
+    它反映"此刻"的放量程度，跨根也有效，专治开盘前几秒累计量滞后。
     """
-    if trade_bar_open_ts is not None and int(trade_bar_open_ts) != int(snap.bar_open_ts):
-        return snap
-    vol = max(float(snap.vol_now or 0), float(trade_vol or 0))
+    # 瞬时折算量总是纳入（跨根有效）
+    vol = max(float(snap.vol_now or 0), float(trade_instant_vol or 0))
     hi = float(snap.kline_high or 0)
     lo = float(snap.kline_low or 0)
-    if trade_high > 0:
-        hi = max(hi, trade_high) if hi > 0 else trade_high
-    if trade_low > 0:
-        lo = min(lo, trade_low) if lo > 0 else trade_low
+    # bar 对齐时才纳入本根累计量/高低
+    if trade_bar_open_ts is None or int(trade_bar_open_ts) == int(snap.bar_open_ts):
+        vol = max(vol, float(trade_vol or 0))
+        if trade_high > 0:
+            hi = max(hi, trade_high) if hi > 0 else trade_high
+        if trade_low > 0:
+            lo = min(lo, trade_low) if lo > 0 else trade_low
     if vol == snap.vol_now and hi == snap.kline_high and lo == snap.kline_low:
         return snap
     return replace(snap, vol_now=vol, kline_high=hi, kline_low=lo)

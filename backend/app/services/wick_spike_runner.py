@@ -121,9 +121,9 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             else 12.0
         ),
         arm_retrace_grace_sec=float(
-            getattr(strategy, "wick_arm_retrace_grace_sec", 3.0)
+            getattr(strategy, "wick_arm_retrace_grace_sec", 6.0)
             if getattr(strategy, "wick_arm_retrace_grace_sec", None) is not None
-            else 3.0
+            else 6.0
         ),
         arm_grace_max_tip_gap_pct=float(
             getattr(strategy, "wick_arm_grace_max_tip_gap_pct", 2.0)
@@ -207,6 +207,7 @@ class WickSpikeRunner:
         last_seq: dict[str, int] = {}
         last_kline_fp: dict[str, tuple] = {}
         last_bg_rest: dict[str, float] = {}
+        last_forming_rest: dict[str, float] = {}  # forming 停滞 REST 纠偏独立 1s 节流
         last_arm_rest: dict[str, float] = {}
         arm_rest_inflight: set[str] = set()
         last_near_miss_log: dict[str, float] = {}
@@ -406,6 +407,15 @@ class WickSpikeRunner:
                         await asyncio.sleep(_POLL_IDLE_SEC)
                     continue
 
+                # WS 断连重连后触发 K 线 REST 补强（覆盖断连期间丢失的量/高低）
+                resync_set = price_stream_manager.consume_resync_needed()
+                if resync_set and public is not None:
+                    for sym in symbols:
+                        sk = _norm_sym(sym)
+                        if sk in resync_set and now - last_bg_rest.get(sk, 0.0) >= _BG_REST_SEC:
+                            last_bg_rest[sk] = now
+                            self._fire_bg(_bg_rest_one(public, sym, timeframe))
+
                 # 武装窗优先扫描；仍保留 cold（否则 A 武装时 B 仅量变/K 变会被漏扫）
                 now_ms_loop = int(time.time() * 1000)
                 retry_syms: list[str] = []
@@ -472,8 +482,8 @@ class WickSpikeRunner:
                     tf_ms = _timeframe_ms(timeframe)
                     current_bar_ts = (now_ms // tf_ms) * tf_ms
                     if forming_ts < current_bar_ts:
-                        if now - last_bg_rest.get(sym_key, 0.0) >= _BG_REST_SEC:
-                            last_bg_rest[sym_key] = now
+                        if now - last_forming_rest.get(sym_key, 0.0) >= 1.0:
+                            last_forming_rest[sym_key] = now
                             self._fire_bg(_bg_rest_one(public, sym, timeframe))
                         continue
 
@@ -529,6 +539,7 @@ class WickSpikeRunner:
                         trade_high=price_stream_manager.bar_high(sym_key),
                         trade_low=price_stream_manager.bar_low(sym_key),
                         trade_bar_open_ts=price_stream_manager.bar_open_ms(sym_key),
+                        trade_instant_vol=price_stream_manager.instant_vol_annualized(sym_key),
                     )
 
                     prev_armed_at = st.armed_at_ms
@@ -908,21 +919,8 @@ class WickSpikeRunner:
                         e,
                     )
 
-            # 黑名单热复检：命中须 blocked（保持本根触发），不可当 retryable 反复打
-            try:
-                if await self._position_mgr._is_blacklisted_now(strategy_id, symbol):
-                    strategy_log_service.info(
-                        strategy_id, f"{symbol} 接针下单前黑名单复检命中，跳过"
-                    )
-                    early = "blocked"
-                    return early
-            except Exception as e:
-                strategy_log_service.error(
-                    strategy_id,
-                    f"{symbol} 接针下单前黑名单复检失败，已安全取消 — {e}",
-                )
-                early = "blocked"
-                return early
+            # 黑名单已由选币池过滤 + _passes_new_entry_filters(exclude_norm) + 内存门禁三道防线挡住，
+            # 下单前不再做 DB 复检（省 5-30ms 延迟）。
 
             detect_ms = (
                 (time.perf_counter() - signal_detect_perf) * 1000.0
@@ -1011,98 +1009,137 @@ class WickSpikeRunner:
         if api_res is None:
             return "retryable_fail"
 
-        # 锁外：挂止盈 + 写库（本根已由 on_tick 标记 triggered，防双开）
-        api_res = await self._position_mgr.place_open_tp_limit(auth, strategy, api_res)
+        # 锁外：挂止盈 + 写库丢后台 fire-and-forget，主循环立即继续扫描其他 symbol
+        # （内存腿已更新 + apply_local_fill，防双开不受影响；DB 失败有 orphan reconcile 兜底）
+        self._fire_bg(self._post_open_async(
+            strategy_id, strategy, api_res, auth, signal,
+            price, snap, extreme, n, progress, gap, vol_ratio, need,
+            trade_age_ms, open_api_ms, signal_to_order_ms,
+        ))
+        return "opened"
 
-        last_db_err: Exception | None = None
-        for attempt in range(_DB_WRITE_RETRIES):
+    async def _post_open_async(
+        self,
+        strategy_id: int,
+        strategy: Strategy,
+        api_res,
+        auth,
+        signal,
+        price: float,
+        snap,
+        extreme: float,
+        n: float,
+        progress: float,
+        gap: float,
+        vol_ratio: float,
+        need: float,
+        trade_age_ms: int,
+        open_api_ms: float,
+        signal_to_order_ms: float,
+    ) -> None:
+        """后台执行：挂止盈限价 + 写库 + orphan reconcile。不阻塞主循环。
+
+        fire-and-forget：异常只 log 不抛。仓位已成交，DB 失败有对账兜底。
+        """
+        symbol = api_res.symbol
+        try:
+            api_res = await self._position_mgr.place_open_tp_limit(auth, strategy, api_res)
+
+            last_db_err: Exception | None = None
+            for attempt in range(_DB_WRITE_RETRIES):
+                try:
+                    async with async_session() as session:
+                        db_strategy = await session.get(Strategy, strategy_id)
+                        if not db_strategy or db_strategy.status != "running":
+                            strategy_log_service.error(
+                                strategy_id,
+                                f"{symbol} 接针已成交但策略状态异常 — 请手动检查交易所",
+                            )
+                            return
+                        db_strategy.last_signal = signal.value
+                        db_strategy.last_signal_at = now_beijing()
+                        db_strategy.last_rsi = round(vol_ratio, 2)
+                        await self._position_mgr.execute_open_db(
+                            session, db_strategy, api_res
+                        )
+                        await session.commit()
+                    fill_px = float(api_res.avg_price or 0) or float(price)
+                    logger.info(
+                        "wick_spike opened strategy=%d %s open_api_ms=%.0f "
+                        "signal_to_order_ms=%.0f trade_age_ms=%d "
+                        "px=%.6g open=%.6g ext=%.6g atrN=%.6g "
+                        "progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g",
+                        strategy_id,
+                        symbol,
+                        open_api_ms,
+                        signal_to_order_ms,
+                        trade_age_ms,
+                        fill_px,
+                        snap.bar_open,
+                        extreme,
+                        n,
+                        progress,
+                        gap,
+                        vol_ratio,
+                        need,
+                    )
+                    return
+                except Exception as e:
+                    last_db_err = e
+                    logger.error(
+                        "wick_spike open db %s attempt=%d/%d: %s",
+                        symbol,
+                        attempt + 1,
+                        _DB_WRITE_RETRIES,
+                        e,
+                    )
+                    if attempt + 1 < _DB_WRITE_RETRIES:
+                        await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SEC)
+
+            # 重试耗尽：孤儿仓对账补写
             try:
                 async with async_session() as session:
                     db_strategy = await session.get(Strategy, strategy_id)
-                    if not db_strategy or db_strategy.status != "running":
-                        strategy_log_service.error(
-                            strategy_id,
-                            f"{symbol} 接针已成交但策略状态异常 — 请手动检查交易所",
+                    if db_strategy is not None:
+                        outcome = await self._position_mgr._reconcile_orphan_from_exchange(
+                            session,
+                            db_strategy,
+                            symbol,
+                            auth,
+                            float(api_res.avg_price or price or 0),
                         )
-                        return "committed_fail"
-                    db_strategy.last_signal = signal.value
-                    db_strategy.last_signal_at = now_beijing()
-                    db_strategy.last_rsi = round(vol_ratio, 2)
-                    await self._position_mgr.execute_open_db(
-                        session, db_strategy, api_res
-                    )
-                    await session.commit()
-                fill_px = float(api_res.avg_price or 0) or float(price)
-                logger.info(
-                    "wick_spike opened strategy=%d %s open_api_ms=%.0f "
-                    "signal_to_order_ms=%.0f trade_age_ms=%d "
-                    "px=%.6g open=%.6g ext=%.6g atrN=%.6g "
-                    "progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g",
+                        await session.commit()
+                        if outcome == RECONCILE_CREATED:
+                            strategy_log_service.warning(
+                                strategy_id,
+                                f"{symbol} 写库重试失败后已通过对账补建仓位记录",
+                            )
+                            logger.warning(
+                                "wick_spike %d %s DB fail recovered via orphan reconcile",
+                                strategy_id,
+                                symbol,
+                            )
+                            return
+            except Exception as e:
+                logger.error(
+                    "wick_spike %d %s orphan reconcile after DB fail: %s",
                     strategy_id,
                     symbol,
-                    open_api_ms,
-                    signal_to_order_ms,
-                    trade_age_ms,
-                    fill_px,
-                    snap.bar_open,
-                    extreme,
-                    n,
-                    progress,
-                    gap,
-                    vol_ratio,
-                    need,
-                )
-                return "opened"
-            except Exception as e:
-                last_db_err = e
-                logger.error(
-                    "wick_spike open db %s attempt=%d/%d: %s",
-                    symbol,
-                    attempt + 1,
-                    _DB_WRITE_RETRIES,
                     e,
                 )
-                if attempt + 1 < _DB_WRITE_RETRIES:
-                    await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SEC)
 
-        # 重试耗尽：孤儿仓对账补写
-        try:
-            async with async_session() as session:
-                db_strategy = await session.get(Strategy, strategy_id)
-                if db_strategy is not None:
-                    outcome = await self._position_mgr._reconcile_orphan_from_exchange(
-                        session,
-                        db_strategy,
-                        symbol,
-                        auth,
-                        float(api_res.avg_price or price or 0),
-                    )
-                    await session.commit()
-                    if outcome == RECONCILE_CREATED:
-                        strategy_log_service.warning(
-                            strategy_id,
-                            f"{symbol} 写库重试失败后已通过对账补建仓位记录",
-                        )
-                        logger.warning(
-                            "wick_spike %d %s DB fail recovered via orphan reconcile",
-                            strategy_id,
-                            symbol,
-                        )
-                        return "opened"
+            strategy_log_service.error(
+                strategy_id,
+                f"{symbol} 接针开仓已成交但写库失败（已重试{_DB_WRITE_RETRIES}次）"
+                f" — {last_db_err}；请手动检查交易所，本根不再重试",
+            )
         except Exception as e:
-            logger.error(
-                "wick_spike %d %s orphan reconcile after DB fail: %s",
+            logger.exception(
+                "wick_spike _post_open_async strategy=%d %s: %s",
                 strategy_id,
                 symbol,
                 e,
             )
-
-        strategy_log_service.error(
-            strategy_id,
-            f"{symbol} 接针开仓已成交但写库失败（已重试{_DB_WRITE_RETRIES}次）"
-            f" — {last_db_err}；请手动检查交易所，本根不再重试",
-        )
-        return "committed_fail"
 
 
 wick_spike_runner = WickSpikeRunner()

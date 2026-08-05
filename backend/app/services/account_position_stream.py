@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 _RECONNECT_INITIAL = 1.0
 _RECONNECT_MAX = 30.0
 # 超过此时长无成功更新则视为过期，热路径回落 REST
-_STALE_AFTER_SEC = 15.0
+# 30s：减少 ccxt.pro 心跳稀疏时的无谓 REST 回落；断连降级慢一点但方向安全（旧 legs 只会漏开不会双开）
+_STALE_AFTER_SEC = 30.0
 
 
 def _norm_sym(s: str) -> str:

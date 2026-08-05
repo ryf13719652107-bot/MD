@@ -54,7 +54,7 @@ class Strategy(Base):
     )
     # 武装时量不够，确认阶段前 N 秒免回撤；0=不放宽
     wick_arm_retrace_grace_sec: Mapped[float] = mapped_column(
-        Float, default=3.0, server_default="3.0"
+        Float, default=6.0, server_default="6.0"
     )
     # grace 免回撤时 tip_gap% 上限；0=不限制
     wick_arm_grace_max_tip_gap_pct: Mapped[float] = mapped_column(

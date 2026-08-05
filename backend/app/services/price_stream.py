@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,10 @@ class PriceStreamManager:
         self._wake_events: dict[str, asyncio.Event] = {}
         # 可选轻量回调（禁止在回调里 await 下单）
         self._trade_hooks: list[Callable[[str, float, float, int], None]] = []
+        # 最近 N 秒滚动成交量（ts_ms, amount），供瞬时放量判定
+        self._rolling_trades: dict[str, deque] = {}
+        # WS 断连重连后需 REST 补强的 symbol 集合
+        self._resync_needed: set[str] = set()
 
     def subscribe_wake(self, owner: str) -> asyncio.Event:
         """为 owner 登记唤醒事件；成交写入后 set。"""
@@ -99,6 +104,31 @@ class PriceStreamManager:
 
     def bar_open_ms(self, symbol: str) -> int:
         return int(self._bar_open_ms.get(_norm_sym(symbol), 0) or 0)
+
+    def instant_vol_annualized(self, symbol: str, window_sec: float = 5.0) -> float:
+        """最近 window_sec 秒成交量折算到分钟（与 vol_sma 可比）。
+
+        解决本根累计量滞后：开盘前几秒累计量只有全根的百分之几，
+        但瞬时脉冲折算到分钟后可立即反映放量。
+        """
+        key = _norm_sym(symbol)
+        dq = self._rolling_trades.get(key)
+        if not dq:
+            return 0.0
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - int(window_sec * 1000)
+        total = sum(amt for ts, amt in dq if ts >= cutoff)
+        if total <= 0 or window_sec <= 0:
+            return 0.0
+        return total * (60.0 / window_sec)
+
+    def consume_resync_needed(self) -> set[str]:
+        """返回并清空 WS 断连重连后需 REST 补强的 symbol 集合。"""
+        if not self._resync_needed:
+            return set()
+        out = set(self._resync_needed)
+        self._resync_needed.clear()
+        return out
 
     @property
     def global_seq(self) -> int:
@@ -187,6 +217,13 @@ class PriceStreamManager:
         self._bar_high[symbol_norm] = max(hi, px)
         self._bar_low[symbol_norm] = min(lo, px) if lo > 0 else px
 
+        # 最近 5 秒滚动成交量（供瞬时放量判定）
+        dq = self._rolling_trades.setdefault(symbol_norm, deque(maxlen=2000))
+        dq.append((ts_ms, amount))
+        cutoff = ts_ms - 5000
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+
         for ev in self._wake_events.values():
             ev.set()
         for hook in self._trade_hooks:
@@ -197,6 +234,7 @@ class PriceStreamManager:
 
     async def _run_symbol(self, symbol_norm: str) -> None:
         backoff = _RECONNECT_INITIAL_BACKOFF
+        just_reconnected = True  # 首次启动也需 REST 补强
         while symbol_norm in self._wanted:
             client = self._client
             if client is None:
@@ -225,6 +263,10 @@ class PriceStreamManager:
                         ts_ms = int(time.time() * 1000)
                     self._apply_trade(symbol_norm, px, amount, ts_ms)
                 backoff = _RECONNECT_INITIAL_BACKOFF
+                # 仅重连后首次成功才标记 REST 补强（断连期间成交数据丢失）
+                if just_reconnected:
+                    self._resync_needed.add(symbol_norm)
+                    just_reconnected = False
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -239,6 +281,7 @@ class PriceStreamManager:
                 except asyncio.CancelledError:
                     raise
                 backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF)
+                just_reconnected = True  # 下次成功后需补强
 
     async def _janitor_loop(self) -> None:
         try:
@@ -262,6 +305,7 @@ class PriceStreamManager:
                         self._bar_high.pop(sym, None)
                         self._bar_low.pop(sym, None)
                         self._tf_ms_by_sym.pop(sym, None)
+                        self._rolling_trades.pop(sym, None)
                         logger.info("price_stream stopped idle %s", sym)
         except asyncio.CancelledError:
             raise
@@ -288,6 +332,8 @@ class PriceStreamManager:
         self._bar_vol.clear()
         self._bar_high.clear()
         self._bar_low.clear()
+        self._rolling_trades.clear()
+        self._resync_needed.clear()
 
 
 price_stream_manager = PriceStreamManager()

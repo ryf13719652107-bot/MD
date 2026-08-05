@@ -1441,30 +1441,7 @@ class PositionManager:
         ):
             return None
 
-        try:
-            if await self._is_blacklisted_now(strategy_id, symbol):
-                logger.info(
-                    "Strategy %d: %s blacklisted before wick order; cancelled",
-                    strategy_id,
-                    symbol,
-                )
-                strategy_log_service.info(
-                    strategy_id,
-                    f"{symbol} 接针下单前黑名单复检命中，已取消开仓",
-                )
-                return None
-        except Exception as e:
-            logger.error(
-                "Strategy %d: wick blacklist recheck for %s failed; cancelled: %s",
-                strategy_id,
-                symbol,
-                e,
-            )
-            strategy_log_service.error(
-                strategy_id,
-                f"{symbol} 接针下单前黑名单复检失败，已安全取消开仓 — {e}",
-            )
-            return None
+        # 黑名单已由选币池过滤 + _passes_new_entry_filters(exclude_norm) 挡住，下单前不再 DB 复检。
 
         if await self._should_skip_min_qty_exceeds(
             auth_binance, strategy, strategy_id, symbol, base_qty, current_price,

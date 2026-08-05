@@ -108,6 +108,8 @@ class KlineStreamManager:
         if not buf:
             self._buffers[key] = list(rows)[-self._max_bars :]
             return
+        # forming 根（buffer 最新一根）极值只增不减，防 REST 旧值覆盖 WS 已推的更高 high/更大 vol
+        forming_ts = int(buf[-1][0]) if buf else None
         idx = {int(r[0]): i for i, r in enumerate(buf)}
         for r in rows:
             try:
@@ -115,7 +117,20 @@ class KlineStreamManager:
             except (TypeError, ValueError, IndexError):
                 continue
             if ts in idx:
-                buf[idx[ts]] = list(r)
+                if ts == forming_ts:
+                    cur = buf[idx[ts]]
+                    rest_high = float(r[2]) if len(r) > 2 else 0.0
+                    rest_low = float(r[3]) if len(r) > 3 else 0.0
+                    rest_vol = float(r[5]) if len(r) > 5 else 0.0
+                    cur_high = float(cur[2]) if len(cur) > 2 else 0.0
+                    cur_low = float(cur[3]) if len(cur) > 3 else 0.0
+                    cur_vol = float(cur[5]) if len(cur) > 5 else 0.0
+                    new_high = max(cur_high, rest_high) if cur_high > 0 else rest_high
+                    new_low = min(cur_low, rest_low) if cur_low > 0 else rest_low
+                    new_vol = max(cur_vol, rest_vol)
+                    buf[idx[ts]] = [cur[0], cur[1], new_high, new_low, cur[4], new_vol]
+                else:
+                    buf[idx[ts]] = list(r)
             else:
                 buf.append(list(r))
                 idx[ts] = len(buf) - 1
