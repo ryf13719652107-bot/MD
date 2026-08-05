@@ -2007,9 +2007,10 @@ class PositionManager:
             return
 
         # --- Check TP limit order fill (before martingale, since position may already be closed) ---
+        # 有挂单止盈且状态仍 open：只等限价成交，禁止「价已过止盈」市价兜底
+        # （接针后价格常瞬间穿透又弹回，市价会在更差价位平掉，BICO/HEI 案例）
         if strategy.take_profit_limit_order:
             tp_filled = False
-            tp_still_open = False  # 仅确认 open 后才允许穿越市价兜底
             for p in open_positions:
                 if p.tp_limit_order_id:
                     try:
@@ -2036,48 +2037,10 @@ class PositionManager:
                             )
                             tp_filled = True
                             break
-                        if status in ("open", "new", "partially_filled", "partial"):
-                            tp_still_open = True
                     except (Exception, asyncio.TimeoutError):
                         pass
             if tp_filled:
                 return
-
-            # 必须先确认限价仍 open：fetch 失败时勿穿越兜底（避免已成交却再市价）
-            # 穿越用 ticker 最新价，禁止滞后 K 线 close（HEI：0.204 误触发）
-            tp_target = next(
-                (
-                    float(p.take_profit_price)
-                    for p in open_positions
-                    if p.take_profit_price and float(p.take_profit_price) > 0
-                ),
-                0.0,
-            )
-            if tp_still_open and tp_target > 0:
-                live_px = await _live_last_price(auth_binance, symbol, 0.0)
-                through = (
-                    live_px >= tp_target
-                    if pos_side == "long"
-                    else live_px <= tp_target
-                ) if live_px > 0 else False
-                if through:
-                    strategy_log_service.warning(
-                        strategy_id,
-                        f"{symbol} 最新价{live_px:.6g}已过止盈{tp_target:.6g}但限价未成 — 兜底市价平仓",
-                    )
-                    await self._close_positions(
-                        session,
-                        strategy,
-                        symbol,
-                        auth_binance,
-                        open_positions,
-                        eng,
-                        avg_entry,
-                        pos_side,
-                        "take_profit",
-                        live_px,
-                    )
-                    return
 
         # --- 补挂/补关联止盈限价单（重启丢单等）---
         await self._ensure_tp_limit_orders(
@@ -2240,45 +2203,12 @@ class PositionManager:
                             for p in open_positions:
                                 p.tp_limit_order_id = None
                         else:
-                            # 穿越判定必须用交易所最新价，禁止用滞后 K 线 close
-                            tp_target = next(
-                                (
-                                    float(p.take_profit_price)
-                                    for p in open_positions
-                                    if p.take_profit_price and float(p.take_profit_price) > 0
-                                ),
-                                0.0,
-                            )
-                            # fallback=0：ticker 失败时不得用滞后 K 线 current_price 判穿越
-                            live_px = await _live_last_price(auth_binance, symbol, 0.0)
-                            through = False
-                            if tp_target > 0 and live_px > 0:
-                                through = (
-                                    live_px >= tp_target
-                                    if pos_side == "long"
-                                    else live_px <= tp_target
-                                )
-                            if not through:
-                                strategy_log_service.info(
-                                    strategy_id,
-                                    f"{symbol} 止盈限价单状态={order_status}，"
-                                    f"最新价={live_px:.6g} 未过止盈{tp_target:.6g}，等待成交",
-                                )
-                                return
-                            strategy_log_service.warning(
+                            # 限价仍挂着：只等成交，不做「价已过止盈」市价兜底
+                            strategy_log_service.info(
                                 strategy_id,
-                                f"{symbol} 最新价{live_px:.6g}已过止盈价{tp_target:.6g}但限价未成"
-                                f"(状态={order_status}) — 兜底市价平仓",
+                                f"{symbol} 止盈限价单状态={order_status}，等待限价成交",
                             )
-                            for p in open_positions:
-                                if p.tp_limit_order_id:
-                                    try:
-                                        await auth_binance.cancel_order(
-                                            p.tp_limit_order_id, symbol
-                                        )
-                                    except Exception:
-                                        pass
-                                    p.tp_limit_order_id = None
+                            return
                     except (Exception, asyncio.TimeoutError) as e:
                         logger.warning("Strategy %d: TP order check failed for %s: %s — waiting for check_tp_fills", strategy_id, symbol, e)
                         return
