@@ -19,7 +19,7 @@ max_retrace_pct（默认 50）：现价相对「开盘→极值」已回撤的�
 arm_wait_sec（默认 12）：刺破后最多等多久的量；0=关闭武装（恢复旧「同刻全条件」）。
 arm_retrace_grace_sec（默认 3）：武装时量不够，则确认时前 N 秒免回撤门禁。
 arm_grace_max_tip_gap_pct（默认 2）：grace 免回撤时，进场价相对极值的 tip_gap% 上限；0=不限制。
-超时作废后若 progress 创新高可再次武装。
+超时作废后若同根仍刺破可再次武装（量滞后于价时给量能追上来的机会）。
 """
 
 from __future__ import annotations
@@ -513,16 +513,15 @@ def on_tick(
             clear_arm(state)
             return None
 
-    # 新武装：刺破 + 最小涨跌幅；作废后仅 progress 创新高可再武装
+    # 新武装：刺破 + 最小涨跌幅
+    # 作废后若同根仍刺破可再武装（量滞后于价时给量能追上来的机会）；
+    # 不再要求 progress 创新高：极值已记入 state.bar_high，量达标即可触发。
     if state.armed_bar_ts != snap.bar_open_ts:
         if not pierced:
             return None
         if not _move_ok(params, direction, snap.bar_open, extreme):
             return None
         progress0 = spike_progress(direction, snap.bar_open, extreme, n)
-        if state.armed_expired_bar_ts == snap.bar_open_ts:
-            if progress0 <= float(state.armed_expired_progress or 0) + 1e-9:
-                return None
         need0 = effective_volume_mult(params, progress0)
         vol_hot0 = _volume_hot(params, snap, volume_mult=need0)
         state.armed_bar_ts = snap.bar_open_ts

@@ -382,25 +382,27 @@ def test_arm_volume_after_grace_still_needs_retrace():
     assert on_tick(state, params, snap_hot, last_price=94.0, now_ms=5_100) == Signal.LONG
 
 
-def test_arm_expires_without_volume_same_depth_no_rearm():
+def test_arm_expires_then_same_depth_volume_arrives_triggers():
+    """量滞后于价：武装过期后，同根仍刺破 + 量达标 → 应触发（修复 SKYAI 类场景）。"""
     state = WickSymbolState()
     params = WickSpikeParams(
         direction="long",
         volume_mult=8.0,
         atr_mult=5.0,
         min_move_pct=0,
+        max_retrace_pct=50.0,
         arm_wait_sec=2.0,
         arm_retrace_grace_sec=3.0,
     )
     snap_cold = _snap(vol_now=20.0, vol_sma=10.0, low=90.0)
     assert on_tick(state, params, snap_cold, last_price=90.0, now_ms=1_000) is None
-    # 超时
+    # 超时作废
     assert on_tick(state, params, snap_cold, last_price=90.0, now_ms=4_000) is None
     assert state.armed_bar_ts is None
     assert state.armed_expired_bar_ts == snap_cold.bar_open_ts
-    # 同深度量后来够了也不再武装
+    # 量后来够了，同深度仍刺破 → 再武装并触发（量滞后于价的合法场景）
     snap_hot = _snap(vol_now=80.0, vol_sma=10.0, low=90.0)
-    assert on_tick(state, params, snap_hot, last_price=90.0, now_ms=4_100) is None
+    assert on_tick(state, params, snap_hot, last_price=90.0, now_ms=4_100) == Signal.LONG
 
 
 def test_arm_expires_then_deeper_progress_rearms():
