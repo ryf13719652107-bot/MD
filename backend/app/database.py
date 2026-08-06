@@ -91,6 +91,10 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN wick_arm_wait_sec FLOAT DEFAULT 12.0",
             "ALTER TABLE strategies ADD COLUMN wick_arm_retrace_grace_sec FLOAT DEFAULT 3.0",
             "ALTER TABLE strategies ADD COLUMN wick_arm_grace_max_tip_gap_pct FLOAT DEFAULT 2.0",
+            "ALTER TABLE strategies ADD COLUMN wick_rebound_enabled BOOLEAN DEFAULT 0",
+            "ALTER TABLE strategies ADD COLUMN wick_rebound_trigger_pct FLOAT DEFAULT 20.0",
+            "ALTER TABLE strategies ADD COLUMN wick_rebound_abort_pct FLOAT DEFAULT 35.0",
+            "ALTER TABLE strategies ADD COLUMN wick_rebound_wait_sec FLOAT DEFAULT 5.0",
             "ALTER TABLE strategies ADD COLUMN skip_min_qty_exceeds BOOLEAN DEFAULT 1",
             "ALTER TABLE accounts ADD COLUMN cashflow_sync_cursor_ms INTEGER",
             "ALTER TABLE accounts ADD COLUMN exchange VARCHAR(20) DEFAULT 'binance'",
@@ -248,6 +252,46 @@ async def init_db():
                 lambda c: c.exec_driver_sql(
                     "UPDATE strategies SET wick_arm_grace_max_tip_gap_pct=2.0 "
                     "WHERE wick_arm_grace_max_tip_gap_pct IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_rebound_enabled=0 "
+                    "WHERE wick_rebound_enabled IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_rebound_trigger_pct=20.0 "
+                    "WHERE wick_rebound_trigger_pct IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_rebound_abort_pct=35.0 "
+                    "WHERE wick_rebound_abort_pct IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_rebound_wait_sec=5.0 "
+                    "WHERE wick_rebound_wait_sec IS NULL"
                 )
             )
         except Exception:
