@@ -605,7 +605,7 @@ def near_miss_diag(
     return (
         f"dir={direction} px={last_price:.6g} open={snap.bar_open:.6g} "
         f"ext={extreme:.6g} thr={thr:.6g} pierce={pierced} "
-        f"atrN={n:.6g} progress={progress:.2f} amp%={move_pct:.2f} "
+        f"atr={snap.atr:.6g} atrN={n:.6g} progress={progress:.2f} amp%={move_pct:.2f} "
         f"vol×={vol_ratio:.2f} need×={need:g} vol_hot={vol_hot} "
         f"retrace%={retrace:.2f} armed={armed} arm_age_ms={arm_age} "
         f"await_vol={state.armed_awaiting_vol if armed else False} "

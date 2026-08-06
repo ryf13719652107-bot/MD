@@ -71,7 +71,10 @@ logger = logging.getLogger(__name__)
 
 _SYMBOL_REFRESH_SEC = 15.0
 _POLL_IDLE_SEC = 0.005
-_KLINE_MIN_BARS = 80
+# ATR 为 Wilder RMA，路径依赖强：历史过短时末值易与币安长图分叉。
+# 预热/纠偏拉够 ATR 窗；热路径未就绪前不开仓（勿再用 atr_period+2≈16 根就判刺破）。
+_KLINE_ATR_BARS = 300
+_KLINE_MIN_BARS = _KLINE_ATR_BARS  # 兼容旧引用
 # 策略参数/DB 重载间隔（后台 task，热路径只消费）
 _STRATEGY_RELOAD_SEC = 2.0
 # 近阈值诊断写入 bot.log 的节流（秒）；不进前端策略日志
@@ -312,7 +315,8 @@ class WickSpikeRunner:
         async def _bg_prewarm_klines(pub, syms: list[str], tf: str) -> None:
             for sym in syms:
                 try:
-                    await kline_stream_manager.get(pub, sym, tf, _KLINE_MIN_BARS)
+                    # 用更长窗口灌 ATR，减少与交易所图表的 RMA 分叉
+                    await kline_stream_manager.get(pub, sym, tf, _KLINE_ATR_BARS)
                 except Exception:
                     pass
                 await asyncio.sleep(0)
@@ -329,7 +333,7 @@ class WickSpikeRunner:
 
         async def _bg_rest_one(pub, sym: str, tf: str) -> None:
             try:
-                await kline_stream_manager.refresh_rest(pub, sym, tf, _KLINE_MIN_BARS)
+                await kline_stream_manager.refresh_rest(pub, sym, tf, _KLINE_ATR_BARS)
             except Exception:
                 pass
 
@@ -508,7 +512,8 @@ class WickSpikeRunner:
 
                     # 热路径：只读 WS 内存，绝不 await REST
                     klines = kline_stream_manager.peek(public, sym, timeframe)
-                    if len(klines) < atr_period + 2:
+                    # 缓冲不足 ATR 窗：后台拉长历史，本轮跳过（避免短窗 RMA 误判刺破）
+                    if len(klines) < _KLINE_ATR_BARS:
                         if now - last_bg_rest.get(sym_key, 0.0) >= _BG_REST_SEC:
                             last_bg_rest[sym_key] = now
                             self._fire_bg(_bg_rest_one(public, sym, timeframe))

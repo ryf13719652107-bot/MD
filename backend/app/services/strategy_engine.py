@@ -218,7 +218,11 @@ def rma(data: list[float], period: int) -> list[float]:
 
 
 def calculate_atr(klines: list, period: int = 14) -> Optional[list[float]]:
-    """ATR via Wilder RMA; returned series aligns to the end of klines."""
+    """ATR via Wilder RMA（与 Pine ta.atr / 币安默认 ATR 同族）。
+
+    注意：RMA 有路径依赖，输入 K 线历史越短，末值越容易与交易所长图不一致。
+    接针侧应尽量用足够长的已收盘序列（见 wick_spike_runner._KLINE_ATR_BARS）。
+    """
     if len(klines) < period + 1:
         return None
     highs = [float(c[2]) for c in klines]

@@ -16,6 +16,7 @@ _NEAR_MISS_RE = re.compile(
     + r".*wick_spike near-miss strategy=(?P<sid>\d+)\s+(?P<sym>\S+)\s+"
     + r"dir=(?P<dir>\w+)\s+px=(?P<px>[^\s]+)\s+open=(?P<open>[^\s]+)\s+"
     + r"ext=(?P<ext>[^\s]+)\s+thr=(?P<thr>[^\s]+)\s+pierce=(?P<pierce>\w+)\s+"
+    + r"(?:atr=(?P<atr>[^\s]+)\s+)?"
     + r"atrN=(?P<atrN>[^\s]+)\s+progress=(?P<progress>[^\s]+)"
     + r"(?:\s+amp%=(?P<amp>[^\s]+))?"
     + r"\s+vol×=(?P<vol>[^\s]+)\s+need×=(?P<need>[^\s]+)\s+vol_hot=(?P<vol_hot>\w+)"
