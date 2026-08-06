@@ -5,6 +5,7 @@ from app.services.wick_spike_engine import (
     WickBarSnapshot,
     WickSpikeParams,
     WickSymbolState,
+    confirm_max_retrace_pct,
     effective_volume_mult,
     enrich_snap_with_trades,
     mark_bar_triggered,
@@ -14,6 +15,7 @@ from app.services.wick_spike_engine import (
     release_bar_trigger,
     spike_move_pct,
     spike_progress,
+    take_diag_event,
     tip_gap_pct,
     wick_retrace_pct,
 )
@@ -466,3 +468,128 @@ def test_volume_flicker_does_not_enable_grace():
     assert state.armed_awaiting_vol is False
     # 量回来但仍在坏回撤 → 仍拒绝
     assert on_tick(state, params, snap_hot, last_price=96.0, now_ms=2_000) is None
+
+
+def test_confirm_max_retrace_capped_by_abort_when_rebound_on():
+    assert confirm_max_retrace_pct(
+        WickSpikeParams(
+            direction="long",
+            rebound_enabled=True,
+            max_retrace_pct=50.0,
+            rebound_abort_pct=35.0,
+            rebound_trigger_pct=20.0,
+        )
+    ) == 35.0
+    assert confirm_max_retrace_pct(
+        WickSpikeParams(direction="long", rebound_enabled=False, max_retrace_pct=50.0)
+    ) == 50.0
+
+
+def test_rebound_arm_wait_zero_still_waits_for_bounce():
+    """arm_wait=0 且开启反弹：同刻达标进窗，不立刻 Signal。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=40.0,
+        rebound_wait_sec=5.0,
+    )
+    # open=100, high=110, 现价贴尖 → confirm 进窗
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1_000) is None
+    assert state.rebound_bar_ts == snap.bar_open_ts
+    assert take_diag_event(state) == "rebound_enter"
+    # 反弹 20%：110 → 108
+    assert on_tick(state, params, snap, last_price=108.0, now_ms=1_100) == Signal.SHORT
+    assert state.rebound_extreme == 110.0  # 触发后保留，供失败重试
+    assert take_diag_event(state) == "rebound_fire"
+
+
+def test_rebound_release_retries_same_bar():
+    """反弹触发后开仓失败 release → 同根仍可再触发。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=40.0,
+        rebound_wait_sec=5.0,
+    )
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1_000) is None
+    assert on_tick(state, params, snap, last_price=108.0, now_ms=1_100) == Signal.SHORT
+    release_bar_trigger(state)
+    assert state.rebound_bar_ts == snap.bar_open_ts
+    assert on_tick(state, params, snap, last_price=108.0, now_ms=1_200) == Signal.SHORT
+    mark_bar_triggered(state, params, snap.bar_open_ts, 1_300)
+    assert state.rebound_bar_ts is None
+    assert on_tick(state, params, snap, last_price=108.0, now_ms=1_400) is None
+
+
+def test_rebound_blocks_confirm_past_abort():
+    """开启反弹时 confirm 回撤上限=abort，已过放弃线不会进窗。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=35.0,
+        rebound_wait_sec=5.0,
+    )
+    # open=100, low=90；现价 95 → 回撤 50% > abort 35%
+    snap = _snap(vol_now=80.0, vol_sma=10.0, low=90.0, high=100.0)
+    assert on_tick(state, params, snap, last_price=95.0, now_ms=1) is None
+    assert state.rebound_bar_ts is None
+    assert state.triggered_bar_ts is None
+
+
+def test_rebound_same_tick_fire_when_already_bounced():
+    """confirm 时已反弹过 trigger 且未过 abort → 同刻市价。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=40.0,
+        rebound_wait_sec=5.0,
+    )
+    # ext=110 记在 high；现价 108 → 回撤 20% = trigger
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
+    assert on_tick(state, params, snap, last_price=108.0, now_ms=1) == Signal.SHORT
+
+
+def test_rebound_trigger_zero_fires_immediately():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=0,
+        rebound_abort_pct=35.0,
+    )
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1) == Signal.SHORT
+    assert take_diag_event(state) == "rebound_immediate"

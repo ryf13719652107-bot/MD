@@ -20,6 +20,14 @@ arm_wait_sec（默认 12）：刺破后最多等多久的量；0=关闭武装（
 arm_retrace_grace_sec（默认 3）：武装时量不够，则确认时前 N 秒免回撤门禁。
 arm_grace_max_tip_gap_pct（默认 2）：grace 免回撤时，进场价相对极值的 tip_gap% 上限；0=不限制。
 超时作废后若同根仍刺破可再次武装（量滞后于价时给量能追上来的机会）。
+
+反弹追踪（方案J，rebound_enabled）：
+  confirm 达标后不立刻市价，进入反弹窗；针尖可加深；
+  现价从针尖反弹达 trigger% → 市价信号（保留 rebound 态，开仓失败可同根重试）；
+  反弹达 abort% 或超时 → 放弃。
+  confirm 时有效回撤上限 = min(max_retrace, abort)（避免 confirm 时已过放弃线）。
+  arm_wait=0 时若开启 rebound，同刻全条件达标后仍走反弹窗（不再绕过）。
+  trigger_pct<=0：confirm 后立刻市价（不等反弹）。
 """
 
 from __future__ import annotations
@@ -101,6 +109,8 @@ class WickSymbolState:
     rebound_bar_ts: Optional[int] = None
     rebound_at_ms: int = 0
     rebound_extreme: Optional[float] = None
+    # 供 runner 打专用日志后清空：rebound_enter / rebound_fire / rebound_abort / …
+    diag_event: Optional[str] = None
 
 
 @dataclass
@@ -231,17 +241,183 @@ def wick_retrace_pct(
     return 0.0
 
 
+def confirm_max_retrace_pct(params: WickSpikeParams) -> float:
+    """confirm 用回撤上限。开启反弹时再与 abort% 取较小，避免进窗即放弃。
+
+    返回值 <=0 表示不限制。
+    """
+    max_r = float(params.max_retrace_pct or 0)
+    if not params.rebound_enabled:
+        return max_r
+    abort = float(params.rebound_abort_pct or 0)
+    trig = float(params.rebound_trigger_pct or 0)
+    # abort<=trigger 时 abort 视为关闭（与运行时一致）
+    if abort > 0 and trig > 0 and abort <= trig + 1e-12:
+        abort = 0.0
+    if abort <= 0:
+        return max_r
+    if max_r <= 0:
+        return abort
+    return min(max_r, abort)
+
+
 def _retrace_ok(
     params: WickSpikeParams,
     direction: str,
     bar_open: float,
     extreme: float,
     last_price: float,
+    *,
+    max_retrace_override: float | None = None,
 ) -> bool:
-    max_r = float(params.max_retrace_pct or 0)
+    max_r = (
+        float(max_retrace_override)
+        if max_retrace_override is not None
+        else float(params.max_retrace_pct or 0)
+    )
     if max_r <= 0:
         return True
     return wick_retrace_pct(direction, bar_open, extreme, last_price) <= max_r + 1e-12
+
+
+def take_diag_event(state: WickSymbolState) -> Optional[str]:
+    """取出并清空 diag_event（供 runner 打日志）。"""
+    ev = state.diag_event
+    state.diag_event = None
+    return ev
+
+
+def _norm_rebound_pcts(params: WickSpikeParams) -> tuple[float, float]:
+    """返回 (trigger_pct, abort_pct)；abort<=trigger 时禁用 abort。"""
+    trig = float(params.rebound_trigger_pct or 0)
+    abort = float(params.rebound_abort_pct or 0)
+    if abort > 0 and trig > 0 and abort <= trig + 1e-12:
+        abort = 0.0
+    return trig, abort
+
+
+def _rebound_lines(
+    *,
+    is_long: bool,
+    bar_open: float,
+    rb_ext: float,
+    trig_pct: float,
+    abort_pct: float,
+) -> tuple[float, float, float]:
+    """返回 (spike_depth, trig_line, abort_line)。depth<=0 时 lines 无意义。"""
+    depth = abs(float(bar_open) - float(rb_ext))
+    if is_long:
+        trig_line = rb_ext + depth * trig_pct / 100.0
+        abort_line = rb_ext + depth * abort_pct / 100.0
+    else:
+        trig_line = rb_ext - depth * trig_pct / 100.0
+        abort_line = rb_ext - depth * abort_pct / 100.0
+    return depth, trig_line, abort_line
+
+
+def _fire_signal(state: WickSymbolState, snap: WickBarSnapshot, is_long: bool) -> Signal:
+    state.triggered_bar_ts = snap.bar_open_ts
+    state.armed_awaiting_vol = False
+    return Signal.LONG if is_long else Signal.SHORT
+
+
+def _process_rebound_window(
+    state: WickSymbolState,
+    params: WickSpikeParams,
+    snap: WickBarSnapshot,
+    last_price: float,
+    now_ms: int,
+    *,
+    is_long: bool,
+    extreme: float,
+) -> Optional[Signal]:
+    """反弹窗内：加深针尖 / 触发 / 放弃 / 超时。触发时保留 rebound 供开仓失败重试。"""
+    if state.rebound_extreme is None:
+        state.rebound_extreme = float(extreme)
+    if is_long:
+        state.rebound_extreme = min(float(state.rebound_extreme), float(extreme))
+    else:
+        state.rebound_extreme = max(float(state.rebound_extreme), float(extreme))
+    rb_ext = float(state.rebound_extreme)
+    trig_pct, abort_pct = _norm_rebound_pcts(params)
+    depth, trig_line, abort_line = _rebound_lines(
+        is_long=is_long,
+        bar_open=snap.bar_open,
+        rb_ext=rb_ext,
+        trig_pct=trig_pct,
+        abort_pct=abort_pct,
+    )
+    if depth <= 0:
+        clear_rebound(state)
+        state.diag_event = "rebound_abort"
+        return None
+
+    if is_long:
+        if abort_pct > 0 and last_price >= abort_line - 1e-12:
+            clear_rebound(state)
+            state.diag_event = "rebound_abort"
+            return None
+        if trig_pct > 0 and last_price >= trig_line - 1e-12:
+            state.diag_event = "rebound_fire"
+            return _fire_signal(state, snap, True)
+    else:
+        if abort_pct > 0 and last_price <= abort_line + 1e-12:
+            clear_rebound(state)
+            state.diag_event = "rebound_abort"
+            return None
+        if trig_pct > 0 and last_price <= trig_line + 1e-12:
+            state.diag_event = "rebound_fire"
+            return _fire_signal(state, snap, False)
+
+    rw = float(params.rebound_wait_sec or 0)
+    if rw > 0 and (now_ms - state.rebound_at_ms) > int(rw * 1000):
+        clear_rebound(state)
+        state.diag_event = "rebound_timeout"
+        return None
+    return None
+
+
+def _after_confirm(
+    state: WickSymbolState,
+    params: WickSpikeParams,
+    snap: WickBarSnapshot,
+    last_price: float,
+    now_ms: int,
+    *,
+    is_long: bool,
+    extreme: float,
+) -> Optional[Signal]:
+    """confirm 达标：无反弹则立刻信号；有反弹则进窗并同刻评估。"""
+    clear_arm(state)
+    if not params.rebound_enabled:
+        return _fire_signal(state, snap, is_long)
+
+    trig_pct, _abort = _norm_rebound_pcts(params)
+    # trigger<=0：confirm 后立刻市价（不等反弹）
+    if trig_pct <= 0:
+        state.diag_event = "rebound_immediate"
+        return _fire_signal(state, snap, is_long)
+
+    state.rebound_bar_ts = snap.bar_open_ts
+    state.rebound_at_ms = now_ms
+    state.rebound_extreme = float(extreme)
+    state.diag_event = "rebound_enter"
+    # 同刻评估：已过 abort → 放弃；已过 trigger → 立刻火；否则等待
+    sig = _process_rebound_window(
+        state,
+        params,
+        snap,
+        last_price,
+        now_ms,
+        is_long=is_long,
+        extreme=extreme,
+    )
+    # 进窗即放弃时覆盖事件名，便于区分「从未有效等待」
+    if sig is None and state.rebound_bar_ts is None and state.diag_event == "rebound_abort":
+        state.diag_event = "rebound_skip_past_abort"
+    elif sig is not None and state.diag_event == "rebound_fire":
+        pass  # 进窗同刻触发
+    return sig
 
 
 def snapshot_extreme(direction: str, snap: WickBarSnapshot, last_price: float) -> float:
@@ -426,7 +602,10 @@ def near_miss_diag(
 
 
 def release_bar_trigger(state: WickSymbolState) -> None:
-    """开仓未真正执行时回滚本根触发标记，允许同根 K 再次尝试（保留武装）。"""
+    """开仓未真正执行时回滚本根触发标记，允许同根 K 再次尝试。
+
+    保留武装窗 / 反弹窗（反弹触发时不清 rebound，失败后可同根再判）。
+    """
     state.triggered_bar_ts = None
     state.cooldown_until_ms = 0
 
@@ -440,6 +619,7 @@ def mark_bar_triggered(
     """开仓已提交（或确认不再重试）后锁定本根，防止重复下单。"""
     state.triggered_bar_ts = bar_open_ts
     clear_arm(state)
+    clear_rebound(state)
     if params.cooldown_sec > 0:
         state.cooldown_until_ms = now_ms + int(params.cooldown_sec * 1000)
 
@@ -506,53 +686,26 @@ def on_tick(
         extreme >= thr or last_price >= thr
     )
 
-    # —— 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价 ——
+    # —— 反弹追踪窗（方案J）：confirm 后等价格从针尖反弹 ——
     if (
         params.rebound_enabled
         and state.rebound_bar_ts == snap.bar_open_ts
         and state.rebound_at_ms > 0
     ):
-        # 追踪针尖：价格创新低/高就更新 rebound_extreme
-        if is_long:
-            state.rebound_extreme = min(float(state.rebound_extreme), float(extreme))
-        else:
-            state.rebound_extreme = max(float(state.rebound_extreme), float(extreme))
-        rb_ext = float(state.rebound_extreme)
-        spike_depth = abs(snap.bar_open - rb_ext)
-        if spike_depth <= 0:
-            clear_rebound(state)
-            return None
-        trig_pct = float(params.rebound_trigger_pct or 0)
-        abort_pct = float(params.rebound_abort_pct or 0)
-        if is_long:
-            trig_line = rb_ext + spike_depth * trig_pct / 100.0
-            abort_line = rb_ext + spike_depth * abort_pct / 100.0
-            if abort_pct > 0 and last_price >= abort_line:
-                clear_rebound(state)
-                return None
-            if trig_pct > 0 and last_price >= trig_line:
-                state.triggered_bar_ts = snap.bar_open_ts
-                clear_rebound(state)
-                return Signal.LONG
-        else:
-            trig_line = rb_ext - spike_depth * trig_pct / 100.0
-            abort_line = rb_ext - spike_depth * abort_pct / 100.0
-            if abort_pct > 0 and last_price <= abort_line:
-                clear_rebound(state)
-                return None
-            if trig_pct > 0 and last_price <= trig_line:
-                state.triggered_bar_ts = snap.bar_open_ts
-                clear_rebound(state)
-                return Signal.SHORT
-        rw = float(params.rebound_wait_sec or 0)
-        if rw > 0 and (now_ms - state.rebound_at_ms) > int(rw * 1000):
-            clear_rebound(state)
-            return None
-        return None
+        return _process_rebound_window(
+            state,
+            params,
+            snap,
+            last_price,
+            now_ms,
+            is_long=is_long,
+            extreme=extreme,
+        )
 
     arm_wait = float(params.arm_wait_sec or 0)
+    confirm_max_r = confirm_max_retrace_pct(params)
 
-    # —— 关闭武装：旧逻辑（同刻刺破+量+涨跌幅+回撤）——
+    # —— 关闭武装：同刻全条件；若开 rebound 仍进反弹窗（不绕过）——
     if arm_wait <= 0:
         progress = spike_progress(direction, snap.bar_open, extreme, n)
         need = effective_volume_mult(params, progress)
@@ -560,12 +713,26 @@ def on_tick(
             return None
         if not _move_ok(params, direction, snap.bar_open, extreme):
             return None
-        if not _retrace_ok(params, direction, snap.bar_open, extreme, last_price):
+        if not _retrace_ok(
+            params,
+            direction,
+            snap.bar_open,
+            extreme,
+            last_price,
+            max_retrace_override=confirm_max_r,
+        ):
             return None
         if not pierced:
             return None
-        state.triggered_bar_ts = snap.bar_open_ts
-        return Signal.LONG if is_long else Signal.SHORT
+        return _after_confirm(
+            state,
+            params,
+            snap,
+            last_price,
+            now_ms,
+            is_long=is_long,
+            extreme=extreme,
+        )
 
     # —— Arm–Confirm ——
     # 深化武装极值
@@ -616,12 +783,20 @@ def on_tick(
         # 勿在此处把 awaiting_vol 改回 True：若武装时量已够，量抖动不应用 grace 绕过回撤
         return None
 
-    # 量已够：grace 免回撤时仍受 tip_gap 上限约束
+    # 量已够：grace 免回撤时仍受 tip_gap 上限约束；
+    # 开启反弹时 abort 帽始终生效（避免 grace 把已过放弃线的单送进反弹窗）
     waived = _retrace_waived(state, params, now_ms)
-    if not waived:
-        if not _retrace_ok(params, direction, snap.bar_open, ext, last_price):
+    if not waived or params.rebound_enabled:
+        if not _retrace_ok(
+            params,
+            direction,
+            snap.bar_open,
+            ext,
+            last_price,
+            max_retrace_override=confirm_max_r,
+        ):
             return None
-    else:
+    if waived:
         max_gap = float(params.arm_grace_max_tip_gap_pct or 0)
         if max_gap > 0:
             gap = tip_gap_pct(snap.bar_open, ext, last_price)
@@ -636,17 +811,15 @@ def on_tick(
     if not still:
         return None
 
-    # —— 反弹追踪：confirm达标后进入WAITING_REBOUND，不立即触发 ——
-    if params.rebound_enabled:
-        state.rebound_bar_ts = snap.bar_open_ts
-        state.rebound_at_ms = now_ms
-        state.rebound_extreme = float(ext)
-        clear_arm(state)
-        return None
-
-    state.triggered_bar_ts = snap.bar_open_ts
-    state.armed_awaiting_vol = False
-    return Signal.LONG if is_long else Signal.SHORT
+    return _after_confirm(
+        state,
+        params,
+        snap,
+        last_price,
+        now_ms,
+        is_long=is_long,
+        extreme=ext,
+    )
 
 
 def pierce_vol_view(

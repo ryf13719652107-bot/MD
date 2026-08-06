@@ -85,6 +85,19 @@ const schema = z.object({
   exclude_mainstream: z.coerce.boolean(),
   exclude_funding: z.coerce.boolean(),
   funding_rate_threshold_pct: z.number().min(-5).max(5),
+}).superRefine((data, ctx) => {
+  if (!data.wick_rebound_enabled) return;
+  if (data.wick_rebound_trigger_pct <= 0) return; // 0=confirm后立刻市价
+  if (
+    data.wick_rebound_abort_pct > 0
+    && data.wick_rebound_abort_pct <= data.wick_rebound_trigger_pct
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['wick_rebound_abort_pct'],
+      message: '反弹放弃% 必须大于 反弹触发%（或填 0 关闭放弃）',
+    });
+  }
 });
 
 const WAN = 1e4;
@@ -384,7 +397,7 @@ export default function StrategyForm({
         {signalSource === 'wick_spike' && (
           <div className="space-y-3">
             <div className="rounded-md border border-cyan-700/50 bg-cyan-900/20 px-3 py-2 text-xs text-cyan-200 space-y-1">
-              <p>毫秒接针：仅币安。先放量（当前量 ≥ Vol SMA × 倍数），再用本根极值追认「开盘价 ± 上根 ATR × 倍数」后立刻市价开仓，无反弹确认。</p>
+              <p>毫秒接针：仅币安。先放量（当前量 ≥ Vol SMA × 倍数），再用本根极值追认「开盘价 ± 上根 ATR × 倍数」。默认 confirm 后立刻市价；开启下方「市价反弹追踪」则等针尖反弹再开仓。</p>
               <p>调度错峰：持仓管理在每根 K 第 40 秒，止盈检测第 30 秒；:00 附近不占锁，留给价流开仓。止盈/层数下方手填；加仓可开 WT 确认。</p>
             </div>
             <div>
@@ -475,19 +488,19 @@ export default function StrategyForm({
                 </label>
               </label>
               <span className="text-xs text-gray-600">
-                默认关：confirm 达标后不立即触发，等价格从针尖反弹到指定幅度再市价成交，并持续追踪更深的针尖
+                默认关。开启后 confirm 达标不立刻下单，等价格从针尖反弹到「触发%」再市价；针尖可加深。confirm 回撤上限会与「放弃%」取较小，避免进窗即放弃。
               </span>
             </div>
             <div className="grid grid-cols-3 gap-3">
               <div>
                 <label className={labelClass}>反弹触发 %</label>
                 <input type="number" step="1" {...register('wick_rebound_trigger_pct', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">占针深；默认 20（反弹 20% 触发市价）</span>
+                <span className="text-xs text-gray-600">占针深；默认 20；填 0=confirm 后立刻市价</span>
               </div>
               <div>
                 <label className={labelClass}>反弹放弃 %</label>
                 <input type="number" step="1" {...register('wick_rebound_abort_pct', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">占针深；默认 35（超此视为反转，放弃）</span>
+                <span className="text-xs text-gray-600">须大于触发%；默认 35；0=关闭放弃（仅超时）</span>
               </div>
               <div>
                 <label className={labelClass}>等反弹超时(秒)</label>

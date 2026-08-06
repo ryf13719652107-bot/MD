@@ -1,6 +1,16 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 from typing import Optional, Literal
+
+
+def _validate_rebound_pcts(enabled: bool, trigger: float, abort: float) -> None:
+    """开启反弹时要求 abort > trigger（trigger=0 表示 confirm 后立刻市价，不校验）。"""
+    if not enabled:
+        return
+    if trigger <= 0:
+        return
+    if abort > 0 and abort <= trigger:
+        raise ValueError("反弹放弃% 必须大于 反弹触发%（或将放弃设为 0 关闭）")
 
 
 class StrategyCreate(BaseModel):
@@ -133,6 +143,15 @@ class StrategyCreate(BaseModel):
         default=5.0, ge=0, le=60, description="confirm后等反弹超时秒数"
     )
 
+    @model_validator(mode="after")
+    def _check_rebound_pcts(self):
+        _validate_rebound_pcts(
+            bool(self.wick_rebound_enabled),
+            float(self.wick_rebound_trigger_pct),
+            float(self.wick_rebound_abort_pct),
+        )
+        return self
+
 
 class StrategyUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
@@ -199,6 +218,25 @@ class StrategyUpdate(BaseModel):
     wick_rebound_trigger_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_abort_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_wait_sec: Optional[float] = Field(default=None, ge=0, le=60)
+
+    @model_validator(mode="after")
+    def _check_rebound_pcts(self):
+        # 部分更新：仅当本次带齐可判定字段且显式开启（或可推断开启）时校验
+        en = self.wick_rebound_enabled
+        trig = self.wick_rebound_trigger_pct
+        abort = self.wick_rebound_abort_pct
+        if en is False:
+            return self
+        if trig is None and abort is None:
+            return self
+        # 开启未知时，只要同时改了 trigger/abort 就按「开启」校验，避免脏配置入库
+        if en is True or (trig is not None and abort is not None):
+            _validate_rebound_pcts(
+                True,
+                float(trig if trig is not None else 20.0),
+                float(abort if abort is not None else 35.0),
+            )
+        return self
 
 
 class StrategyResponse(BaseModel):

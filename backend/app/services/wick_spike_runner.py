@@ -51,6 +51,7 @@ from .wick_spike_engine import (
     WickSpikeParams,
     WickSymbolState,
     build_bar_snapshot,
+    clear_rebound,
     enrich_snap_with_trades,
     effective_volume_mult,
     is_arm_active,
@@ -61,6 +62,7 @@ from .wick_spike_engine import (
     release_bar_trigger,
     spike_progress,
     snapshot_extreme,
+    take_diag_event,
     tip_gap_pct,
 )
 from .strategy_engine import Signal
@@ -575,10 +577,32 @@ class WickSpikeRunner:
                     )
 
                     prev_armed_at = st.armed_at_ms
-                    # 反弹触发后 on_tick 会清空 rebound_extreme；先快照供 tip_gap 统计
-                    prev_rebound_ext = st.rebound_extreme
                     t_signal0 = time.perf_counter()
                     signal = on_tick(st, params, snap, price, now_ms)
+                    rb_ev = take_diag_event(st)
+                    if rb_ev:
+                        logger.info(
+                            "wick_spike %s strategy=%d %s px=%s "
+                            "rb_ext=%s arm_age_ms=%s wait=%.1fs "
+                            "trig%%=%g abort%%=%g",
+                            rb_ev,
+                            strategy_id,
+                            sym_key,
+                            f"{price:.6g}",
+                            (
+                                f"{st.rebound_extreme:.6g}"
+                                if st.rebound_extreme is not None
+                                else "?"
+                            ),
+                            (
+                                (now_ms - st.rebound_at_ms)
+                                if st.rebound_at_ms > 0
+                                else 0
+                            ),
+                            float(params.rebound_wait_sec or 0),
+                            float(params.rebound_trigger_pct or 0),
+                            float(params.rebound_abort_pct or 0),
+                        )
                     if (
                         st.armed_at_ms
                         and st.armed_at_ms != prev_armed_at
@@ -631,12 +655,13 @@ class WickSpikeRunner:
                                 )
                         continue
 
+                    # 反弹触发后保留 rebound_extreme，供 tip_gap / 开仓失败重试
                     armed_ext = (
                         float(st.armed_extreme)
                         if st.armed_extreme is not None
                         else (
-                            float(prev_rebound_ext)
-                            if prev_rebound_ext is not None
+                            float(st.rebound_extreme)
+                            if st.rebound_extreme is not None
                             else None
                         )
                     )
@@ -672,11 +697,11 @@ class WickSpikeRunner:
                         mark_bar_triggered(st, params, snap.bar_open_ts, now_ms)
                         next_refresh = min(next_refresh, time.time() + 1.0)
                     elif outcome in ("busy", "retryable_fail"):
-                        # 回滚触发标记；保留武装，武装窗内强制重判
+                        # 回滚触发标记；保留武装/反弹窗，窗内强制重判
                         release_bar_trigger(st)
                     else:
-                        # has_pos / blocked / committed_fail：保持本根已触发
-                        pass
+                        # has_pos / blocked / committed_fail：锁定本根，清反弹态
+                        clear_rebound(st)
 
                 # 事件驱动：成交唤醒；超时仍跑（武装强制重判 / 后台刷新）
                 wake_ev.clear()
