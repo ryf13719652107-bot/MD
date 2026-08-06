@@ -43,6 +43,10 @@ const schema = z.object({
   wick_arm_wait_sec: z.number().min(0).max(120),
   wick_arm_retrace_grace_sec: z.number().min(0).max(60),
   wick_arm_grace_max_tip_gap_pct: z.number().min(0).max(20),
+  wick_rebound_enabled: z.boolean(),
+  wick_rebound_trigger_pct: z.number().min(0).max(100),
+  wick_rebound_abort_pct: z.number().min(0).max(100),
+  wick_rebound_wait_sec: z.number().min(0).max(60),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -130,6 +134,10 @@ function toFormDefaults(
       wick_arm_wait_sec: initialData.wick_arm_wait_sec ?? 12,
       wick_arm_retrace_grace_sec: initialData.wick_arm_retrace_grace_sec ?? 3,
       wick_arm_grace_max_tip_gap_pct: initialData.wick_arm_grace_max_tip_gap_pct ?? 2,
+      wick_rebound_enabled: initialData.wick_rebound_enabled ?? false,
+      wick_rebound_trigger_pct: initialData.wick_rebound_trigger_pct ?? 20,
+      wick_rebound_abort_pct: initialData.wick_rebound_abort_pct ?? 35,
+      wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 5,
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -203,6 +211,10 @@ function toFormDefaults(
     wick_arm_wait_sec: 12,
     wick_arm_retrace_grace_sec: 3,
     wick_arm_grace_max_tip_gap_pct: 2,
+    wick_rebound_enabled: false,
+    wick_rebound_trigger_pct: 20,
+    wick_rebound_abort_pct: 35,
+    wick_rebound_wait_sec: 5,
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -452,6 +464,35 @@ export default function StrategyForm({
                 <label className={labelClass}>同币额外冷却（秒）</label>
                 <input type="number" {...register('wick_cooldown_sec', { valueAsNumber: true })} className={inputClass} />
                 <span className="text-xs text-gray-600">默认 0（仅同币同根 K 去重）</span>
+              </div>
+            </div>
+            <div>
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>市价反弹追踪（方案J）</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_rebound_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+              </label>
+              <span className="text-xs text-gray-600">
+                默认关：confirm 达标后不立即触发，等价格从针尖反弹到指定幅度再市价成交，并持续追踪更深的针尖
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className={labelClass}>反弹触发 %</label>
+                <input type="number" step="1" {...register('wick_rebound_trigger_pct', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">占针深；默认 20（反弹 20% 触发市价）</span>
+              </div>
+              <div>
+                <label className={labelClass}>反弹放弃 %</label>
+                <input type="number" step="1" {...register('wick_rebound_abort_pct', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">占针深；默认 35（超此视为反转，放弃）</span>
+              </div>
+              <div>
+                <label className={labelClass}>等反弹超时(秒)</label>
+                <input type="number" step="0.5" {...register('wick_rebound_wait_sec', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">confirm 后等反弹最久秒数；默认 5</span>
               </div>
             </div>
           </div>

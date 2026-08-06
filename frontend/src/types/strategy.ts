@@ -34,6 +34,14 @@ export interface Strategy {
   wick_arm_retrace_grace_sec: number;
   /** grace 免回撤时 tip_gap% 上限；0=不限制 */
   wick_arm_grace_max_tip_gap_pct: number;
+  /** 市价反弹追踪（方案J）：confirm 后等针尖反弹触发市价，追踪真针尖 */
+  wick_rebound_enabled: boolean;
+  /** 反弹占针深 % 触发市价；默认 20 */
+  wick_rebound_trigger_pct: number;
+  /** 反弹占针深 % 放弃（超此为反转）；默认 35 */
+  wick_rebound_abort_pct: number;
+  /** confirm 后等反弹超时秒数；默认 5 */
+  wick_rebound_wait_sec: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -109,6 +117,10 @@ export interface StrategyFormData {
   wick_arm_wait_sec: number;
   wick_arm_retrace_grace_sec: number;
   wick_arm_grace_max_tip_gap_pct: number;
+  wick_rebound_enabled: boolean;
+  wick_rebound_trigger_pct: number;
+  wick_rebound_abort_pct: number;
+  wick_rebound_wait_sec: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;

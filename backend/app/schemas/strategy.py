@@ -119,6 +119,19 @@ class StrategyCreate(BaseModel):
         le=20,
         description="grace免回撤时tip_gap%上限；0=不限制",
     )
+    wick_rebound_enabled: bool = Field(
+        default=False,
+        description="市价反弹追踪（方案J）：confirm后等针尖反弹触发市价，追踪真针尖",
+    )
+    wick_rebound_trigger_pct: float = Field(
+        default=20.0, ge=0, le=100, description="反弹占针深%触发市价"
+    )
+    wick_rebound_abort_pct: float = Field(
+        default=35.0, ge=0, le=100, description="反弹占针深%放弃（超此为反转）"
+    )
+    wick_rebound_wait_sec: float = Field(
+        default=5.0, ge=0, le=60, description="confirm后等反弹超时秒数"
+    )
 
 
 class StrategyUpdate(BaseModel):
@@ -182,6 +195,10 @@ class StrategyUpdate(BaseModel):
     wick_arm_wait_sec: Optional[float] = Field(default=None, ge=0, le=120)
     wick_arm_retrace_grace_sec: Optional[float] = Field(default=None, ge=0, le=60)
     wick_arm_grace_max_tip_gap_pct: Optional[float] = Field(default=None, ge=0, le=20)
+    wick_rebound_enabled: Optional[bool] = Field(default=None)
+    wick_rebound_trigger_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    wick_rebound_abort_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    wick_rebound_wait_sec: Optional[float] = Field(default=None, ge=0, le=60)
 
 
 class StrategyResponse(BaseModel):
@@ -247,6 +264,10 @@ class StrategyResponse(BaseModel):
     wick_arm_wait_sec: float = 12.0
     wick_arm_retrace_grace_sec: float = 3.0
     wick_arm_grace_max_tip_gap_pct: float = 2.0
+    wick_rebound_enabled: bool = False
+    wick_rebound_trigger_pct: float = 20.0
+    wick_rebound_abort_pct: float = 35.0
+    wick_rebound_wait_sec: float = 5.0
     blacklisted_symbols: list[str] = Field(default_factory=list)
     status: str
     started_at: Optional[datetime] = None
