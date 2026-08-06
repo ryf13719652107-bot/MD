@@ -130,12 +130,42 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             if getattr(strategy, "wick_arm_grace_max_tip_gap_pct", None) is not None
             else 2.0
         ),
+        # 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价
+        rebound_enabled=bool(getattr(strategy, "wick_rebound_enabled", False) or False),
+        rebound_trigger_pct=float(
+            getattr(strategy, "wick_rebound_trigger_pct", 20.0)
+            if getattr(strategy, "wick_rebound_trigger_pct", None) is not None
+            else 20.0
+        ),
+        rebound_abort_pct=float(
+            getattr(strategy, "wick_rebound_abort_pct", 35.0)
+            if getattr(strategy, "wick_rebound_abort_pct", None) is not None
+            else 35.0
+        ),
+        rebound_wait_sec=float(
+            getattr(strategy, "wick_rebound_wait_sec", 5.0)
+            if getattr(strategy, "wick_rebound_wait_sec", None) is not None
+            else 5.0
+        ),
     )
     atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
     vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)
     timeframe = strategy.timeframe
     direction = strategy.direction
     return params, atr_period, vol_period, timeframe, direction
+
+
+def _track_bar_ts(st: WickSymbolState) -> Optional[int]:
+    """当前活跃追踪的 bar ts（武装窗或反弹窗）；无活跃追踪返回 None。
+
+    反弹窗内 armed_bar_ts 已被 clear_arm 清空，须改用 rebound_bar_ts
+    作为 is_arm_active 的 bar_open_ts 入参，否则反弹窗失去强制重判与超时检查。
+    """
+    if st.armed_bar_ts is not None:
+        return st.armed_bar_ts
+    if st.rebound_bar_ts is not None and st.rebound_at_ms > 0:
+        return st.rebound_bar_ts
+    return None
 
 
 class WickSpikeRunner:
@@ -424,10 +454,11 @@ class WickSpikeRunner:
                 for sym in symbols:
                     sym_key = _norm_sym(sym)
                     st0 = states.get(sym_key)
+                    st0_ts = _track_bar_ts(st0) if st0 is not None else None
                     if (
                         st0 is not None
-                        and st0.armed_bar_ts is not None
-                        and is_arm_active(st0, params, st0.armed_bar_ts, now_ms_loop)
+                        and st0_ts is not None
+                        and is_arm_active(st0, params, st0_ts, now_ms_loop)
                     ):
                         retry_syms.append(sym)
                     elif last_seq.get(sym_key) != price_stream_manager.seq(sym_key):
@@ -449,9 +480,10 @@ class WickSpikeRunner:
 
                     st = states.setdefault(sym_key, WickSymbolState())
                     now_ms = int(time.time() * 1000)
+                    st_ts = _track_bar_ts(st)
                     arm_active = (
-                        st.armed_bar_ts is not None
-                        and is_arm_active(st, params, st.armed_bar_ts, now_ms)
+                        st_ts is not None
+                        and is_arm_active(st, params, st_ts, now_ms)
                     )
 
                     if not self._position_mgr._passes_new_entry_filters(
@@ -543,6 +575,8 @@ class WickSpikeRunner:
                     )
 
                     prev_armed_at = st.armed_at_ms
+                    # 反弹触发后 on_tick 会清空 rebound_extreme；先快照供 tip_gap 统计
+                    prev_rebound_ext = st.rebound_extreme
                     t_signal0 = time.perf_counter()
                     signal = on_tick(st, params, snap, price, now_ms)
                     if (
@@ -600,7 +634,11 @@ class WickSpikeRunner:
                     armed_ext = (
                         float(st.armed_extreme)
                         if st.armed_extreme is not None
-                        else None
+                        else (
+                            float(prev_rebound_ext)
+                            if prev_rebound_ext is not None
+                            else None
+                        )
                     )
                     try:
                         outcome = await self._try_open(

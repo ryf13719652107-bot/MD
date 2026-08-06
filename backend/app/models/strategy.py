@@ -60,6 +60,22 @@ class Strategy(Base):
     wick_arm_grace_max_tip_gap_pct: Mapped[float] = mapped_column(
         Float, default=2.0, server_default="2.0"
     )
+    # 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价，追踪真针尖
+    wick_rebound_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    # 反弹占针深%触发市价（开盘100针尖90，深10%，20%=92触发）
+    wick_rebound_trigger_pct: Mapped[float] = mapped_column(
+        Float, default=20.0, server_default="20.0"
+    )
+    # 反弹占针深%放弃（超过说明不是针是反转）
+    wick_rebound_abort_pct: Mapped[float] = mapped_column(
+        Float, default=35.0, server_default="35.0"
+    )
+    # confirm后等反弹超时秒数
+    wick_rebound_wait_sec: Mapped[float] = mapped_column(
+        Float, default=5.0, server_default="5.0"
+    )
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)

@@ -25,6 +25,28 @@ def test_parse_near_miss_legacy_and_new():
     assert row.tip_gap_pct > 0
 
 
+def test_parse_near_miss_retrace_fields_and_reason():
+    from app.services.wick_spike_log_stats import _near_miss_reason_zh
+
+    # 做空：开盘 1、极值 1.1、现价 1.04 → retrace=(1.1-1.04)/(1.1-1)=60%
+    line = (
+        "2026-08-06 09:04:48 [INFO] app.services.wick_spike_runner: "
+        "wick_spike near-miss strategy=13 HEIUSDT dir=short "
+        "px=1.04 open=1.0 ext=1.1 thr=1.014 pierce=True "
+        "atrN=0.01406 progress=1.25 amp%=10.00 vol×=7.69 need×=6.49 vol_hot=True "
+        "retrace%=60.00 armed=True arm_age_ms=8500 await_vol=False retrace_waived=False"
+    )
+    row = parse_line(line)
+    assert row is not None
+    assert row.vol_hot is True
+    assert abs(row.retrace_pct - 60.0) < 1e-9
+    assert row.armed is True
+    assert row.arm_age_ms == 8500
+    why = _near_miss_reason_zh(row)
+    assert "回撤超限" in why
+    assert "60" in why
+
+
 def test_parse_trigger_with_tip_gap():
     line = (
         "2026-08-03 10:00:00 [INFO] app.services.wick_spike_runner: "

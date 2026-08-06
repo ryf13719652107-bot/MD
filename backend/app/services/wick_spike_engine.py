@@ -62,6 +62,11 @@ class WickSpikeParams:
     arm_retrace_grace_sec: float = _ARM_RETRACE_GRACE_SEC
     # grace 免回撤时 tip_gap% 上限（0=不限制）
     arm_grace_max_tip_gap_pct: float = _ARM_GRACE_MAX_TIP_GAP_PCT
+    # 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价，追踪真针尖
+    rebound_enabled: bool = False
+    rebound_trigger_pct: float = 20.0  # 反弹占针深%触发市价
+    rebound_abort_pct: float = 35.0    # 反弹占针深%放弃
+    rebound_wait_sec: float = 5.0      # confirm后等反弹超时秒数
 
 
 @dataclass
@@ -92,6 +97,10 @@ class WickSymbolState:
     armed_expired_bar_ts: Optional[int] = None
     # 作废时的 progress；同根仅当 progress 严格更高才允许再武装
     armed_expired_progress: float = 0.0
+    # Rebound tracking（confirm后等反弹触发市价）
+    rebound_bar_ts: Optional[int] = None
+    rebound_at_ms: int = 0
+    rebound_extreme: Optional[float] = None
 
 
 @dataclass
@@ -306,10 +315,29 @@ def clear_arm(state: WickSymbolState) -> None:
     state.armed_awaiting_vol = False
 
 
+def clear_rebound(state: WickSymbolState) -> None:
+    """清除反弹追踪状态。"""
+    state.rebound_bar_ts = None
+    state.rebound_at_ms = 0
+    state.rebound_extreme = None
+
+
 def is_arm_active(
     state: WickSymbolState, params: WickSpikeParams, bar_open_ts: int, now_ms: int
 ) -> bool:
-    """武装窗是否仍有效（供 runner 强制重判）。"""
+    """武装窗或反弹追踪窗是否仍有效（供 runner 强制重判）。"""
+    # 反弹追踪状态：confirm后等反弹触发
+    if (
+        state.rebound_bar_ts == bar_open_ts
+        and state.rebound_at_ms > 0
+        and state.triggered_bar_ts != bar_open_ts
+    ):
+        rw = float(params.rebound_wait_sec or 0)
+        if rw <= 0:
+            return False
+        return (now_ms - state.rebound_at_ms) <= int(rw * 1000) + 1
+
+    # 原武装窗检查
     wait = float(params.arm_wait_sec or 0)
     if wait <= 0:
         return False
@@ -446,6 +474,7 @@ def on_tick(
         state.bar_low = min(last_price, snap.kline_low) if snap.kline_low > 0 else last_price
         state.bar_high = max(last_price, snap.kline_high) if snap.kline_high > 0 else last_price
         clear_arm(state)
+        clear_rebound(state)
         state.armed_expired_bar_ts = None
         state.armed_expired_progress = 0.0
 
@@ -476,6 +505,50 @@ def on_tick(
     pierced = (extreme <= thr or last_price <= thr) if is_long else (
         extreme >= thr or last_price >= thr
     )
+
+    # —— 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价 ——
+    if (
+        params.rebound_enabled
+        and state.rebound_bar_ts == snap.bar_open_ts
+        and state.rebound_at_ms > 0
+    ):
+        # 追踪针尖：价格创新低/高就更新 rebound_extreme
+        if is_long:
+            state.rebound_extreme = min(float(state.rebound_extreme), float(extreme))
+        else:
+            state.rebound_extreme = max(float(state.rebound_extreme), float(extreme))
+        rb_ext = float(state.rebound_extreme)
+        spike_depth = abs(snap.bar_open - rb_ext)
+        if spike_depth <= 0:
+            clear_rebound(state)
+            return None
+        trig_pct = float(params.rebound_trigger_pct or 0)
+        abort_pct = float(params.rebound_abort_pct or 0)
+        if is_long:
+            trig_line = rb_ext + spike_depth * trig_pct / 100.0
+            abort_line = rb_ext + spike_depth * abort_pct / 100.0
+            if abort_pct > 0 and last_price >= abort_line:
+                clear_rebound(state)
+                return None
+            if trig_pct > 0 and last_price >= trig_line:
+                state.triggered_bar_ts = snap.bar_open_ts
+                clear_rebound(state)
+                return Signal.LONG
+        else:
+            trig_line = rb_ext - spike_depth * trig_pct / 100.0
+            abort_line = rb_ext - spike_depth * abort_pct / 100.0
+            if abort_pct > 0 and last_price <= abort_line:
+                clear_rebound(state)
+                return None
+            if trig_pct > 0 and last_price <= trig_line:
+                state.triggered_bar_ts = snap.bar_open_ts
+                clear_rebound(state)
+                return Signal.SHORT
+        rw = float(params.rebound_wait_sec or 0)
+        if rw > 0 and (now_ms - state.rebound_at_ms) > int(rw * 1000):
+            clear_rebound(state)
+            return None
+        return None
 
     arm_wait = float(params.arm_wait_sec or 0)
 
@@ -561,6 +634,14 @@ def on_tick(
     else:
         still = ext >= thr or last_price >= thr
     if not still:
+        return None
+
+    # —— 反弹追踪：confirm达标后进入WAITING_REBOUND，不立即触发 ——
+    if params.rebound_enabled:
+        state.rebound_bar_ts = snap.bar_open_ts
+        state.rebound_at_ms = now_ms
+        state.rebound_extreme = float(ext)
+        clear_arm(state)
         return None
 
     state.triggered_bar_ts = snap.bar_open_ts

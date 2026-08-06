@@ -19,6 +19,12 @@ _NEAR_MISS_RE = re.compile(
     + r"atrN=(?P<atrN>[^\s]+)\s+progress=(?P<progress>[^\s]+)"
     + r"(?:\s+amp%=(?P<amp>[^\s]+))?"
     + r"\s+vol×=(?P<vol>[^\s]+)\s+need×=(?P<need>[^\s]+)\s+vol_hot=(?P<vol_hot>\w+)"
+    # 新格式：回撤/武装态（用于区分「量够却不开」的真实卡点）
+    + r"(?:\s+retrace%=(?P<retrace>[^\s]+))?"
+    + r"(?:\s+armed=(?P<armed>\w+))?"
+    + r"(?:\s+arm_age_ms=(?P<arm_age>-?\d+))?"
+    + r"(?:\s+await_vol=(?P<await_vol>\w+))?"
+    + r"(?:\s+retrace_waived=(?P<retrace_waived>\w+))?"
 )
 
 # 新格式（含 tip_gap / open / ext / progress）
@@ -79,6 +85,11 @@ class NearMissRow:
     need_x: float
     vol_hot: bool
     amp_pct: float = float("nan")  # 极值相对开盘涨跌幅 %
+    retrace_pct: float = float("nan")
+    armed: bool | None = None
+    arm_age_ms: int | None = None
+    await_vol: bool | None = None
+    retrace_waived: bool | None = None
 
     @property
     def tip_gap_pct(self) -> float:
@@ -102,6 +113,24 @@ class NearMissRow:
         if d == "long":
             return max(0.0, (self.open - self.ext) / self.open * 100.0)
         return abs(self.ext - self.open) / self.open * 100.0
+
+    @property
+    def computed_retrace_pct(self) -> float:
+        """日志无 retrace% 时，用 px/open/ext 推算（与引擎公式一致）。"""
+        if self.retrace_pct == self.retrace_pct:
+            return self.retrace_pct
+        d = (self.direction or "").lower()
+        if d == "long":
+            span = self.open - self.ext
+            if span <= 0:
+                return 0.0
+            return max(0.0, min(100.0, (self.px - self.ext) / span * 100.0))
+        if d == "short":
+            span = self.ext - self.open
+            if span <= 0:
+                return 0.0
+            return max(0.0, min(100.0, (self.ext - self.px) / span * 100.0))
+        return float("nan")
 
 
 @dataclass
@@ -158,6 +187,8 @@ def iter_log_lines(paths: Iterable[Path]) -> Iterator[str]:
 def parse_line(line: str) -> Optional[object]:
     m = _NEAR_MISS_RE.search(line)
     if m:
+        gd = m.groupdict()
+        arm_age_raw = gd.get("arm_age")
         return NearMissRow(
             ts=m.group("ts"),
             strategy_id=int(m.group("sid")),
@@ -173,7 +204,16 @@ def parse_line(line: str) -> Optional[object]:
             vol_x=_f(m.group("vol")),
             need_x=_f(m.group("need")),
             vol_hot=_b(m.group("vol_hot")),
-            amp_pct=_f(m.groupdict().get("amp")),
+            amp_pct=_f(gd.get("amp")),
+            retrace_pct=_f(gd.get("retrace")),
+            armed=_b(gd["armed"]) if gd.get("armed") is not None else None,
+            arm_age_ms=int(arm_age_raw) if arm_age_raw not in (None, "") else None,
+            await_vol=_b(gd["await_vol"]) if gd.get("await_vol") is not None else None,
+            retrace_waived=(
+                _b(gd["retrace_waived"])
+                if gd.get("retrace_waived") is not None
+                else None
+            ),
         )
     m = _OPENED_RE.search(line)
     if m:
@@ -570,13 +610,52 @@ def _near_miss_reason_zh(r: NearMissRow) -> str:
             f"vol×={r.vol_x:.2f} < need×={r.need_x:g}"
         )
     if r.pierce and r.vol_x >= r.need_x:
+        # 刺破+量够仍近失：按日志武装/回撤字段给具体原因（默认 max_retrace=50）
+        retrace = r.computed_retrace_pct
+        tip = r.tip_gap_pct
+        tip_s = f" tip_gap%={tip:.2f}" if tip == tip else ""
+        arm_s = ""
+        if r.armed is False:
+            arm_s = "；未武装/武装已过期"
+        elif r.armed is True and r.arm_age_ms is not None:
+            arm_s = f"；武装已持续 {r.arm_age_ms}ms"
+        if r.retrace_waived is True and tip == tip and tip > 2.0 + 1e-12:
+            # grace 内免回撤，但仍受 tip_gap 上限（默认 2%）
+            return (
+                f"已刺破且量能达标但未开仓：grace 免回撤中，现价离极值过远"
+                f"{tip_s}（默认 tip_gap 上限约 2%）"
+                f"；amp%={r.move_pct:.2f}{arm_s}"
+            )
+        if (
+            r.retrace_waived is not True
+            and retrace == retrace
+            and retrace > 50.0 + 1e-6
+        ):
+            return (
+                f"已刺破且量能达标但未开仓：回撤超限 retrace%={retrace:.1f}"
+                f"（默认上限 50%）{tip_s}"
+                f"；amp%={r.move_pct:.2f}{arm_s}"
+            )
+        if retrace == retrace and retrace > 40.0:
+            return (
+                f"已刺破且量能达标但未开仓：回撤偏高 retrace%={retrace:.1f}"
+                f"{tip_s}；amp%={r.move_pct:.2f}{arm_s}"
+                f"（若仍不开：查同根已触发/占锁/冷却）"
+            )
+        if r.armed is False:
+            return (
+                f"已刺破且量能达标但未开仓：当时未武装"
+                f"{tip_s}；amp%={r.move_pct:.2f}"
+                f"（武装窗过期后尚未再武装，或同根已触发）"
+            )
         mv = r.move_pct
         if mv == mv:
             return (
                 f"已刺破且量能达标但未开仓：amp%={mv:.2f}"
-                f"（可能回撤超限/节流/占锁/同根已开/武装已过期）"
+                f"{tip_s}{arm_s}"
+                f"（查 bot.log 同秒 busy/blocked/同根已开）"
             )
-        return "接近触发（已刺破且量能达标，可能回撤超限/节流/占锁）"
+        return "接近触发（已刺破且量能达标，查回撤/武装/占锁）"
     return "接近但未开仓（详见 progress / vol×）"
 
 
@@ -627,6 +706,13 @@ def build_symbol_monitor(
                 "vol_x": r.vol_x,
                 "need_x": r.need_x,
                 "tip_gap_pct": r.tip_gap_pct if r.tip_gap_pct == r.tip_gap_pct else None,
+                "retrace_pct": (
+                    r.computed_retrace_pct
+                    if r.computed_retrace_pct == r.computed_retrace_pct
+                    else None
+                ),
+                "armed": r.armed,
+                "arm_age_ms": r.arm_age_ms,
                 "reason": why,
             }
         )
