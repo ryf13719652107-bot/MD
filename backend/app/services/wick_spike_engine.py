@@ -25,6 +25,7 @@ arm_grace_max_tip_gap_pct（默认 2）：grace 免回撤时，进场价相对�
   confirm 达标后不立刻市价，进入反弹窗；针尖可加深；
   现价从针尖反弹达 trigger% → 市价信号（保留 rebound 态，开仓失败可同根重试）；
   反弹达 abort% 或超时 → 放弃。
+  超时从「最后一次加深针尖」起算：破新高/新低则重置等待，避免针还在拉就被 timeout。
   confirm 时有效回撤上限 = min(max_retrace, abort)（避免 confirm 时已过放弃线）。
   arm_wait=0 时若开启 rebound，同刻全条件达标后仍走反弹窗（不再绕过）。
   trigger_pct<=0：confirm 后立刻市价（不等反弹）。
@@ -74,7 +75,7 @@ class WickSpikeParams:
     rebound_enabled: bool = False
     rebound_trigger_pct: float = 20.0  # 反弹占针深%触发市价
     rebound_abort_pct: float = 35.0    # 反弹占针深%放弃
-    rebound_wait_sec: float = 5.0      # confirm后等反弹超时秒数
+    rebound_wait_sec: float = 5.0      # 针尖停住后再等反弹的超时秒数（破新尖重置）
 
 
 @dataclass
@@ -333,13 +334,28 @@ def _process_rebound_window(
     is_long: bool,
     extreme: float,
 ) -> Optional[Signal]:
-    """反弹窗内：加深针尖 / 触发 / 放弃 / 超时。触发时保留 rebound 供开仓失败重试。"""
-    if state.rebound_extreme is None:
+    """反弹窗内：加深针尖 / 触发 / 放弃 / 超时。触发时保留 rebound 供开仓失败重试。
+
+    破新尖（空：更高；多：更低）时重置 rebound_at_ms，超时从针尖停住后起算。
+    """
+    prev_ext = state.rebound_extreme
+    if prev_ext is None:
         state.rebound_extreme = float(extreme)
-    if is_long:
-        state.rebound_extreme = min(float(state.rebound_extreme), float(extreme))
+        deepened = False
     else:
-        state.rebound_extreme = max(float(state.rebound_extreme), float(extreme))
+        prev_f = float(prev_ext)
+        if is_long:
+            new_ext = min(prev_f, float(extreme))
+            deepened = new_ext < prev_f
+        else:
+            new_ext = max(prev_f, float(extreme))
+            deepened = new_ext > prev_f
+        state.rebound_extreme = new_ext
+        if deepened:
+            # 针还在拉：继续追踪，超时从本次加深重新计
+            state.rebound_at_ms = now_ms
+            state.diag_event = "rebound_extend"
+
     rb_ext = float(state.rebound_extreme)
     trig_pct, abort_pct = _norm_rebound_pcts(params)
     depth, trig_line, abort_line = _rebound_lines(

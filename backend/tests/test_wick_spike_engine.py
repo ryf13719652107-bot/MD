@@ -622,3 +622,60 @@ def test_rebound_abort_locks_bar_no_rearm():
     assert on_tick(state, params, snap, last_price=108.0, now_ms=1_200) is None
     assert state.rebound_bar_ts is None
     assert state.armed_bar_ts is None
+
+
+def test_rebound_new_extreme_resets_wait_timer():
+    """破新高重置超时：进窗后继续拉升不应按首次 enter 计时 timeout。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=35.0,
+        rebound_wait_sec=5.0,
+    )
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1_000) is None
+    assert state.rebound_at_ms == 1_000
+    # 4.5s 后破新高：应重置计时，不得 timeout
+    snap2 = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=112.0, low=100.0)
+    assert on_tick(state, params, snap2, last_price=112.0, now_ms=5_500) is None
+    assert state.rebound_extreme == 112.0
+    assert state.rebound_at_ms == 5_500
+    assert state.rebound_done_bar_ts is None
+    assert take_diag_event(state) == "rebound_extend"
+    # 自新尖起未满 5s：仍等待
+    assert on_tick(state, params, snap2, last_price=111.5, now_ms=10_000) is None
+    assert state.rebound_done_bar_ts is None
+    # 自新尖起超过 5s 且未反弹 → timeout
+    assert on_tick(state, params, snap2, last_price=111.5, now_ms=10_600) is None
+    assert state.rebound_done_bar_ts == snap2.bar_open_ts
+    assert take_diag_event(state) == "rebound_timeout"
+
+
+def test_rebound_no_new_extreme_still_times_out():
+    """针尖不创新高时，仍按 rebound_wait 超时。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=35.0,
+        rebound_wait_sec=5.0,
+    )
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1_000) is None
+    # 横盘贴尖、未破新高、未到 trigger（108）→ 5s 后 timeout
+    assert on_tick(state, params, snap, last_price=109.5, now_ms=6_100) is None
+    assert state.rebound_done_bar_ts == snap.bar_open_ts
+    assert take_diag_event(state) == "rebound_timeout"
