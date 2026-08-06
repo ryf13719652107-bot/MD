@@ -593,3 +593,32 @@ def test_rebound_trigger_zero_fires_immediately():
     snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
     assert on_tick(state, params, snap, last_price=110.0, now_ms=1) == Signal.SHORT
     assert take_diag_event(state) == "rebound_immediate"
+
+
+def test_rebound_abort_locks_bar_no_rearm():
+    """abort 后同根不得再武装/再 fire（消 fire↔abort 风暴）。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=35.0,
+        rebound_wait_sec=5.0,
+    )
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
+    # 进窗
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1_000) is None
+    assert state.rebound_bar_ts == snap.bar_open_ts
+    # 跌破放弃线（回撤 35% → px <= 110 - 10*0.35 = 106.5）
+    assert on_tick(state, params, snap, last_price=106.4, now_ms=1_100) is None
+    assert state.rebound_done_bar_ts == snap.bar_open_ts
+    assert take_diag_event(state) == "rebound_abort"
+    # 即使价格回到触发区，本根也不再进
+    assert on_tick(state, params, snap, last_price=108.0, now_ms=1_200) is None
+    assert state.rebound_bar_ts is None
+    assert state.armed_bar_ts is None

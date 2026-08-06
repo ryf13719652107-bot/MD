@@ -109,6 +109,8 @@ class WickSymbolState:
     rebound_bar_ts: Optional[int] = None
     rebound_at_ms: int = 0
     rebound_extreme: Optional[float] = None
+    # abort/timeout 后锁定本根，禁止再武装→再进反弹（消 fire/abort 风暴）
+    rebound_done_bar_ts: Optional[int] = None
     # 供 runner 打专用日志后清空：rebound_enter / rebound_fire / rebound_abort / …
     diag_event: Optional[str] = None
 
@@ -348,22 +350,19 @@ def _process_rebound_window(
         abort_pct=abort_pct,
     )
     if depth <= 0:
-        clear_rebound(state)
-        state.diag_event = "rebound_abort"
+        _mark_rebound_done(state, snap.bar_open_ts, "rebound_abort")
         return None
 
     if is_long:
         if abort_pct > 0 and last_price >= abort_line - 1e-12:
-            clear_rebound(state)
-            state.diag_event = "rebound_abort"
+            _mark_rebound_done(state, snap.bar_open_ts, "rebound_abort")
             return None
         if trig_pct > 0 and last_price >= trig_line - 1e-12:
             state.diag_event = "rebound_fire"
             return _fire_signal(state, snap, True)
     else:
         if abort_pct > 0 and last_price <= abort_line + 1e-12:
-            clear_rebound(state)
-            state.diag_event = "rebound_abort"
+            _mark_rebound_done(state, snap.bar_open_ts, "rebound_abort")
             return None
         if trig_pct > 0 and last_price <= trig_line + 1e-12:
             state.diag_event = "rebound_fire"
@@ -371,8 +370,7 @@ def _process_rebound_window(
 
     rw = float(params.rebound_wait_sec or 0)
     if rw > 0 and (now_ms - state.rebound_at_ms) > int(rw * 1000):
-        clear_rebound(state)
-        state.diag_event = "rebound_timeout"
+        _mark_rebound_done(state, snap.bar_open_ts, "rebound_timeout")
         return None
     return None
 
@@ -391,6 +389,11 @@ def _after_confirm(
     clear_arm(state)
     if not params.rebound_enabled:
         return _fire_signal(state, snap, is_long)
+
+    # 本根已 abort/timeout：不再进反弹、也不改走立刻市价
+    if state.rebound_done_bar_ts == snap.bar_open_ts:
+        state.diag_event = "rebound_done_bar"
+        return None
 
     trig_pct, _abort = _norm_rebound_pcts(params)
     # trigger<=0：confirm 后立刻市价（不等反弹）
@@ -413,10 +416,12 @@ def _after_confirm(
         extreme=extreme,
     )
     # 进窗即放弃时覆盖事件名，便于区分「从未有效等待」
-    if sig is None and state.rebound_bar_ts is None and state.diag_event == "rebound_abort":
+    if (
+        sig is None
+        and state.rebound_bar_ts is None
+        and state.diag_event == "rebound_abort"
+    ):
         state.diag_event = "rebound_skip_past_abort"
-    elif sig is not None and state.diag_event == "rebound_fire":
-        pass  # 进窗同刻触发
     return sig
 
 
@@ -492,10 +497,17 @@ def clear_arm(state: WickSymbolState) -> None:
 
 
 def clear_rebound(state: WickSymbolState) -> None:
-    """清除反弹追踪状态。"""
+    """清除反弹追踪状态（不影响 rebound_done_bar_ts）。"""
     state.rebound_bar_ts = None
     state.rebound_at_ms = 0
     state.rebound_extreme = None
+
+
+def _mark_rebound_done(state: WickSymbolState, bar_open_ts: int, event: str) -> None:
+    """本根反弹结束（放弃/超时）：清窗并锁定，禁止同根再进。"""
+    clear_rebound(state)
+    state.rebound_done_bar_ts = int(bar_open_ts)
+    state.diag_event = event
 
 
 def is_arm_active(
@@ -655,6 +667,7 @@ def on_tick(
         state.bar_high = max(last_price, snap.kline_high) if snap.kline_high > 0 else last_price
         clear_arm(state)
         clear_rebound(state)
+        state.rebound_done_bar_ts = None
         state.armed_expired_bar_ts = None
         state.armed_expired_progress = 0.0
 
@@ -704,6 +717,13 @@ def on_tick(
 
     arm_wait = float(params.arm_wait_sec or 0)
     confirm_max_r = confirm_max_retrace_pct(params)
+
+    # 本根反弹已结束：不再武装（避免 abort 后立刻再 arm→fire→abort）
+    if (
+        params.rebound_enabled
+        and state.rebound_done_bar_ts == snap.bar_open_ts
+    ):
+        return None
 
     # —— 关闭武装：同刻全条件；若开 rebound 仍进反弹窗（不绕过）——
     if arm_wait <= 0:
@@ -761,6 +781,7 @@ def on_tick(
     # 新武装：刺破 + 最小涨跌幅
     # 作废后若同根仍刺破可再武装（量滞后于价时给量能追上来的机会）；
     # 不再要求 progress 创新高：极值已记入 state.bar_high，量达标即可触发。
+    # 本根 rebound 已结束则不再武装。
     if state.armed_bar_ts != snap.bar_open_ts:
         if not pierced:
             return None

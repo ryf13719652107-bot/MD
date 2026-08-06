@@ -436,6 +436,15 @@ class BinanceService:
         if self.testnet:
             exchange.set_sandbox_mode(True)
 
+        # 多策略并发 REST 时默认 maxCapacity=1000 易打满丢请求；适当加大
+        try:
+            throttler = getattr(exchange, "throttler", None)
+            cfg = getattr(throttler, "config", None) if throttler is not None else None
+            if isinstance(cfg, dict):
+                cfg["maxCapacity"] = max(int(cfg.get("maxCapacity") or 0), 5000)
+        except Exception:
+            pass
+
         return exchange
 
     # ---- Market Data (Public) ----

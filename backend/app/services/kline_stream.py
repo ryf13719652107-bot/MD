@@ -23,6 +23,9 @@ _DEFAULT_MAX_BARS = 500
 _IDLE_STOP_AFTER_SEC = 15 * 60  # 15 分钟没人读 → 关闭订阅
 _RECONNECT_INITIAL_BACKOFF = 1.0
 _RECONNECT_MAX_BACKOFF = 30.0
+# 全局 REST 去重：多策略同币并发 refresh 会打爆 ccxt throttle queue
+_REST_MIN_INTERVAL_SEC = 5.0
+_FORMING_MIN_INTERVAL_SEC = 2.0
 
 
 def _norm_sym(s: str) -> str:
@@ -95,6 +98,10 @@ class KlineStreamManager:
         self._last_access: dict[tuple, float] = {}
         self._lock = asyncio.Lock()
         self._janitor_task: Optional[asyncio.Task] = None
+        self._rest_inflight: set[tuple] = set()
+        self._rest_last: dict[tuple, float] = {}
+        self._forming_inflight: set[tuple] = set()
+        self._forming_last: dict[tuple, float] = {}
 
     @staticmethod
     def _key(client, symbol: str, timeframe: str) -> tuple:
@@ -227,10 +234,20 @@ class KlineStreamManager:
         timeframe: str,
         min_bars: int,
     ) -> list[list]:
-        """强制 REST 合并当前 K 线（仅后台纠偏，勿在接针热路径 await）。"""
+        """强制 REST 合并当前 K 线（仅后台纠偏，勿在接针热路径 await）。
+
+        全局按 key 去重+节流，避免多策略/forming 停滞同时刷爆 ccxt 限流队列。
+        """
         key = self._key(public_client, symbol, timeframe)
         await self._ensure_started(public_client, symbol, timeframe, min_bars)
-        self._last_access[key] = time.time()
+        now = time.time()
+        self._last_access[key] = now
+        if key in self._rest_inflight:
+            return list((self._buffers.get(key) or [])[-self._max_bars :])
+        if now - self._rest_last.get(key, 0.0) < _REST_MIN_INTERVAL_SEC:
+            return list((self._buffers.get(key) or [])[-self._max_bars :])
+        self._rest_inflight.add(key)
+        self._rest_last[key] = now
         try:
             data = await public_client.fetch_klines(
                 symbol, timeframe, limit=max(min_bars, self._max_bars)
@@ -238,9 +255,28 @@ class KlineStreamManager:
             if data:
                 self._merge(key, data)
         except Exception as e:
-            logger.warning(
-                "kline_stream REST refresh failed for %s %s: %s", symbol, timeframe, e
-            )
+            # 限流刷屏降噪：同类错误最多每 30s 打一条 warning
+            msg = str(e)
+            throttle_hit = "maxCapacity" in msg or "throttle" in msg.lower()
+            if throttle_hit:
+                last_w = self._rest_last.get(("warn",) + key, 0.0)
+                if now - last_w >= 30.0:
+                    self._rest_last[("warn",) + key] = now
+                    logger.warning(
+                        "kline_stream REST refresh failed for %s %s: %s",
+                        symbol,
+                        timeframe,
+                        e,
+                    )
+            else:
+                logger.warning(
+                    "kline_stream REST refresh failed for %s %s: %s",
+                    symbol,
+                    timeframe,
+                    e,
+                )
+        finally:
+            self._rest_inflight.discard(key)
         return list((self._buffers.get(key) or [])[-self._max_bars :])
 
     async def refresh_forming(
@@ -256,7 +292,14 @@ class KlineStreamManager:
         期间 WS 已推送更高 high 时被 REST 旧值覆盖倒退。close/open/ts 不动。
         """
         key = self._key(public_client, symbol, timeframe)
-        self._last_access[key] = time.time()
+        now = time.time()
+        self._last_access[key] = now
+        if key in self._forming_inflight:
+            return
+        if now - self._forming_last.get(key, 0.0) < _FORMING_MIN_INTERVAL_SEC:
+            return
+        self._forming_inflight.add(key)
+        self._forming_last[key] = now
         try:
             data = await public_client.fetch_klines(symbol, timeframe, limit=limit)
             if not data:
@@ -302,6 +345,8 @@ class KlineStreamManager:
             logger.debug(
                 "kline_stream refresh_forming failed for %s %s: %s", symbol, timeframe, e
             )
+        finally:
+            self._forming_inflight.discard(key)
 
     async def get(
         self,

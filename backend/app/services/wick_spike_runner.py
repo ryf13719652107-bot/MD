@@ -83,7 +83,9 @@ _WAKE_TIMEOUT_SEC = 0.08
 # 缓冲不足时后台 REST 纠偏节流
 _BG_REST_SEC = 5.0
 # 武装且等量时后台 REST 补强本根 K 线间隔（秒）；解决 WS 量能/极值滞后
-_ARM_REST_SEC = 1.0
+_ARM_REST_SEC = 2.0
+# forming 停滞 REST 纠偏间隔（秒）；过短会在换分钟时打爆 ccxt 限流队列
+_FORMING_REST_SEC = 5.0
 # 抢策略锁最长等待（毫秒级 TP 检测），超时则 release 重试
 _LOCK_WAIT_SEC = 0.12
 # 成交后写库重试
@@ -331,6 +333,13 @@ class WickSpikeRunner:
             except Exception:
                 pass
 
+        async def _bg_forming_rest(pub, sym: str, tf: str) -> None:
+            """forming 停滞：只拉最近 2 根，避免全量 refresh_rest 打爆限流。"""
+            try:
+                await kline_stream_manager.refresh_forming(pub, sym, tf, limit=2)
+            except Exception:
+                pass
+
         async def _bg_arm_rest(pub, sym: str, tf: str, sym_key: str) -> None:
             """武装后轻量 REST 补强本根 K 线（只拉 2 根），覆盖 WS 量能/极值滞后。"""
             try:
@@ -516,9 +525,9 @@ class WickSpikeRunner:
                     tf_ms = _timeframe_ms(timeframe)
                     current_bar_ts = (now_ms // tf_ms) * tf_ms
                     if forming_ts < current_bar_ts:
-                        if now - last_forming_rest.get(sym_key, 0.0) >= 1.0:
+                        if now - last_forming_rest.get(sym_key, 0.0) >= _FORMING_REST_SEC:
                             last_forming_rest[sym_key] = now
-                            self._fire_bg(_bg_rest_one(public, sym, timeframe))
+                            self._fire_bg(_bg_forming_rest(public, sym, timeframe))
                         continue
 
                     try:
@@ -891,6 +900,19 @@ class WickSpikeRunner:
         from .scheduler import strategy_scheduler
 
         lock = strategy_scheduler._get_strategy_lock(strategy_id)
+        sym_key = _norm_sym(symbol)
+        side = (signal.value or "").lower()
+
+        def _skip(reason: str, detail: str = "") -> str:
+            logger.info(
+                "wick_spike skip strategy=%d %s reason=%s%s",
+                strategy_id,
+                sym_key,
+                reason,
+                f" {detail}" if detail else "",
+            )
+            return reason
+
         # 短等锁：躲过 TP 检测的短暂占用；manage 长占则超时重试
         try:
             await asyncio.wait_for(lock.acquire(), timeout=_LOCK_WAIT_SEC)
@@ -899,12 +921,10 @@ class WickSpikeRunner:
                 strategy_id,
                 f"{symbol} 接针触发但调度占锁，稍后重试",
             )
-            return "busy"
+            return _skip("busy", "lock_timeout")
 
         api_res = None
         early: Optional[str] = None
-        sym_key = _norm_sym(symbol)
-        side = (signal.value or "").lower()
         vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
         n = snap.atr * params.atr_mult
         # 优先用武装极值，与 on_tick 决策一致
@@ -924,18 +944,18 @@ class WickSpikeRunner:
         acc_id = int(getattr(strategy, "account_id", 0) or 0)
         try:
             if strategy is None or getattr(strategy, "status", None) != "running":
-                early = "retryable_fail"
+                early = _skip("retryable_fail", "strategy_not_running")
                 return early
 
             # 内存快照门禁
             if tick_ctx.exchange_legs.get((sym_key, side), 0) > 0:
-                early = "has_pos"
+                early = _skip("has_pos", "tick_ctx")
                 return early
             if sym_key in (tick_ctx.exclude_norm or frozenset()):
                 strategy_log_service.info(
                     strategy_id, f"{symbol} 接针触发但命中排除/黑名单快照，跳过"
                 )
-                early = "blocked"
+                early = _skip("blocked", "exclude_norm")
                 return early
 
             # 优先 User Data Stream 腿缓存；过期/缺失才 REST
@@ -951,7 +971,7 @@ class WickSpikeRunner:
                         strategy_id,
                         f"{symbol} 接针触发但账户流显示已有同向仓，跳过",
                     )
-                    early = "has_pos"
+                    early = _skip("has_pos", "account_stream")
                     return early
             else:
                 try:
@@ -972,7 +992,7 @@ class WickSpikeRunner:
                             strategy_id,
                             f"{symbol} 接针触发但交易所已有同向仓，跳过",
                         )
-                        early = "has_pos"
+                        early = _skip("has_pos", "rest_positions")
                         return early
                 except Exception as e:
                     logger.warning(
@@ -1024,7 +1044,7 @@ class WickSpikeRunner:
                 strategy_log_service.warning(
                     strategy_id, f"{symbol} 接针无法开仓 — 余额无效"
                 )
-                early = "retryable_fail"
+                early = _skip("retryable_fail", "bad_balance")
                 return early
 
             candidate = SignalCandidate(
@@ -1052,7 +1072,7 @@ class WickSpikeRunner:
                 else -1.0
             )
             if api_res is None:
-                early = "retryable_fail"
+                early = _skip("retryable_fail", "order_none")
                 return early
 
             # 成交后立刻更新内存腿，防止锁外窗口重复开
