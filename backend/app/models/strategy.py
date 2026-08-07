@@ -76,6 +76,10 @@ class Strategy(Base):
     wick_rebound_wait_sec: Mapped[float] = mapped_column(
         Float, default=5.0, server_default="5.0"
     )
+    # 接针加仓模式：price_drop=仅涨跌幅；price_and_wt=涨跌幅+WT确认（默认）
+    wick_martingale_mode: Mapped[str] = mapped_column(
+        String(32), default="price_and_wt", server_default="price_and_wt"
+    )
 
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)

@@ -398,6 +398,34 @@ def _klines_for_confirmed_signal_only(klines: list, timeframe: str) -> list:
     return klines[:-1]
 
 
+def wick_martingale_mode_needs_wt(mode: str | None) -> bool:
+    """接针加仓是否需要 WT 确认（在涨跌幅门槛之后）。缺省按 price_and_wt。"""
+    return (mode or "price_and_wt") != "price_drop"
+
+
+def martingale_wt_confirm_allows_add(
+    klines_confirm: list,
+    *,
+    direction: str,
+    wt_channel_length: int,
+    wt_average_length: int,
+    wt_os_level: float,
+    wt_ob_level: float,
+) -> tuple[bool, str]:
+    """用 WT 确认马丁加仓。
+
+    返回 (允许加仓, 日志文案)。
+    WT 算不出时放行（与既有 wavetrend 加仓确认一致：仅在算出信号且为中性时拦截）。
+    """
+    wt = calculate_wavetrend(klines_confirm, wt_channel_length, wt_average_length)
+    if wt is None:
+        return True, "WT不可用，跳过确认"
+    confirm = generate_wt_signal(wt, direction, wt_os_level, wt_ob_level)
+    if confirm == Signal.NEUTRAL:
+        return False, f"WT1={wt['wt1']:.2f} 信号已消失"
+    return True, f"WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f}"
+
+
 class PositionManager:
     """Handles per-symbol processing within a strategy tick."""
 
@@ -2334,8 +2362,34 @@ class PositionManager:
         ps = "LONG" if pos_side == "long" else "SHORT"
 
         # Signal re-check for martingale add (if enabled).
-        # 基础马丁 / 接针：不加仓信号确认，仅按价格跌幅加仓。
+        # 基础马丁：永不做信号确认。
+        # 接针：仅当 wick_martingale_mode=price_and_wt 时，在跌幅达标后再做 WT 确认。
         if (
+            strategy.signal_source == "wick_spike"
+            and wick_martingale_mode_needs_wt(
+                getattr(strategy, "wick_martingale_mode", None)
+            )
+            and klines is not None
+        ):
+            klines_confirm = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
+            ok, detail = martingale_wt_confirm_allows_add(
+                klines_confirm,
+                direction=strategy.direction,
+                wt_channel_length=strategy.wt_channel_length,
+                wt_average_length=strategy.wt_average_length,
+                wt_os_level=strategy.wt_os_level,
+                wt_ob_level=strategy.wt_ob_level,
+            )
+            if not ok:
+                strategy_log_service.info(
+                    strategy_id, f"{symbol} 马丁加仓跳过 — {detail}"
+                )
+                return
+            if "跳过确认" not in detail:
+                strategy_log_service.info(
+                    strategy_id, f"{symbol} 马丁加仓WT确认 — {detail}"
+                )
+        elif (
             strategy.martingale_rsi_enabled
             and strategy.signal_source not in ("martingale_base", "wick_spike")
             and klines is not None
@@ -2343,15 +2397,23 @@ class PositionManager:
         ):
             klines_confirm = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
             if strategy.signal_source == "wavetrend":
-                wt = calculate_wavetrend(
-                    klines_confirm, strategy.wt_channel_length, strategy.wt_average_length
+                ok, detail = martingale_wt_confirm_allows_add(
+                    klines_confirm,
+                    direction=strategy.direction,
+                    wt_channel_length=strategy.wt_channel_length,
+                    wt_average_length=strategy.wt_average_length,
+                    wt_os_level=strategy.wt_os_level,
+                    wt_ob_level=strategy.wt_ob_level,
                 )
-                if wt is not None:
-                    confirm = generate_wt_signal(wt, strategy.direction, strategy.wt_os_level, strategy.wt_ob_level)
-                    if confirm == Signal.NEUTRAL:
-                        strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓跳过 — WT1={wt['wt1']:.2f} 信号已消失")
-                        return
-                    strategy_log_service.info(strategy_id, f"{symbol} 马丁加仓WT确认 — WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f}")
+                if not ok:
+                    strategy_log_service.info(
+                        strategy_id, f"{symbol} 马丁加仓跳过 — {detail}"
+                    )
+                    return
+                if "跳过确认" not in detail:
+                    strategy_log_service.info(
+                        strategy_id, f"{symbol} 马丁加仓WT确认 — {detail}"
+                    )
             elif strategy.signal_source == "trend_wt":
                 # 默认只用 WT 确认加仓；开启 martingale_st_filter_enabled 才叠加超级趋势
                 use_st = bool(getattr(strategy, "martingale_st_filter_enabled", False))

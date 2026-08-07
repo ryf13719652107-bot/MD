@@ -42,6 +42,8 @@ export interface Strategy {
   wick_rebound_abort_pct: number;
   /** confirm 后等反弹超时秒数；默认 5 */
   wick_rebound_wait_sec: number;
+  /** 接针加仓：默认 price_and_wt；price_drop=仅涨跌幅 */
+  wick_martingale_mode: 'price_drop' | 'price_and_wt';
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -121,6 +123,8 @@ export interface StrategyFormData {
   wick_rebound_trigger_pct: number;
   wick_rebound_abort_pct: number;
   wick_rebound_wait_sec: number;
+  /** 接针加仓：默认 price_and_wt；price_drop=仅涨跌幅 */
+  wick_martingale_mode: 'price_drop' | 'price_and_wt';
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;

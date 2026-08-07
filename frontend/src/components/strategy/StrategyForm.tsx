@@ -47,6 +47,7 @@ const schema = z.object({
   wick_rebound_trigger_pct: z.number().min(0).max(100),
   wick_rebound_abort_pct: z.number().min(0).max(100),
   wick_rebound_wait_sec: z.number().min(0).max(60),
+  wick_martingale_mode: z.enum(['price_drop', 'price_and_wt']),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -151,6 +152,8 @@ function toFormDefaults(
       wick_rebound_trigger_pct: initialData.wick_rebound_trigger_pct ?? 20,
       wick_rebound_abort_pct: initialData.wick_rebound_abort_pct ?? 35,
       wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 5,
+      wick_martingale_mode:
+        initialData.wick_martingale_mode === 'price_drop' ? 'price_drop' : 'price_and_wt',
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -228,6 +231,7 @@ function toFormDefaults(
     wick_rebound_trigger_pct: 20,
     wick_rebound_abort_pct: 35,
     wick_rebound_wait_sec: 5,
+    wick_martingale_mode: 'price_and_wt',
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -303,6 +307,7 @@ export default function StrategyForm({
   const singleSymbolStopLossEnabled = watch('single_symbol_stop_loss_enabled', false);
   const excludeFunding = watch('exclude_funding', false);
   const martingaleRsiEnabled = watch('martingale_rsi_enabled', true);
+  const wickMartingaleMode = watch('wick_martingale_mode', 'price_and_wt');
 
   // Auto-adjust RSI threshold on mount and when direction changes
   useEffect(() => {
@@ -398,7 +403,7 @@ export default function StrategyForm({
           <div className="space-y-3">
             <div className="rounded-md border border-cyan-700/50 bg-cyan-900/20 px-3 py-2 text-xs text-cyan-200 space-y-1">
               <p>毫秒接针：仅币安。先放量（当前量 ≥ Vol SMA × 倍数），再用本根极值追认「开盘价 ± 上根 ATR × 倍数」。默认 confirm 后立刻市价；开启下方「市价反弹追踪」则等针尖反弹再开仓。</p>
-              <p>调度错峰：持仓管理在每根 K 第 40 秒，止盈检测第 30 秒；:00 附近不占锁，留给价流开仓。止盈/层数下方手填；加仓可开 WT 确认。</p>
+              <p>调度错峰：持仓管理在每根 K 第 40 秒，止盈检测第 30 秒；:00 附近不占锁，留给价流开仓。止盈/层数下方手填；加仓模式在马丁区选择「仅涨跌幅」或「涨跌幅+WT」。</p>
             </div>
             <div>
               <label className={`${labelClass} flex items-center gap-2`}>
@@ -511,11 +516,8 @@ export default function StrategyForm({
           </div>
         )}
 
-        {(signalSource === 'wavetrend' || signalSource === 'trend_wt' || signalSource === 'wick_spike') && (
+        {(signalSource === 'wavetrend' || signalSource === 'trend_wt') && (
           <div className="grid grid-cols-2 gap-3">
-            {signalSource === 'wick_spike' && (
-              <div className="col-span-2 text-xs text-gray-500">以下 WT 参数仅用于可选的马丁加仓确认</div>
-            )}
             <div>
               <label className={labelClass}>WT 通道长度</label>
               <input type="number" {...register('wt_channel_length', { valueAsNumber: true })} className={inputClass} />
@@ -808,11 +810,46 @@ export default function StrategyForm({
         </div>
 
         {signalSource === 'wick_spike' ? (
-          <div>
-            <p className={`${labelClass}`}>接针加仓</p>
-            <span className="text-xs text-gray-600">
-              接针策略加仓仅按价格跌幅，不使用 WaveTrend 确认
-            </span>
+          <div className="space-y-3">
+            <div>
+              <label className={labelClass}>接针加仓模式</label>
+              <select {...register('wick_martingale_mode')} className={inputClass}>
+                <option value="price_and_wt">涨跌幅 + WT 确认</option>
+                <option value="price_drop">仅涨跌幅</option>
+              </select>
+              <span className="text-xs text-gray-600">
+                {wickMartingaleMode === 'price_and_wt'
+                  ? '默认：先满足价格跌幅，再用下方 WT 参数做金叉/死叉确认'
+                  : '仅按相对上一层入场价的跌幅加仓'}
+              </span>
+            </div>
+            {wickMartingaleMode === 'price_and_wt' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2 text-xs text-gray-500">
+                  以下 WT 参数用于接针加仓确认（须先满足价格跌幅）
+                </div>
+                <div>
+                  <label className={labelClass}>WT 通道长度</label>
+                  <input type="number" {...register('wt_channel_length', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">WT1周期，默认10</span>
+                </div>
+                <div>
+                  <label className={labelClass}>WT 均线长度</label>
+                  <input type="number" {...register('wt_average_length', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">WT2平滑周期，默认21</span>
+                </div>
+                <div>
+                  <label className={labelClass}>WT 超买线</label>
+                  <input type="number" step="1" {...register('wt_ob_level', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">死叉+WT1高于此值确认空向加仓，默认60</span>
+                </div>
+                <div>
+                  <label className={labelClass}>WT 超卖线</label>
+                  <input type="number" step="1" {...register('wt_os_level', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">金叉+WT1低于此值确认多向加仓，默认-60</span>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div>

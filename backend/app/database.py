@@ -95,6 +95,7 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN wick_rebound_trigger_pct FLOAT DEFAULT 20.0",
             "ALTER TABLE strategies ADD COLUMN wick_rebound_abort_pct FLOAT DEFAULT 35.0",
             "ALTER TABLE strategies ADD COLUMN wick_rebound_wait_sec FLOAT DEFAULT 5.0",
+            "ALTER TABLE strategies ADD COLUMN wick_martingale_mode VARCHAR(32) DEFAULT 'price_and_wt'",
             "ALTER TABLE strategies ADD COLUMN skip_min_qty_exceeds BOOLEAN DEFAULT 1",
             "ALTER TABLE accounts ADD COLUMN cashflow_sync_cursor_ms INTEGER",
             "ALTER TABLE accounts ADD COLUMN exchange VARCHAR(20) DEFAULT 'binance'",
@@ -292,6 +293,16 @@ async def init_db():
                 lambda c: c.exec_driver_sql(
                     "UPDATE strategies SET wick_rebound_wait_sec=5.0 "
                     "WHERE wick_rebound_wait_sec IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_martingale_mode='price_and_wt' "
+                    "WHERE wick_martingale_mode IS NULL OR wick_martingale_mode=''"
                 )
             )
         except Exception:

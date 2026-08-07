@@ -142,6 +142,10 @@ class StrategyCreate(BaseModel):
     wick_rebound_wait_sec: float = Field(
         default=5.0, ge=0, le=60, description="confirm后等反弹超时秒数"
     )
+    wick_martingale_mode: Literal["price_drop", "price_and_wt"] = Field(
+        default="price_and_wt",
+        description="接针加仓：price_drop=仅涨跌幅；price_and_wt=涨跌幅+WT确认（默认）",
+    )
 
     @model_validator(mode="after")
     def _check_rebound_pcts(self):
@@ -218,6 +222,7 @@ class StrategyUpdate(BaseModel):
     wick_rebound_trigger_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_abort_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_wait_sec: Optional[float] = Field(default=None, ge=0, le=60)
+    wick_martingale_mode: Optional[Literal["price_drop", "price_and_wt"]] = None
 
     @model_validator(mode="after")
     def _check_rebound_pcts(self):
@@ -306,6 +311,7 @@ class StrategyResponse(BaseModel):
     wick_rebound_trigger_pct: float = 20.0
     wick_rebound_abort_pct: float = 35.0
     wick_rebound_wait_sec: float = 5.0
+    wick_martingale_mode: str = "price_and_wt"
     blacklisted_symbols: list[str] = Field(default_factory=list)
     status: str
     started_at: Optional[datetime] = None
