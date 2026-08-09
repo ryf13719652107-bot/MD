@@ -123,6 +123,29 @@ class PositionSyncService:
                 for (sym_key, side_low), legs in by_leg.items():
                     if (sym_key, side_low) in exchange_map:
                         continue
+                    # 防与 check_tp_fills 竞态：写 Trade 前按 id 重查仍 open 的行
+                    leg_ids = [int(lp.id) for lp in legs if lp.id is not None]
+                    if leg_ids:
+                        fresh = await session.execute(
+                            select(Position).where(
+                                Position.id.in_(leg_ids),
+                                Position.closed_at.is_(None),
+                            )
+                        )
+                        legs = list(fresh.scalars().all())
+                    else:
+                        legs = [lp for lp in legs if lp.closed_at is None]
+                    if not legs:
+                        continue
+
+                    # 与 check_tp 一致：折叠符号竞态重复 L0，只对真实层写 Trade
+                    from .position_manager import _collapse_phantom_l0_duplicates
+
+                    legs = _collapse_phantom_l0_duplicates(legs, now=sync_now)
+                    legs = [lp for lp in legs if lp.closed_at is None]
+                    if not legs:
+                        continue
+
                     order_ids: list[str] = []
                     seen: set[str] = set()
                     for lp in legs:
@@ -147,7 +170,10 @@ class PositionSyncService:
                         exit_price = float(ref.mark_price or ref.entry_price or 0)
                         close_reason = "sync"
 
+                    closed_n = 0
                     for lp in legs:
+                        if lp.closed_at is not None:
+                            continue
                         exit_pnl = (
                             (exit_price - lp.entry_price) * lp.quantity
                             if lp.side == "long"
@@ -163,7 +189,7 @@ class PositionSyncService:
                         trade = Trade(
                             strategy_id=lp.strategy_id,
                             account_id=lp.account_id,
-                            symbol=lp.symbol,
+                            symbol=sym_key,
                             side=lp.side,
                             quantity=lp.quantity,
                             entry_price=lp.entry_price,
@@ -178,14 +204,17 @@ class PositionSyncService:
                         session.add(trade)
                         trades_to_backup.append(trade)
                         lp.closed_at = exit_time
-                    logger.warning(
-                        "Sync: leg %s %s (%d DB rows) missing on exchange — closed with %s exit=%.8f",
-                        sym_key,
-                        side_low,
-                        len(legs),
-                        close_reason,
-                        exit_price,
-                    )
+                        lp.symbol = sym_key
+                        closed_n += 1
+                    if closed_n:
+                        logger.warning(
+                            "Sync: leg %s %s (%d DB rows) missing on exchange — closed with %s exit=%.8f",
+                            sym_key,
+                            side_low,
+                            closed_n,
+                            close_reason,
+                            exit_price,
+                        )
 
                 local_keys = {(_norm_leg_symbol(lp.symbol), lp.side.lower()) for lp in local_positions}
                 for (sym, side), ep in exchange_map.items():

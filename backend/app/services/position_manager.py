@@ -47,6 +47,57 @@ def _norm_sym(s: str) -> str:
     return (s or "").upper().replace("/", "").replace(":USDT", "").replace("_", "")
 
 
+def _collapse_phantom_l0_duplicates(
+    positions: list,
+    *,
+    now=None,
+    qty_tol: float = 0.02,
+) -> list:
+    """折叠「同腿多个 L0 且数量几乎相同」的记账重复行。
+
+    选币池符号与 ccxt 符号竞态时会各建一条全量 L0；平仓若都写 Trade 会双倍盈亏。
+    保留一条（优先有止盈单 ID），其余仅标 closed_at、**不写 Trade**。
+    不同 layer 的马丁加仓行不受影响。
+    """
+    if len(positions) <= 1:
+        return list(positions)
+    ts = now or now_beijing()
+    keep: list = []
+    l0 = [p for p in positions if int(getattr(p, "layer", 0) or 0) == 0]
+    higher = [p for p in positions if int(getattr(p, "layer", 0) or 0) > 0]
+    if len(l0) <= 1:
+        return list(positions)
+
+    l0_sorted = sorted(
+        l0,
+        key=lambda p: (
+            0 if (getattr(p, "tp_limit_order_id", None) or "").strip() else 1,
+            int(getattr(p, "id", 0) or 0),
+        ),
+    )
+    primary = l0_sorted[0]
+    keep.append(primary)
+    pq = float(getattr(primary, "quantity", 0) or 0)
+    for p in l0_sorted[1:]:
+        q = float(getattr(p, "quantity", 0) or 0)
+        near_dup = pq > 0 and q > 0 and abs(q - pq) / pq <= qty_tol
+        if near_dup and getattr(p, "closed_at", None) is None:
+            p.closed_at = ts
+            if hasattr(p, "symbol") and hasattr(primary, "symbol"):
+                p.symbol = _norm_sym(primary.symbol) or p.symbol
+            logger.warning(
+                "collapse phantom L0 duplicate position id=%s qty=%.6f "
+                "(keep id=%s) — no Trade written",
+                getattr(p, "id", None),
+                q,
+                getattr(primary, "id", None),
+            )
+        else:
+            keep.append(p)
+    keep.extend(higher)
+    return keep
+
+
 def _open_signal_log_suffix(signal_label: str, rsi: float) -> str:
     """Format signal part of open logs; basic martingale has no indicator value."""
     if signal_label == "基础马丁":
@@ -795,16 +846,26 @@ class PositionManager:
                 logger.warning("Strategy %d: fetch_positions for reconcile %s failed: %s", strategy_id, symbol, e)
                 return RECONCILE_NO_ORPHAN
 
-        conflict_stmt = (
+        # 账户内已有同向开仓（含本策略）：禁止再 insert，避免
+        # 选币池 BMTUSDT 与 ccxt BMT/USDT:USDT 各建一条全量仓。
+        open_stmt = (
             select(Position)
             .where(
                 Position.account_id == strategy.account_id,
                 Position.closed_at.is_(None),
-                Position.strategy_id != strategy_id,
             )
         )
-        cr = await session.execute(conflict_stmt)
-        other_keys = {(_norm_sym(p.symbol), p.side.lower()) for p in cr.scalars().all()}
+        open_rows = list((await session.execute(open_stmt)).scalars().all())
+        other_keys = {
+            (_norm_sym(p.symbol), p.side.lower())
+            for p in open_rows
+            if p.strategy_id != strategy_id
+        }
+        own_keys = {
+            (_norm_sym(p.symbol), p.side.lower())
+            for p in open_rows
+            if p.strategy_id == strategy_id
+        }
 
         created = False
         blocked_by_other = False
@@ -821,6 +882,14 @@ class PositionManager:
             if side != (strategy.direction or "").lower():
                 # 只认领与本策略方向一致的交易所持仓腿（多单策略不领养空单，反之亦然）
                 continue
+            if (ep_sym, side) in own_keys:
+                logger.info(
+                    "Strategy %d: skip reconcile %s %s — already have open DB row",
+                    strategy_id,
+                    ep_sym,
+                    side,
+                )
+                continue
             if (ep_sym, side) in other_keys:
                 # Another strategy on this account already has an open Position for this exact symbol+side.
                 # Hedge mode: opposite side (long vs short) is a different key — 一多一空 can both have rows.
@@ -828,7 +897,7 @@ class PositionManager:
                 logger.warning(
                     "Strategy %d: skip reconcile %s %s — another strategy already holds this in DB",
                     strategy_id,
-                    symbol,
+                    ep_sym,
                     side,
                 )
                 continue
@@ -849,10 +918,11 @@ class PositionManager:
             tp_price = eng.get_take_profit_price(entry_price, side)
 
             opened_at = _position_opened_at_from_exchange(ep) or now_beijing()
+            # 统一规范符号，避免与 execute_open_db / 选币池格式分叉
             pos = Position(
                 strategy_id=strategy_id,
                 account_id=strategy.account_id,
-                symbol=symbol,
+                symbol=ep_sym,
                 side=side,
                 quantity=contracts,
                 entry_price=entry_price,
@@ -877,16 +947,17 @@ class PositionManager:
                 )
                 return RECONCILE_DB_ERROR
             created = True
+            own_keys.add((ep_sym, side))
             logger.warning(
                 "Strategy %d: reconciled DB Position from exchange — %s %s qty=%.6f entry=%.6f (local row was missing)",
                 strategy_id,
-                symbol,
+                ep_sym,
                 side,
                 contracts,
                 entry_price,
             )
             msg = (
-                f"{symbol} 交易所有{side}仓但本地无开仓记录 — 已恢复一条持仓(L0)防重复开仓；"
+                f"{ep_sym} 交易所有{side}仓但本地无开仓记录 — 已恢复一条持仓(L0)防重复开仓；"
                 f"非策略原单不自动挂止盈"
             )
             if pos.tp_limit_order_id:
@@ -1663,8 +1734,62 @@ class PositionManager:
         result: OpenApiResult,
     ) -> None:
         strategy_id = strategy.id
-        symbol = result.symbol
+        symbol = _norm_sym(result.symbol)
+        side = (result.position_side or "").lower()
         try:
+            # 孤儿对账可能已用另一符号格式建过同向仓：合并更新，禁止再插一条全量仓
+            existing = list(
+                (
+                    await session.execute(
+                        self._open_positions_stmt(strategy_id, symbol)
+                    )
+                ).scalars().all()
+            )
+            same_side = [p for p in existing if (p.side or "").lower() == side]
+            if same_side:
+                # 首仓写库不应碰到马丁高层；若已有 layer>0 说明状态异常，禁止再插/覆盖
+                if any(int(p.layer or 0) > 0 for p in same_side):
+                    logger.error(
+                        "Strategy %d: execute_open_db skipped — %s %s already has "
+                        "martingale layers open",
+                        strategy_id,
+                        symbol,
+                        side,
+                    )
+                    return
+                # 折叠竞态产生的多条 L0，只保留一条并回填成交信息
+                kept = _collapse_phantom_l0_duplicates(same_side)
+                primary = kept[0]
+                primary.symbol = symbol
+                if result.filled_qty and float(result.filled_qty) > 0:
+                    primary.quantity = float(result.filled_qty)
+                if result.avg_price and float(result.avg_price) > 0:
+                    primary.entry_price = float(result.avg_price)
+                if result.current_price and float(result.current_price) > 0:
+                    primary.mark_price = float(result.current_price)
+                if result.tp_price and float(result.tp_price) > 0:
+                    primary.take_profit_price = float(result.tp_price)
+                oid = (result.order or {}).get("id", "")
+                if oid:
+                    primary.exchange_order_id = str(oid)
+                if result.tp_limit_order_id:
+                    primary.tp_limit_order_id = result.tp_limit_order_id
+                await session.flush()
+                logger.warning(
+                    "Strategy %d: open DB merge into existing %s %s "
+                    "(skip duplicate row; was race with orphan reconcile)",
+                    strategy_id,
+                    symbol,
+                    side,
+                )
+                strategy_log_service.success(
+                    strategy_id,
+                    f"{symbol} 开{side}成功 qty={result.base_qty:.4f} "
+                    f"price={result.avg_price:.4f} "
+                    f"{_open_signal_log_suffix(result.signal_label, result.rsi)}",
+                )
+                return
+
             pos = Position(
                 strategy_id=strategy_id,
                 account_id=strategy.account_id,
@@ -2093,7 +2218,9 @@ class PositionManager:
             # 有止盈单 ID 即检测；不依赖 take_profit_price（补关联后可能为空）
             if not p.tp_limit_order_id:
                 continue
-            symbol_side_key = (p.symbol, p.side)
+            # 必须按规范符号去重：BMTUSDT 与 BMT/USDT:USDT 是同一腿
+            sym_norm = _norm_sym(p.symbol)
+            symbol_side_key = (sym_norm, (p.side or "").lower())
             if symbol_side_key in processed_symbols:
                 continue
             try:
@@ -2114,7 +2241,20 @@ class PositionManager:
                             p.symbol,
                         )
                         continue
-                    symbol_positions = [op for op in open_positions if op.symbol == p.symbol and op.side == p.side]
+                    symbol_positions = [
+                        op
+                        for op in open_positions
+                        if _norm_sym(op.symbol) == sym_norm
+                        and (op.side or "").lower() == symbol_side_key[1]
+                        and op.closed_at is None
+                    ]
+                    if not symbol_positions:
+                        continue
+                    # 折叠符号竞态留下的重复 L0，避免一条交易所腿写出多条 Trade
+                    symbol_positions = _collapse_phantom_l0_duplicates(symbol_positions)
+                    symbol_positions = [
+                        op for op in symbol_positions if op.closed_at is None
+                    ]
                     if not symbol_positions:
                         continue
                     positions_data = [{"quantity": op.quantity, "entry_price": op.entry_price} for op in symbol_positions]
@@ -2122,11 +2262,11 @@ class PositionManager:
                                            max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
                     avg_entry, _ = eng.get_avg_entry_price(positions_data)
                     await self._close_positions(
-                        session, strategy, p.symbol, auth_binance, symbol_positions,
+                        session, strategy, sym_norm, auth_binance, symbol_positions,
                         eng, avg_entry, p.side, "take_profit", current_price,
                         pre_exit_price=avg_fill, fill_order=order_info,
                     )
-                    logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, p.symbol, avg_fill)
+                    logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, sym_norm, avg_fill)
                     processed_symbols.add(symbol_side_key)
             except (Exception, asyncio.TimeoutError):
                 logger.warning("Strategy %d: TP order check failed for %s %s, retrying next cycle", strategy_id, p.symbol, p.side)
@@ -2313,16 +2453,24 @@ class PositionManager:
                     return
 
         # Common: create Trade records and mark positions closed
-        logger.info("Strategy %d: closed %s due to %s", strategy_id, symbol, close_reason)
+        sym_norm = _norm_sym(symbol)
+        logger.info("Strategy %d: closed %s due to %s", strategy_id, sym_norm, close_reason)
         detected_at = now_beijing()
         exit_time = exit_time_from_order(fill_order, fallback=detected_at)
+        # 写 Trade 前再折叠一次，兜住 manage/TP/止损等所有平仓入口
+        open_positions = _collapse_phantom_l0_duplicates(
+            list(open_positions), now=exit_time
+        )
         trades_to_backup: list[Trade] = []
         for p in open_positions:
+            if p.closed_at is not None:
+                continue
             p.closed_at = exit_time
+            p.symbol = sym_norm
             exit_pnl = (exit_price - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - exit_price) * p.quantity
             exit_pnl_pct = (exit_price - p.entry_price) / p.entry_price * 100 if p.side == "long" else (p.entry_price - exit_price) / p.entry_price * 100
             trade = Trade(
-                strategy_id=strategy_id, account_id=strategy.account_id, symbol=symbol,
+                strategy_id=strategy_id, account_id=strategy.account_id, symbol=sym_norm,
                 side=p.side, quantity=p.quantity, entry_price=p.entry_price, exit_price=exit_price,
                 realized_pnl=exit_pnl, pnl_pct=exit_pnl_pct,
                 entry_time=p.opened_at or exit_time, exit_time=exit_time, layer=p.layer, close_reason=close_reason,
@@ -2503,7 +2651,7 @@ class PositionManager:
 
             pos = Position(
                 strategy_id=strategy_id, account_id=strategy.account_id,
-                symbol=symbol, side=pos_side, quantity=filled_qty,
+                symbol=_norm_sym(symbol), side=pos_side, quantity=filled_qty,
                 entry_price=new_avg, mark_price=current_price, layer=result.next_layer,
                 take_profit_price=tp_price, exchange_order_id=order.get("id", ""),
             )

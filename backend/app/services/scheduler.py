@@ -828,8 +828,12 @@ class StrategyScheduler:
 
             if mid_candle and auth_binance:
                 try:
-                    await self._position_mgr.check_tp_fills(session, strategy, auth_binance, 0)
-                    await session.commit()
+                    # 与后台 PositionSync 共用账户锁，避免 TP 写 Trade 与 sync 双写
+                    async with account_sync_lock(sync_account_id):
+                        await self._position_mgr.check_tp_fills(
+                            session, strategy, auth_binance, 0
+                        )
+                        await session.commit()
                     open_by_norm = await _load_open_by_norm()
                 except Exception as e:
                     logger.exception(
