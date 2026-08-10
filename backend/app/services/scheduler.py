@@ -44,6 +44,7 @@ from .position_manager import (
 )
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem, account_sync_lock
+from .strategy_concurrency import clear_strategy_symbol_locks, hold_strategy_symbol
 from .backup_service import backup_trade
 from .order_times import exit_time_from_order
 
@@ -158,7 +159,7 @@ def _next_period_offset(timeframe: str, offset_sec: int) -> datetime:
     return candidate
 
 
-# 接针策略：持仓管理错开到每根 K 的第 40 秒，把 :00 附近锁让给价流开仓
+# 接针策略：持仓管理错开到每根 K 的第 40 秒；接针开仓只抢币种锁（见 strategy_concurrency）
 _WICK_SPIKE_MANAGE_OFFSET_SEC = 40
 _WICK_SPIKE_TP_OFFSET_SEC = 30
 
@@ -170,6 +171,7 @@ class StrategyScheduler:
         self._exchange_services: dict[int, object] = {}
         self._syncer = PositionSyncService()
         self._position_mgr = PositionManager()
+        # 策略任务锁：仅串行 :30/:40 调度，不阻挡接针价流开仓
         self._strategy_locks: dict[int, asyncio.Lock] = {}
         self._bg_sync_tasks: set[asyncio.Task] = set()
 
@@ -329,6 +331,7 @@ class StrategyScheduler:
         tp_job_id = f"strategy_{strategy_id}_tp"
         self._strategy_tasks.pop(strategy_id, None)
         self._strategy_locks.pop(strategy_id, None)
+        clear_strategy_symbol_locks(strategy_id)
         for jid in (job_id, tp_job_id):
             existing_job = self._scheduler.get_job(jid)
             if existing_job:
@@ -358,6 +361,7 @@ class StrategyScheduler:
             return account_exchange_id(account) if account else "binance"
 
     def _get_strategy_lock(self, strategy_id: int) -> asyncio.Lock:
+        """策略调度任务锁（:30 止盈 / :40 管理）。接针开仓请用 strategy_leg_lock。"""
         if strategy_id not in self._strategy_locks:
             self._strategy_locks[strategy_id] = asyncio.Lock()
         return self._strategy_locks[strategy_id]
@@ -983,32 +987,41 @@ class StrategyScheduler:
 
             # Phase 1a: manage existing positions (TP/martingale/SL).
             # :00 runs after opens; :30 runs manage only (after TP fill check above).
+            # 腿锁：与接针同币同向开仓互斥；其它币/反向腿不受影响。
             for symbol, open_positions in manage_symbols:
+                sym_key = _norm_sym(symbol)
+                # 策略单方向；优先 direction，避免仓位 side 异常时与接针锁键不一致
+                leg_side = (
+                    getattr(strategy, "direction", None)
+                    or (open_positions[0].side if open_positions else None)
+                    or ""
+                )
                 managed_ok = False
-                for attempt in range(3):
-                    try:
-                        await self._position_mgr.manage_symbol(
-                            session, strategy, symbol, auth_binance, public_binance,
-                            open_positions, total_margin, leverage, tick_ctx,
-                        )
-                        await session.commit()
-                        managed_ok = True
-                        break
-                    except Exception as e:
-                        msg = str(e).lower()
-                        locked = "database is locked" in msg or "database locked" in msg
-                        strategy = await _rollback_and_refresh_strategy(session, strategy)
-                        if locked and attempt < 2:
-                            logger.warning(
-                                "Strategy %d: manage %s database locked, retry %d/3",
-                                strategy_id, symbol, attempt + 2,
+                async with hold_strategy_symbol(strategy_id, sym_key, leg_side):
+                    for attempt in range(3):
+                        try:
+                            await self._position_mgr.manage_symbol(
+                                session, strategy, symbol, auth_binance, public_binance,
+                                open_positions, total_margin, leverage, tick_ctx,
                             )
-                            await asyncio.sleep(0.35 * (attempt + 1))
-                            continue
-                        logger.exception(
-                            "Strategy %d: manage %s failed: %s", strategy_id, symbol, e
-                        )
-                        break
+                            await session.commit()
+                            managed_ok = True
+                            break
+                        except Exception as e:
+                            msg = str(e).lower()
+                            locked = "database is locked" in msg or "database locked" in msg
+                            strategy = await _rollback_and_refresh_strategy(session, strategy)
+                            if locked and attempt < 2:
+                                logger.warning(
+                                    "Strategy %d: manage %s database locked, retry %d/3",
+                                    strategy_id, symbol, attempt + 2,
+                                )
+                                await asyncio.sleep(0.35 * (attempt + 1))
+                                continue
+                            logger.exception(
+                                "Strategy %d: manage %s failed: %s", strategy_id, symbol, e
+                            )
+                            break
                 if not managed_ok:
                     continue
 

@@ -2206,6 +2206,8 @@ class PositionManager:
 
     async def check_tp_fills(self, session, strategy, auth_binance, current_price: float):
         from ..models.position import Position
+        from .strategy_concurrency import hold_strategy_symbol
+
         strategy_id = strategy.id
         stmt = select(Position).where(
             Position.strategy_id == strategy_id, Position.closed_at.is_(None)
@@ -2223,51 +2225,53 @@ class PositionManager:
             symbol_side_key = (sym_norm, (p.side or "").lower())
             if symbol_side_key in processed_symbols:
                 continue
+            # 腿锁：与接针同币同向开仓互斥；其它币/反向腿仍可进行
             try:
-                order_info = await asyncio.wait_for(
-                    _fetch_order(auth_binance, p.tp_limit_order_id, p.symbol),
-                    timeout=2.0,
-                )
-                status = (order_info.get("status") or "").lower()
-                avg_fill = _order_fill_avg_price(
-                    order_info, 0.0, allow_order_price=False
-                )
-                if status in ("closed", "filled"):
-                    if avg_fill <= 0:
-                        logger.warning(
-                            "Strategy %d: TP order %s filled but no avg/cumQuote for %s — skip close, retry",
-                            strategy_id,
-                            p.tp_limit_order_id,
-                            p.symbol,
-                        )
-                        continue
-                    symbol_positions = [
-                        op
-                        for op in open_positions
-                        if _norm_sym(op.symbol) == sym_norm
-                        and (op.side or "").lower() == symbol_side_key[1]
-                        and op.closed_at is None
-                    ]
-                    if not symbol_positions:
-                        continue
-                    # 折叠符号竞态留下的重复 L0，避免一条交易所腿写出多条 Trade
-                    symbol_positions = _collapse_phantom_l0_duplicates(symbol_positions)
-                    symbol_positions = [
-                        op for op in symbol_positions if op.closed_at is None
-                    ]
-                    if not symbol_positions:
-                        continue
-                    positions_data = [{"quantity": op.quantity, "entry_price": op.entry_price} for op in symbol_positions]
-                    eng = MartingaleEngine(base_quantity=symbol_positions[0].quantity, multiplier=strategy.martingale_mult,
-                                           max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
-                    avg_entry, _ = eng.get_avg_entry_price(positions_data)
-                    await self._close_positions(
-                        session, strategy, sym_norm, auth_binance, symbol_positions,
-                        eng, avg_entry, p.side, "take_profit", current_price,
-                        pre_exit_price=avg_fill, fill_order=order_info,
+                async with hold_strategy_symbol(strategy_id, sym_norm, p.side):
+                    order_info = await asyncio.wait_for(
+                        _fetch_order(auth_binance, p.tp_limit_order_id, p.symbol),
+                        timeout=2.0,
                     )
-                    logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, sym_norm, avg_fill)
-                    processed_symbols.add(symbol_side_key)
+                    status = (order_info.get("status") or "").lower()
+                    avg_fill = _order_fill_avg_price(
+                        order_info, 0.0, allow_order_price=False
+                    )
+                    if status in ("closed", "filled"):
+                        if avg_fill <= 0:
+                            logger.warning(
+                                "Strategy %d: TP order %s filled but no avg/cumQuote for %s — skip close, retry",
+                                strategy_id,
+                                p.tp_limit_order_id,
+                                p.symbol,
+                            )
+                            continue
+                        symbol_positions = [
+                            op
+                            for op in open_positions
+                            if _norm_sym(op.symbol) == sym_norm
+                            and (op.side or "").lower() == symbol_side_key[1]
+                            and op.closed_at is None
+                        ]
+                        if not symbol_positions:
+                            continue
+                        # 折叠符号竞态留下的重复 L0，避免一条交易所腿写出多条 Trade
+                        symbol_positions = _collapse_phantom_l0_duplicates(symbol_positions)
+                        symbol_positions = [
+                            op for op in symbol_positions if op.closed_at is None
+                        ]
+                        if not symbol_positions:
+                            continue
+                        positions_data = [{"quantity": op.quantity, "entry_price": op.entry_price} for op in symbol_positions]
+                        eng = MartingaleEngine(base_quantity=symbol_positions[0].quantity, multiplier=strategy.martingale_mult,
+                                               max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
+                        avg_entry, _ = eng.get_avg_entry_price(positions_data)
+                        await self._close_positions(
+                            session, strategy, sym_norm, auth_binance, symbol_positions,
+                            eng, avg_entry, p.side, "take_profit", current_price,
+                            pre_exit_price=avg_fill, fill_order=order_info,
+                        )
+                        logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, sym_norm, avg_fill)
+                        processed_symbols.add(symbol_side_key)
             except (Exception, asyncio.TimeoutError):
                 logger.warning("Strategy %d: TP order check failed for %s %s, retrying next cycle", strategy_id, p.symbol, p.side)
 

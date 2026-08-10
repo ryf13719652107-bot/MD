@@ -46,6 +46,7 @@ from .account_position_stream import account_position_stream
 from .position_manager import PositionManager, _norm_sym, RECONCILE_CREATED
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem
+from .strategy_concurrency import hold_strategy_symbol
 from .leverage_prewarm import prewarm_symbols_leverage
 from .wick_spike_engine import (
     WickSpikeParams,
@@ -89,8 +90,8 @@ _BG_REST_SEC = 5.0
 _ARM_REST_SEC = 2.0
 # forming 停滞 REST 纠偏间隔（秒）；过短会在换分钟时打爆 ccxt 限流队列
 _FORMING_REST_SEC = 5.0
-# 抢策略锁最长等待（毫秒级 TP 检测），超时则 release 重试
-_LOCK_WAIT_SEC = 0.12
+# 同策略同币同向腿锁等待；不再抢 :30/:40 任务锁
+_SYMBOL_LOCK_WAIT_SEC = 0.5
 # 成交后写库重试
 _DB_WRITE_RETRIES = 3
 _DB_WRITE_RETRY_DELAY_SEC = 0.35
@@ -900,13 +901,11 @@ class WickSpikeRunner:
     ) -> str:
         """Returns: opened | busy | has_pos | blocked | retryable_fail | committed_fail
 
-        策略锁仅覆盖门禁 + 市价成交；挂止盈/写库在锁外，缩短占锁时间。
+        只持「策略×币种×方向」腿锁覆盖门禁 + 市价成交（不抢 :30/:40 任务锁）；
+        挂止盈/写库在锁外。同向腿 manage/止盈处理仍与开仓互斥。
         """
-        from .scheduler import strategy_scheduler
-
-        lock = strategy_scheduler._get_strategy_lock(strategy_id)
         sym_key = _norm_sym(symbol)
-        side = (signal.value or "").lower()
+        side = (signal.value or getattr(strategy, "direction", None) or "").lower()
 
         def _skip(reason: str, detail: str = "") -> str:
             logger.info(
@@ -918,18 +917,61 @@ class WickSpikeRunner:
             )
             return reason
 
-        # 短等锁：躲过 TP 检测的短暂占用；manage 长占则超时重试
+        # 同策略同币同向短等；管其它币/另一条反向策略不影响
         try:
-            await asyncio.wait_for(lock.acquire(), timeout=_LOCK_WAIT_SEC)
+            async with hold_strategy_symbol(
+                strategy_id, sym_key, side, timeout=_SYMBOL_LOCK_WAIT_SEC
+            ):
+                return await self._try_open_locked(
+                    strategy_id=strategy_id,
+                    strategy=strategy,
+                    symbol=symbol,
+                    sym_key=sym_key,
+                    side=side,
+                    signal=signal,
+                    price=price,
+                    snap=snap,
+                    params=params,
+                    auth=auth,
+                    public=public,
+                    total_margin=total_margin,
+                    leverage=leverage,
+                    tick_ctx=tick_ctx,
+                    trade_ts_ms=trade_ts_ms,
+                    signal_detect_perf=signal_detect_perf,
+                    extreme_override=extreme_override,
+                    skip=_skip,
+                )
         except asyncio.TimeoutError:
             strategy_log_service.info(
                 strategy_id,
-                f"{symbol} 接针触发但调度占锁，稍后重试",
+                f"{symbol} 接针触发但同向腿占用中，稍后重试",
             )
-            return _skip("busy", "lock_timeout")
+            return _skip("busy", "leg_lock_timeout")
 
-        api_res = None
-        early: Optional[str] = None
+    async def _try_open_locked(
+        self,
+        *,
+        strategy_id: int,
+        strategy: Strategy,
+        symbol: str,
+        sym_key: str,
+        side: str,
+        signal: Signal,
+        price: float,
+        snap,
+        params: WickSpikeParams,
+        auth,
+        public,
+        total_margin: float,
+        leverage: float,
+        tick_ctx: TickContext,
+        trade_ts_ms: int,
+        signal_detect_perf: float,
+        extreme_override: float | None,
+        skip,
+    ) -> str:
+        """腿锁内：门禁 + 市价开仓。调用方必须已持有 strategy_leg_lock。"""
         vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
         n = snap.atr * params.atr_mult
         # 优先用武装极值，与 on_tick 决策一致
@@ -947,158 +989,141 @@ class WickSpikeRunner:
         signal_to_order_ms = -1.0
 
         acc_id = int(getattr(strategy, "account_id", 0) or 0)
-        try:
-            if strategy is None or getattr(strategy, "status", None) != "running":
-                early = _skip("retryable_fail", "strategy_not_running")
-                return early
+        if strategy is None or getattr(strategy, "status", None) != "running":
+            return skip("retryable_fail", "strategy_not_running")
 
-            # 内存快照门禁
-            if tick_ctx.exchange_legs.get((sym_key, side), 0) > 0:
-                early = _skip("has_pos", "tick_ctx")
-                return early
-            if sym_key in (tick_ctx.exclude_norm or frozenset()):
-                strategy_log_service.info(
-                    strategy_id, f"{symbol} 接针触发但命中排除/黑名单快照，跳过"
-                )
-                early = _skip("blocked", "exclude_norm")
-                return early
-
-            # 优先 User Data Stream 腿缓存；过期/缺失才 REST
-            stream_qty = (
-                account_position_stream.leg_qty(acc_id, symbol, side)
-                if acc_id > 0
-                else None
+        # 内存快照门禁（持锁后复检，避免与同币 manage 竞态）
+        if tick_ctx.exchange_legs.get((sym_key, side), 0) > 0:
+            return skip("has_pos", "tick_ctx")
+        if sym_key in (tick_ctx.exclude_norm or frozenset()):
+            strategy_log_service.info(
+                strategy_id, f"{symbol} 接针触发但命中排除/黑名单快照，跳过"
             )
-            if stream_qty is not None:
-                if stream_qty > 0:
-                    tick_ctx.exchange_legs[(sym_key, side)] = stream_qty
+            return skip("blocked", "exclude_norm")
+
+        # 优先 User Data Stream 腿缓存；过期/缺失才 REST
+        stream_qty = (
+            account_position_stream.leg_qty(acc_id, symbol, side)
+            if acc_id > 0
+            else None
+        )
+        if stream_qty is not None:
+            if stream_qty > 0:
+                tick_ctx.exchange_legs[(sym_key, side)] = stream_qty
+                strategy_log_service.info(
+                    strategy_id,
+                    f"{symbol} 接针触发但账户流显示已有同向仓，跳过",
+                )
+                return skip("has_pos", "account_stream")
+        else:
+            try:
+                fresh = await auth.fetch_positions([symbol])
+                fresh_legs = exchange_legs_from_positions(fresh or [])
+                if fresh_legs.get((sym_key, side), 0) > 0:
+                    tick_ctx.exchange_legs[(sym_key, side)] = fresh_legs[
+                        (sym_key, side)
+                    ]
+                    if acc_id > 0:
+                        account_position_stream.set_leg(
+                            acc_id,
+                            symbol,
+                            side,
+                            float(fresh_legs[(sym_key, side)]),
+                        )
                     strategy_log_service.info(
                         strategy_id,
-                        f"{symbol} 接针触发但账户流显示已有同向仓，跳过",
+                        f"{symbol} 接针触发但交易所已有同向仓，跳过",
                     )
-                    early = _skip("has_pos", "account_stream")
-                    return early
-            else:
-                try:
-                    fresh = await auth.fetch_positions([symbol])
-                    fresh_legs = exchange_legs_from_positions(fresh or [])
-                    if fresh_legs.get((sym_key, side), 0) > 0:
-                        tick_ctx.exchange_legs[(sym_key, side)] = fresh_legs[
-                            (sym_key, side)
-                        ]
-                        if acc_id > 0:
-                            account_position_stream.set_leg(
-                                acc_id,
-                                symbol,
-                                side,
-                                float(fresh_legs[(sym_key, side)]),
-                            )
-                        strategy_log_service.info(
-                            strategy_id,
-                            f"{symbol} 接针触发但交易所已有同向仓，跳过",
-                        )
-                        early = _skip("has_pos", "rest_positions")
-                        return early
-                except Exception as e:
-                    logger.warning(
-                        "wick_spike %d %s pre-open position recheck failed: %s",
-                        strategy_id,
-                        symbol,
-                        e,
-                    )
-
-            # 黑名单已由选币池过滤 + _passes_new_entry_filters(exclude_norm) + 内存门禁三道防线挡住，
-            # 下单前不再做 DB 复检（省 5-30ms 延迟）。
-
-            detect_ms = (
-                (time.perf_counter() - signal_detect_perf) * 1000.0
-                if signal_detect_perf > 0
-                else -1.0
-            )
-            strategy_log_service.info(
-                strategy_id,
-                f"{symbol} 毫秒接针触发 → {signal.value} "
-                f"价={price:.6g} open={snap.bar_open:.6g} ext={extreme:.6g} "
-                f"N={n:.6g} progress={progress:.2f} tip_gap%={gap:.3f} "
-                f"ATR={snap.atr:.6g} vol×={vol_ratio:.1f} need×={need:g}",
-            )
-            logger.info(
-                "wick_spike trigger strategy=%d %s %s px=%.6g open=%.6g ext=%.6g "
-                "atrN=%.6g progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g "
-                "trade_age_ms=%d detect_to_lock_ms=%.1f "
-                "vol_now=%s sma=%s",
-                strategy_id,
-                symbol,
-                signal.value,
-                price,
-                snap.bar_open,
-                extreme,
-                n,
-                progress,
-                gap,
-                vol_ratio,
-                need,
-                trade_age_ms,
-                detect_ms,
-                f"{snap.vol_now:.1f}",
-                f"{snap.vol_sma:.1f}",
-            )
-
-            base_qty = self._position_mgr._compute_base_qty(strategy, total_margin, price)
-            if base_qty is None:
-                strategy_log_service.warning(
-                    strategy_id, f"{symbol} 接针无法开仓 — 余额无效"
+                    return skip("has_pos", "rest_positions")
+            except Exception as e:
+                logger.warning(
+                    "wick_spike %d %s pre-open position recheck failed: %s",
+                    strategy_id,
+                    symbol,
+                    e,
                 )
-                early = _skip("retryable_fail", "bad_balance")
-                return early
 
-            candidate = SignalCandidate(
-                symbol=symbol,
-                signal=signal,
-                klines=[],
-                current_price=price,
-                rsi=float(vol_ratio),
-                signal_label="毫秒接针",
-                base_qty=base_qty,
+        detect_ms = (
+            (time.perf_counter() - signal_detect_perf) * 1000.0
+            if signal_detect_perf > 0
+            else -1.0
+        )
+        strategy_log_service.info(
+            strategy_id,
+            f"{symbol} 毫秒接针触发 → {signal.value} "
+            f"价={price:.6g} open={snap.bar_open:.6g} ext={extreme:.6g} "
+            f"N={n:.6g} progress={progress:.2f} tip_gap%={gap:.3f} "
+            f"ATR={snap.atr:.6g} vol×={vol_ratio:.1f} need×={need:g}",
+        )
+        logger.info(
+            "wick_spike trigger strategy=%d %s %s px=%.6g open=%.6g ext=%.6g "
+            "atrN=%.6g progress=%.2f tip_gap%%=%.3f vol×=%.2f need×=%g "
+            "trade_age_ms=%d detect_to_lock_ms=%.1f "
+            "vol_now=%s sma=%s",
+            strategy_id,
+            symbol,
+            signal.value,
+            price,
+            snap.bar_open,
+            extreme,
+            n,
+            progress,
+            gap,
+            vol_ratio,
+            need,
+            trade_age_ms,
+            detect_ms,
+            f"{snap.vol_now:.1f}",
+            f"{snap.vol_sma:.1f}",
+        )
+
+        base_qty = self._position_mgr._compute_base_qty(strategy, total_margin, price)
+        if base_qty is None:
+            strategy_log_service.warning(
+                strategy_id, f"{symbol} 接针无法开仓 — 余额无效"
             )
+            return skip("retryable_fail", "bad_balance")
 
-            # 市价下单（含账户锁 + 必要时设杠杆 + 黑名单热复检）
-            order_sem = account_order_sem(strategy.account_id)
-            t_api0 = time.perf_counter()
-            async with order_sem:
-                api_res = await self._position_mgr.execute_wick_open_market(
-                    candidate, strategy, auth, leverage
-                )
-            t_filled = time.perf_counter()
-            open_api_ms = (t_filled - t_api0) * 1000.0
-            signal_to_order_ms = (
-                (t_filled - signal_detect_perf) * 1000.0
-                if signal_detect_perf > 0
-                else -1.0
+        candidate = SignalCandidate(
+            symbol=symbol,
+            signal=signal,
+            klines=[],
+            current_price=price,
+            rsi=float(vol_ratio),
+            signal_label="毫秒接针",
+            base_qty=base_qty,
+        )
+
+        # 市价下单（账户下单信号量 + 必要时设杠杆）
+        order_sem = account_order_sem(strategy.account_id)
+        t_api0 = time.perf_counter()
+        async with order_sem:
+            api_res = await self._position_mgr.execute_wick_open_market(
+                candidate, strategy, auth, leverage
             )
-            if api_res is None:
-                early = _skip("retryable_fail", "order_none")
-                return early
-
-            # 成交后立刻更新内存腿，防止锁外窗口重复开
-            fill_q = float(api_res.filled_qty or 0)
-            tick_ctx.exchange_legs[(sym_key, side)] = (
-                tick_ctx.exchange_legs.get((sym_key, side), 0) + fill_q
-            )
-            if acc_id > 0 and fill_q > 0:
-                account_position_stream.apply_local_fill(
-                    acc_id, symbol, side, fill_q
-                )
-        finally:
-            lock.release()
-
-        if early is not None:
-            return early
+        t_filled = time.perf_counter()
+        open_api_ms = (t_filled - t_api0) * 1000.0
+        signal_to_order_ms = (
+            (t_filled - signal_detect_perf) * 1000.0
+            if signal_detect_perf > 0
+            else -1.0
+        )
         if api_res is None:
-            return "retryable_fail"
+            return skip("retryable_fail", "order_none")
+
+        # 成交后立刻更新内存腿，防止锁外窗口重复开
+        fill_q = float(api_res.filled_qty or 0)
+        tick_ctx.exchange_legs[(sym_key, side)] = (
+            tick_ctx.exchange_legs.get((sym_key, side), 0) + fill_q
+        )
+        if acc_id > 0 and fill_q > 0:
+            account_position_stream.apply_local_fill(
+                acc_id, symbol, side, fill_q
+            )
 
         # 锁外：挂止盈 + 写库丢后台 fire-and-forget，主循环立即继续扫描其他 symbol
         # （内存腿已更新 + apply_local_fill，防双开不受影响；DB 失败有 orphan reconcile 兜底）
+        # 注意：_post_open 在币种锁释放前已 schedule；实际 IO 在锁外执行
         self._fire_bg(self._post_open_async(
             strategy_id, strategy, api_res, auth, signal,
             price, snap, extreme, n, progress, gap, vol_ratio, need,
