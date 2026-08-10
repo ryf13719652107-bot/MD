@@ -134,10 +134,10 @@ function toFormDefaults(
       st_factor: initialData.st_factor ?? 3,
       st_timeframe_1: (initialData.st_timeframe_1 as StrategyFormData['st_timeframe_1']) || '15m',
       st_timeframe_2: (initialData.st_timeframe_2 as StrategyFormData['st_timeframe_2']) || '30m',
-      wick_volume_mult: initialData.wick_volume_mult ?? 8,
+      wick_volume_mult: initialData.wick_volume_mult ?? 6,
       wick_volume_sma_period: initialData.wick_volume_sma_period ?? 20,
       wick_atr_period: initialData.wick_atr_period ?? 14,
-      wick_spike_atr_mult: initialData.wick_spike_atr_mult ?? 5,
+      wick_spike_atr_mult: initialData.wick_spike_atr_mult ?? 4,
       wick_cooldown_sec: initialData.wick_cooldown_sec ?? 0,
       wick_amp_vol_relax_enabled: initialData.wick_amp_vol_relax_enabled ?? true,
       wick_vol_relax_progress_start: initialData.wick_vol_relax_progress_start ?? 1,
@@ -146,9 +146,9 @@ function toFormDefaults(
       wick_min_move_pct: initialData.wick_min_move_pct ?? 3,
       wick_max_retrace_pct: initialData.wick_max_retrace_pct ?? 50,
       wick_arm_wait_sec: initialData.wick_arm_wait_sec ?? 12,
-      wick_arm_retrace_grace_sec: initialData.wick_arm_retrace_grace_sec ?? 3,
+      wick_arm_retrace_grace_sec: initialData.wick_arm_retrace_grace_sec ?? 5,
       wick_arm_grace_max_tip_gap_pct: initialData.wick_arm_grace_max_tip_gap_pct ?? 2,
-      wick_rebound_enabled: initialData.wick_rebound_enabled ?? false,
+      wick_rebound_enabled: initialData.wick_rebound_enabled ?? true,
       wick_rebound_trigger_pct: initialData.wick_rebound_trigger_pct ?? 20,
       wick_rebound_abort_pct: initialData.wick_rebound_abort_pct ?? 35,
       wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 5,
@@ -213,10 +213,10 @@ function toFormDefaults(
     st_factor: 3,
     st_timeframe_1: '15m',
     st_timeframe_2: '30m',
-    wick_volume_mult: 8,
+    wick_volume_mult: 6,
     wick_volume_sma_period: 20,
     wick_atr_period: 14,
-    wick_spike_atr_mult: 5,
+    wick_spike_atr_mult: 4,
     wick_cooldown_sec: 0,
     wick_amp_vol_relax_enabled: true,
     wick_vol_relax_progress_start: 1,
@@ -225,9 +225,9 @@ function toFormDefaults(
     wick_min_move_pct: 3,
     wick_max_retrace_pct: 50,
     wick_arm_wait_sec: 12,
-    wick_arm_retrace_grace_sec: 3,
+    wick_arm_retrace_grace_sec: 5,
     wick_arm_grace_max_tip_gap_pct: 2,
-    wick_rebound_enabled: false,
+    wick_rebound_enabled: true,
     wick_rebound_trigger_pct: 20,
     wick_rebound_abort_pct: 35,
     wick_rebound_wait_sec: 5,
@@ -402,7 +402,7 @@ export default function StrategyForm({
         {signalSource === 'wick_spike' && (
           <div className="space-y-3">
             <div className="rounded-md border border-cyan-700/50 bg-cyan-900/20 px-3 py-2 text-xs text-cyan-200 space-y-1">
-              <p>毫秒接针：仅币安。先放量（当前量 ≥ Vol SMA × 倍数），再用本根极值追认「开盘价 ± 上根 ATR × 倍数」。默认 confirm 后立刻市价；开启下方「市价反弹追踪」则等针尖反弹再开仓。</p>
+              <p>毫秒接针：仅币安。先放量（当前量 ≥ Vol SMA × 倍数），再用本根极值追认「开盘价 ± 上根 ATR × 倍数」。默认开启「市价反弹追踪」：confirm 后等针尖反弹再开仓。</p>
               <p>调度错峰：持仓管理在每根 K 第 40 秒，止盈检测第 30 秒；:00 附近不占锁，留给价流开仓。止盈/层数下方手填；加仓模式在马丁区选择「仅涨跌幅」或「涨跌幅+WT」。</p>
             </div>
             <div>
@@ -421,7 +421,7 @@ export default function StrategyForm({
               <div>
                 <label className={labelClass}>放量倍数（相对 Vol SMA）</label>
                 <input type="number" step="0.1" {...register('wick_volume_mult', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">默认 8；填 0 关闭放量过滤</span>
+                <span className="text-xs text-gray-600">默认 6；填 0 关闭放量过滤</span>
               </div>
               <div>
                 <label className={labelClass}>成交量 SMA 周期</label>
@@ -436,7 +436,7 @@ export default function StrategyForm({
               <div>
                 <label className={labelClass}>刺出 ATR 倍数</label>
                 <input type="number" step="0.1" {...register('wick_spike_atr_mult', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">N = ATR × 该值；默认 5</span>
+                <span className="text-xs text-gray-600">N = ATR × 该值；默认 4</span>
               </div>
               <div>
                 <label className={labelClass}>最小涨跌幅 %</label>
@@ -456,7 +456,7 @@ export default function StrategyForm({
               <div>
                 <label className={labelClass}>等量免回撤(秒)</label>
                 <input type="number" step="0.5" {...register('wick_arm_retrace_grace_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">武装时量不够，确认前 N 秒免回撤；默认 3</span>
+                <span className="text-xs text-gray-600">武装时量不够，确认前 N 秒免回撤；默认 5</span>
               </div>
               <div>
                 <label className={labelClass}>免回撤 tip_gap% 上限</label>
@@ -493,7 +493,7 @@ export default function StrategyForm({
                 </label>
               </label>
               <span className="text-xs text-gray-600">
-                默认关。开启后 confirm 达标不立刻下单，等价格从针尖反弹到「触发%」再市价；针尖可加深。confirm 回撤上限会与「放弃%」取较小，避免进窗即放弃。
+                默认开。confirm 达标不立刻下单，等价格从针尖反弹到「触发%」再市价；针尖可加深。confirm 回撤上限会与「放弃%」取较小，避免进窗即放弃。
               </span>
             </div>
             <div className="grid grid-cols-3 gap-3">

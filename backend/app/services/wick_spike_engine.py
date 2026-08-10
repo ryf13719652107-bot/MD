@@ -17,11 +17,12 @@ progress 量能放宽（可选，默认开）：
 min_move_pct（默认 3）：本根极值相对开盘的涨跌幅 % 须 ≥ 该值才允许武装；0=关闭。
 max_retrace_pct（默认 50）：现价相对「开盘→极值」已回撤的比例 %；超过则跳过；0=关闭。
 arm_wait_sec（默认 12）：刺破后最多等多久的量；0=关闭武装（恢复旧「同刻全条件」）。
-arm_retrace_grace_sec（默认 3）：武装时量不够，则确认时前 N 秒免回撤门禁。
+arm_retrace_grace_sec（默认 5）：武装时量不够，则确认时前 N 秒免回撤门禁。
 arm_grace_max_tip_gap_pct（默认 2）：grace 免回撤时，进场价相对极值的 tip_gap% 上限；0=不限制。
 超时作废后若同根仍刺破可再次武装（量滞后于价时给量能追上来的机会）。
 
 反弹追踪（方案J，rebound_enabled）：
+  产品新建策略默认开（见 ORM/表单）；本 dataclass 默认关便于单测立刻市价路径。
   confirm 达标后不立刻市价，进入反弹窗；针尖可加深；
   现价从针尖反弹达 trigger% → 市价信号（保留 rebound 态，开仓失败可同根重试）；
   反弹达 abort% 或超时 → 放弃。
@@ -46,15 +47,15 @@ _VOL_RELAX_MULT = 5.0
 _MIN_MOVE_PCT = 3.0
 _MAX_RETRACE_PCT = 50.0
 _ARM_WAIT_SEC = 12.0
-_ARM_RETRACE_GRACE_SEC = 6.0
+_ARM_RETRACE_GRACE_SEC = 5.0
 _ARM_GRACE_MAX_TIP_GAP_PCT = 2.0
 
 
 @dataclass
 class WickSpikeParams:
     direction: str  # "long" | "short"
-    volume_mult: float = 8.0
-    atr_mult: float = 5.0
+    volume_mult: float = 6.0
+    atr_mult: float = 4.0
     cooldown_sec: float = 0.0
     # progress 量能放宽（默认开）
     vol_relax_enabled: bool = True
@@ -71,7 +72,7 @@ class WickSpikeParams:
     arm_retrace_grace_sec: float = _ARM_RETRACE_GRACE_SEC
     # grace 免回撤时 tip_gap% 上限（0=不限制）
     arm_grace_max_tip_gap_pct: float = _ARM_GRACE_MAX_TIP_GAP_PCT
-    # 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价，追踪真针尖
+    # 反弹追踪（方案J）；产品层默认开，此处默认关（单测立刻市价路径）
     rebound_enabled: bool = False
     rebound_trigger_pct: float = 20.0  # 反弹占针深%触发市价
     rebound_abort_pct: float = 35.0    # 反弹占针深%放弃

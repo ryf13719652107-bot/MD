@@ -22,10 +22,10 @@ class Strategy(Base):
     signal_source: Mapped[str] = mapped_column(String(20), default="wavetrend", server_default="wavetrend")  # 'rsi' | 'wavetrend' | 'trend_wt' | 'martingale_base' | 'wick_spike'
 
     # Wick spike (毫秒接针) params — only used when signal_source == wick_spike
-    wick_volume_mult: Mapped[float] = mapped_column(Float, default=8.0, server_default="8.0")
+    wick_volume_mult: Mapped[float] = mapped_column(Float, default=6.0, server_default="6.0")
     wick_volume_sma_period: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
     wick_atr_period: Mapped[int] = mapped_column(Integer, default=14, server_default="14")
-    wick_spike_atr_mult: Mapped[float] = mapped_column(Float, default=5.0, server_default="5.0")
+    wick_spike_atr_mult: Mapped[float] = mapped_column(Float, default=4.0, server_default="4.0")
     wick_cooldown_sec: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # progress 量能放宽（默认开）：刺破后按 progress 线性把量能收到 relax_mult
     wick_amp_vol_relax_enabled: Mapped[bool] = mapped_column(
@@ -54,7 +54,7 @@ class Strategy(Base):
     )
     # 武装时量不够，确认阶段前 N 秒免回撤；0=不放宽
     wick_arm_retrace_grace_sec: Mapped[float] = mapped_column(
-        Float, default=6.0, server_default="6.0"
+        Float, default=5.0, server_default="5.0"
     )
     # grace 免回撤时 tip_gap% 上限；0=不限制
     wick_arm_grace_max_tip_gap_pct: Mapped[float] = mapped_column(
@@ -62,7 +62,7 @@ class Strategy(Base):
     )
     # 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价，追踪真针尖
     wick_rebound_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0"
+        Boolean, default=True, server_default="1"
     )
     # 反弹占针深%触发市价（开盘100针尖90，深10%，20%=92触发）
     wick_rebound_trigger_pct: Mapped[float] = mapped_column(

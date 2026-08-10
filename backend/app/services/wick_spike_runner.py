@@ -102,8 +102,8 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
     relax_flag = getattr(strategy, "wick_amp_vol_relax_enabled", None)
     params = WickSpikeParams(
         direction=strategy.direction,
-        volume_mult=float(getattr(strategy, "wick_volume_mult", 8.0) or 0),
-        atr_mult=float(getattr(strategy, "wick_spike_atr_mult", 5.0) or 5.0),
+        volume_mult=float(getattr(strategy, "wick_volume_mult", 6.0) or 0),
+        atr_mult=float(getattr(strategy, "wick_spike_atr_mult", 4.0) or 4.0),
         cooldown_sec=float(getattr(strategy, "wick_cooldown_sec", 0) or 0),
         vol_relax_enabled=True if relax_flag is None else bool(relax_flag),
         vol_relax_progress_start=float(
@@ -129,17 +129,21 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             else 12.0
         ),
         arm_retrace_grace_sec=float(
-            getattr(strategy, "wick_arm_retrace_grace_sec", 6.0)
+            getattr(strategy, "wick_arm_retrace_grace_sec", 5.0)
             if getattr(strategy, "wick_arm_retrace_grace_sec", None) is not None
-            else 6.0
+            else 5.0
         ),
         arm_grace_max_tip_gap_pct=float(
             getattr(strategy, "wick_arm_grace_max_tip_gap_pct", 2.0)
             if getattr(strategy, "wick_arm_grace_max_tip_gap_pct", None) is not None
             else 2.0
         ),
-        # 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价
-        rebound_enabled=bool(getattr(strategy, "wick_rebound_enabled", False) or False),
+        # 反弹追踪（方案J）：confirm后等价格从针尖反弹触发市价；默认开
+        rebound_enabled=(
+            True
+            if getattr(strategy, "wick_rebound_enabled", None) is None
+            else bool(strategy.wick_rebound_enabled)
+        ),
         rebound_trigger_pct=float(
             getattr(strategy, "wick_rebound_trigger_pct", 20.0)
             if getattr(strategy, "wick_rebound_trigger_pct", None) is not None

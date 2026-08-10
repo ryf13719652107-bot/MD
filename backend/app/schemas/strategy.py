@@ -90,10 +90,10 @@ class StrategyCreate(BaseModel):
         description="????????????????%): ???>?????????????????????",
     )
     # Wick spike
-    wick_volume_mult: float = Field(default=8.0, ge=0, le=100)
+    wick_volume_mult: float = Field(default=6.0, ge=0, le=100)
     wick_volume_sma_period: int = Field(default=20, ge=2, le=200)
     wick_atr_period: int = Field(default=14, ge=2, le=100)
-    wick_spike_atr_mult: float = Field(default=5.0, gt=0, le=50)
+    wick_spike_atr_mult: float = Field(default=4.0, gt=0, le=50)
     wick_cooldown_sec: int = Field(default=0, ge=0, le=3600)
     wick_amp_vol_relax_enabled: bool = True
     wick_vol_relax_progress_start: float = Field(default=1.0, ge=0, le=10)
@@ -118,7 +118,7 @@ class StrategyCreate(BaseModel):
         description="刺破后等量窗口秒数；0=关闭武装",
     )
     wick_arm_retrace_grace_sec: float = Field(
-        default=3.0,
+        default=5.0,
         ge=0,
         le=60,
         description="武装时量不够则确认前N秒免回撤",
@@ -130,7 +130,7 @@ class StrategyCreate(BaseModel):
         description="grace免回撤时tip_gap%上限；0=不限制",
     )
     wick_rebound_enabled: bool = Field(
-        default=False,
+        default=True,
         description="市价反弹追踪（方案J）：confirm后等针尖反弹触发市价，追踪真针尖",
     )
     wick_rebound_trigger_pct: float = Field(
@@ -293,10 +293,10 @@ class StrategyResponse(BaseModel):
     exclude_mainstream: bool
     exclude_funding: bool
     funding_rate_threshold_pct: float
-    wick_volume_mult: float = 8.0
+    wick_volume_mult: float = 6.0
     wick_volume_sma_period: int = 20
     wick_atr_period: int = 14
-    wick_spike_atr_mult: float = 5.0
+    wick_spike_atr_mult: float = 4.0
     wick_cooldown_sec: int = 0
     wick_amp_vol_relax_enabled: bool = True
     wick_vol_relax_progress_start: float = 1.0
@@ -305,9 +305,9 @@ class StrategyResponse(BaseModel):
     wick_min_move_pct: float = 3.0
     wick_max_retrace_pct: float = 50.0
     wick_arm_wait_sec: float = 12.0
-    wick_arm_retrace_grace_sec: float = 3.0
+    wick_arm_retrace_grace_sec: float = 5.0
     wick_arm_grace_max_tip_gap_pct: float = 2.0
-    wick_rebound_enabled: bool = False
+    wick_rebound_enabled: bool = True
     wick_rebound_trigger_pct: float = 20.0
     wick_rebound_abort_pct: float = 35.0
     wick_rebound_wait_sec: float = 5.0

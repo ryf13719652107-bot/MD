@@ -77,10 +77,10 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN st_timeframe_1 VARCHAR(10) DEFAULT '15m'",
             "ALTER TABLE strategies ADD COLUMN st_timeframe_2 VARCHAR(10) DEFAULT '30m'",
             "ALTER TABLE strategies ADD COLUMN martingale_st_filter_enabled BOOLEAN DEFAULT 0",
-            "ALTER TABLE strategies ADD COLUMN wick_volume_mult FLOAT DEFAULT 8.0",
+            "ALTER TABLE strategies ADD COLUMN wick_volume_mult FLOAT DEFAULT 6.0",
             "ALTER TABLE strategies ADD COLUMN wick_volume_sma_period INTEGER DEFAULT 20",
             "ALTER TABLE strategies ADD COLUMN wick_atr_period INTEGER DEFAULT 14",
-            "ALTER TABLE strategies ADD COLUMN wick_spike_atr_mult FLOAT DEFAULT 5.0",
+            "ALTER TABLE strategies ADD COLUMN wick_spike_atr_mult FLOAT DEFAULT 4.0",
             "ALTER TABLE strategies ADD COLUMN wick_cooldown_sec INTEGER DEFAULT 0",
             "ALTER TABLE strategies ADD COLUMN wick_amp_vol_relax_enabled BOOLEAN DEFAULT 1",
             "ALTER TABLE strategies ADD COLUMN wick_vol_relax_progress_start FLOAT DEFAULT 1.0",
@@ -89,9 +89,9 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN wick_min_move_pct FLOAT DEFAULT 3.0",
             "ALTER TABLE strategies ADD COLUMN wick_max_retrace_pct FLOAT DEFAULT 50.0",
             "ALTER TABLE strategies ADD COLUMN wick_arm_wait_sec FLOAT DEFAULT 12.0",
-            "ALTER TABLE strategies ADD COLUMN wick_arm_retrace_grace_sec FLOAT DEFAULT 3.0",
+            "ALTER TABLE strategies ADD COLUMN wick_arm_retrace_grace_sec FLOAT DEFAULT 5.0",
             "ALTER TABLE strategies ADD COLUMN wick_arm_grace_max_tip_gap_pct FLOAT DEFAULT 2.0",
-            "ALTER TABLE strategies ADD COLUMN wick_rebound_enabled BOOLEAN DEFAULT 0",
+            "ALTER TABLE strategies ADD COLUMN wick_rebound_enabled BOOLEAN DEFAULT 1",
             "ALTER TABLE strategies ADD COLUMN wick_rebound_trigger_pct FLOAT DEFAULT 20.0",
             "ALTER TABLE strategies ADD COLUMN wick_rebound_abort_pct FLOAT DEFAULT 35.0",
             "ALTER TABLE strategies ADD COLUMN wick_rebound_wait_sec FLOAT DEFAULT 5.0",
@@ -241,7 +241,7 @@ async def init_db():
         try:
             await conn.run_sync(
                 lambda c: c.exec_driver_sql(
-                    "UPDATE strategies SET wick_arm_retrace_grace_sec=3.0 "
+                    "UPDATE strategies SET wick_arm_retrace_grace_sec=5.0 "
                     "WHERE wick_arm_retrace_grace_sec IS NULL"
                 )
             )
@@ -261,7 +261,7 @@ async def init_db():
         try:
             await conn.run_sync(
                 lambda c: c.exec_driver_sql(
-                    "UPDATE strategies SET wick_rebound_enabled=0 "
+                    "UPDATE strategies SET wick_rebound_enabled=1 "
                     "WHERE wick_rebound_enabled IS NULL"
                 )
             )
