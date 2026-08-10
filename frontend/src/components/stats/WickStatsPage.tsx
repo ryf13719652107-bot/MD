@@ -9,6 +9,7 @@ import {
 import { useDashboardStore } from '../../store/dashboardStore';
 
 type SignalFilter = 'wick_spike' | 'wavetrend' | 'all';
+type DaysFilter = 7 | 14 | 30 | 0;
 
 function fmtPct(s?: WickStatsSummary) {
   if (!s || !s.n) return '暂无数据';
@@ -60,6 +61,7 @@ export default function WickStatsPage() {
   const [listLimit, setListLimit] = useState(80);
   const [includeRotated, setIncludeRotated] = useState(true);
   const [enrichOpens, setEnrichOpens] = useState(true);
+  const [days, setDays] = useState<DaysFilter>(7);
   const [loading, setLoading] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [data, setData] = useState<WickStatsAnalysis | null>(null);
@@ -85,6 +87,7 @@ export default function WickStatsPage() {
         include_rotated: includeRotated,
         enrich_opens: enrichOpens,
         max_enrich: 40,
+        days,
       });
       setData(res);
       if (!res.ok) setError(res.error || '分析失败');
@@ -94,7 +97,7 @@ export default function WickStatsPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedAccountId, signalSource, progressMin, listLimit, includeRotated, enrichOpens]);
+  }, [selectedAccountId, signalSource, progressMin, listLimit, includeRotated, enrichOpens, days]);
 
   const clearLogs = useCallback(async () => {
     if (selectedAccountId == null) {
@@ -177,8 +180,7 @@ export default function WickStatsPage() {
             接针统计
           </h2>
           <p className="text-xs text-gray-500 mt-1">
-            必须先选顶栏账户，再按信号源（接针 / WT）筛选。扫描该账户策略的服务器日志：贴尖、速度、近失卡点。
-            刚上线时可先「清除接针日志」再重新采集。
+            必须先选顶栏账户，再按信号源筛选。默认近 7 天窗口；周复盘五指标只用完整事件（trigger/opened/skip/rebound），不用近失节流次数。
           </p>
           <p className="text-xs mt-1">
             {noAccount ? (
@@ -342,6 +344,20 @@ export default function WickStatsPage() {
           <p className="text-[11px] text-gray-600 mt-1">统计仍只读接针日志行；WT 用于排除混入</p>
         </div>
         <div>
+          <label className="text-xs text-gray-400 block mb-1">时间窗口</label>
+          <select
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value) as DaysFilter)}
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm min-w-[140px]"
+          >
+            <option value={7}>近 7 天（周复盘）</option>
+            <option value={14}>近 14 天</option>
+            <option value={30}>近 30 天</option>
+            <option value={0}>不限（全部可读日志）</option>
+          </select>
+          <p className="text-[11px] text-gray-600 mt-1">整页统计与五指标共用此时窗</p>
+        </div>
+        <div>
           <label className="text-xs text-gray-400 block mb-1">深针刺破进度 ≥</label>
           <input
             type="number"
@@ -408,9 +424,53 @@ export default function WickStatsPage() {
             </div>
           )}
 
+          {data.weekly_review && (
+            <div className="bg-gray-900 border border-cyan-900/50 rounded-lg p-4 space-y-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-sm font-semibold text-cyan-300">周复盘 · 五指标</h3>
+                <p className="text-[11px] text-gray-500 font-mono">
+                  {data.weekly_review.since} → {data.weekly_review.until}
+                  {data.weekly_review.days > 0
+                    ? `（近 ${data.weekly_review.days} 天）`
+                    : '（不限窗）'}
+                </p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+                {data.weekly_review.metrics.map((m) => (
+                  <div
+                    key={m.id}
+                    className="rounded-lg border border-gray-800 bg-gray-950/60 p-3 space-y-1.5"
+                  >
+                    <div className="text-[11px] text-gray-500">{m.title}</div>
+                    <div className="text-sm font-medium text-gray-100 leading-snug">{m.value}</div>
+                    <p className="text-[10px] text-emerald-600/90 leading-snug">准：{m.accuracy}</p>
+                    <p className="text-[10px] text-gray-500 leading-snug">用：{m.how_to_use}</p>
+                  </div>
+                ))}
+              </div>
+              {(data.weekly_review.actions?.length ?? 0) > 0 && (
+                <div className="text-xs space-y-1">
+                  <div className="text-amber-400/90 font-medium">本周建议</div>
+                  <ul className="list-disc list-inside text-gray-400 space-y-0.5">
+                    {data.weekly_review.actions.map((a, i) => (
+                      <li key={i}>{a}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {(data.weekly_review.notes?.length ?? 0) > 0 && (
+                <ul className="text-[10px] text-gray-600 space-y-0.5 list-disc list-inside">
+                  {data.weekly_review.notes.map((n, i) => (
+                    <li key={i}>{n}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
-              <div className="text-xs text-gray-500">近失记录</div>
+              <div className="text-xs text-gray-500">近失记录（有节流，仅参考）</div>
               <div className="text-xl font-semibold text-gray-100">{data.near_miss_total}</div>
             </div>
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">

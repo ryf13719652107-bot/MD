@@ -196,3 +196,105 @@ def test_clear_wick_spike_lines_by_strategy(tmp_path):
     assert "strategy=90 " in text
     assert "keep me unrelated" in text
 
+
+def test_parse_skip_and_rebound():
+    skip_line = (
+        "2026-08-11 01:00:41 [INFO] x: wick_spike skip strategy=13 GRVTUSDT "
+        "reason=busy leg_lock_timeout"
+    )
+    skip = parse_line(skip_line)
+    assert skip is not None
+    assert skip.reason == "busy"
+    assert "leg_lock" in skip.detail
+
+    # CRLF 行经 iter 去 \r 后仍可解析（_SKIP_RE 带 $）
+    skip_crlf = parse_line(skip_line + "\r")
+    assert skip_crlf is not None
+    assert skip_crlf.reason == "busy"
+
+    rb_line = (
+        "2026-08-11 01:00:41 [INFO] x: wick_spike rebound_fire strategy=13 GRVTUSDT "
+        "px=0.37 rb_ext=0.3788 arm_age_ms=100 wait=5.0s trig%=20 abort%=35"
+    )
+    rb = parse_line(rb_line)
+    assert rb is not None
+    assert rb.event == "rebound_fire"
+    assert rb.symbol == "GRVTUSDT"
+
+
+def test_iter_log_lines_strips_crlf(tmp_path):
+    from app.services.wick_spike_log_stats import analyze_paths
+
+    log = tmp_path / "bot.log"
+    log.write_bytes(
+        (
+            "2026-08-11 01:00:41 [INFO] x: wick_spike skip strategy=13 GRVTUSDT "
+            "reason=busy leg_lock_timeout\r\n"
+        ).encode("utf-8")
+    )
+    report = analyze_paths([log])
+    assert len(report.skips) == 1
+    assert report.skips[0].reason == "busy"
+
+
+def test_weekly_review_uses_complete_events_only(tmp_path):
+    from app.services.wick_spike_log_stats import (
+        build_weekly_review,
+        filter_report_by_time,
+    )
+
+    log = tmp_path / "bot.log"
+    log.write_text(
+        "\n".join(
+            [
+                # 窗外 — 不应计入
+                "2026-07-01 10:00:00 [INFO] x: wick_spike trigger strategy=10 OLDUSDT long "
+                "px=1.0 open=1.05 ext=0.98 atrN=0.02 progress=3.50 tip_gap%=9.9 "
+                "vol×=5.20 need×=5 trade_age_ms=20 detect_to_lock_ms=1.5",
+                # 窗内
+                "2026-08-10 10:00:00 [INFO] x: wick_spike trigger strategy=10 AAAUSDT long "
+                "px=1.0 open=1.05 ext=0.98 atrN=0.02 progress=3.50 tip_gap%=1.2 "
+                "vol×=5.20 need×=5 trade_age_ms=20 detect_to_lock_ms=1.5",
+                "2026-08-10 10:00:01 [INFO] x: wick_spike opened strategy=10 AAAUSDT "
+                "open_api_ms=90 signal_to_order_ms=120 trade_age_ms=25 "
+                "px=1.0 open=1.05 ext=0.98 progress=3.50 tip_gap%=1.2 vol×=5.20 need×=5",
+                "2026-08-10 10:00:02 [INFO] x: wick_spike skip strategy=10 BBBUSDT "
+                "reason=busy lock_timeout",
+                "2026-08-10 10:00:03 [INFO] x: wick_spike rebound_enter strategy=10 CCCUSDT "
+                "px=1 rb_ext=1.1 arm_age_ms=0 wait=5.0s trig%=20 abort%=35",
+                "2026-08-10 10:00:04 [INFO] x: wick_spike rebound_abort strategy=10 CCCUSDT "
+                "px=1 rb_ext=1.1 arm_age_ms=0 wait=5.0s trig%=20 abort%=35",
+                # 近失节流样本 — 不得进入五指标分母
+                "2026-08-10 10:00:05 [INFO] x: wick_spike near-miss strategy=10 DDDUSDT "
+                "dir=short px=0.022 open=0.021 ext=0.0225 thr=0.0215 pierce=True "
+                "atrN=0.001 progress=1.66 vol×=4.90 need×=8 vol_hot=False",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    report = filter_report_by_time(
+        analyze_paths([log]),
+        since_ts="2026-08-01 00:00:00",
+        until_ts="2026-08-31 23:59:59",
+    )
+    assert len(report.entries) == 2
+    assert len(report.skips) == 1
+    wr = build_weekly_review(
+        report,
+        since_ts="2026-08-01 00:00:00",
+        until_ts="2026-08-31 23:59:59",
+        days=7,
+    )
+    by_id = {m["id"]: m for m in wr["metrics"]}
+    assert by_id["funnel"]["detail"]["trigger_total"] == 1
+    assert by_id["funnel"]["detail"]["opened_total"] == 1
+    assert abs(by_id["funnel"]["detail"]["conversion"] - 1.0) < 1e-9
+    assert by_id["tip_gap"]["detail"]["n"] == 1
+    assert abs(by_id["tip_gap"]["detail"]["p50"] - 1.2) < 1e-9
+    assert by_id["lock_skip"]["detail"]["count"] == 1
+    assert by_id["rebound"]["detail"]["enter"] == 1
+    assert by_id["rebound"]["detail"]["fail"] == 1
+    assert by_id["rebound"]["detail"]["fire"] == 0
+    assert "近失" in wr["notes"][0]
+    assert "busy" in wr["notes"][2] or "trigger" in wr["notes"][2]
+

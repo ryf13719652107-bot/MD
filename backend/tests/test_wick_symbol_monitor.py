@@ -1,6 +1,8 @@
 from app.services.wick_spike_log_stats import (
     EntryRow,
     NearMissRow,
+    ReboundRow,
+    SkipRow,
     WickLogReport,
     build_symbol_monitor,
 )
@@ -68,3 +70,34 @@ def test_build_symbol_monitor_empty_note():
     out = build_symbol_monitor(WickLogReport(), "PTBUSDT")
     assert out["total"] == 0
     assert "没有" in out["note"] or "无" in out["note"]
+
+
+def test_build_symbol_monitor_includes_skip_and_rebound():
+    report = WickLogReport(
+        skips=[
+            SkipRow(
+                ts="2026-08-11 01:00:41",
+                strategy_id=13,
+                symbol="GRVTUSDT",
+                reason="busy",
+                detail="leg_lock_timeout",
+            )
+        ],
+        rebounds=[
+            ReboundRow(
+                ts="2026-08-11 01:00:40",
+                strategy_id=13,
+                symbol="GRVTUSDT",
+                event="rebound_fire",
+            )
+        ],
+    )
+    out = build_symbol_monitor(report, "GRVT", list_limit=10)
+    assert out["skip_n"] == 1
+    assert out["rebound_n"] == 1
+    assert out["total"] == 2
+    kinds = {r["kind"] for r in out["rows"]}
+    assert "skip" in kinds and "rebound" in kinds
+    reasons = " ".join(r["reason"] for r in out["rows"])
+    assert "腿锁" in reasons or "busy" in reasons
+    assert "开火" in reasons

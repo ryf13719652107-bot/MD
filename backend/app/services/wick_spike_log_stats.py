@@ -55,6 +55,19 @@ _OPENED_RE = re.compile(
     + r"(?:\s+need×=(?P<need>[^\s]+))?"
 )
 
+# 执行门禁跳过（完整事件，无节流）
+_SKIP_RE = re.compile(
+    _TS
+    + r".*wick_spike skip strategy=(?P<sid>\d+)\s+(?P<sym>\S+)\s+"
+    + r"reason=(?P<reason>\S+)(?:\s+(?P<detail>.*))?$"
+)
+
+# 反弹状态机事件（完整事件；用于周复盘，不依赖近失节流）
+_REBOUND_RE = re.compile(
+    _TS
+    + r".*wick_spike (?P<ev>rebound_[a-z0-9_]+) strategy=(?P<sid>\d+)\s+(?P<sym>\S+)"
+)
+
 
 def _f(v: Optional[str], default: float = float("nan")) -> float:
     if v is None or v == "":
@@ -156,9 +169,28 @@ class EntryRow:
 
 
 @dataclass
+class SkipRow:
+    ts: str
+    strategy_id: int
+    symbol: str
+    reason: str
+    detail: str = ""
+
+
+@dataclass
+class ReboundRow:
+    ts: str
+    strategy_id: int
+    symbol: str
+    event: str  # rebound_fire / rebound_abort / …
+
+
+@dataclass
 class WickLogReport:
     near_misses: list[NearMissRow] = field(default_factory=list)
     entries: list[EntryRow] = field(default_factory=list)
+    skips: list[SkipRow] = field(default_factory=list)
+    rebounds: list[ReboundRow] = field(default_factory=list)
 
     def vol_blocked_deep(
         self, *, progress_min: float = 1.5, pierce_only: bool = True
@@ -182,10 +214,12 @@ def iter_log_lines(paths: Iterable[Path]) -> Iterator[str]:
         with path.open("r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 if "wick_spike" in line:
-                    yield line.rstrip("\n")
+                    # 必须去掉 \r，否则 _SKIP_RE 的 $ 在 CRLF 日志上会匹配失败
+                    yield line.rstrip("\r\n")
 
 
 def parse_line(line: str) -> Optional[object]:
+    line = line.rstrip("\r\n")
     m = _NEAR_MISS_RE.search(line)
     if m:
         gd = m.groupdict()
@@ -254,6 +288,23 @@ def parse_line(line: str) -> Optional[object]:
             trade_age_ms=int(m.group("age") or -1),
             detect_to_lock_ms=_f(m.group("detect_ms")),
         )
+    m = _SKIP_RE.search(line)
+    if m:
+        return SkipRow(
+            ts=m.group("ts"),
+            strategy_id=int(m.group("sid")),
+            symbol=m.group("sym"),
+            reason=(m.group("reason") or "").strip(),
+            detail=(m.group("detail") or "").strip(),
+        )
+    m = _REBOUND_RE.search(line)
+    if m:
+        return ReboundRow(
+            ts=m.group("ts"),
+            strategy_id=int(m.group("sid")),
+            symbol=m.group("sym"),
+            event=(m.group("ev") or "").strip(),
+        )
     return None
 
 
@@ -265,6 +316,10 @@ def analyze_paths(paths: Iterable[Path]) -> WickLogReport:
             report.near_misses.append(row)
         elif isinstance(row, EntryRow):
             report.entries.append(row)
+        elif isinstance(row, SkipRow):
+            report.skips.append(row)
+        elif isinstance(row, ReboundRow):
+            report.rebounds.append(row)
     return report
 
 
@@ -277,6 +332,234 @@ def filter_report_by_strategies(
     return WickLogReport(
         near_misses=[r for r in report.near_misses if r.strategy_id in strategy_ids],
         entries=[e for e in report.entries if e.strategy_id in strategy_ids],
+        skips=[s for s in report.skips if s.strategy_id in strategy_ids],
+        rebounds=[r for r in report.rebounds if r.strategy_id in strategy_ids],
+    )
+
+
+def filter_report_by_time(
+    report: WickLogReport,
+    *,
+    since_ts: str | None = None,
+    until_ts: str | None = None,
+) -> WickLogReport:
+    """按行首北京时间字符串过滤（格式 YYYY-MM-DD HH:MM:SS，字典序可比）。"""
+
+    def _ok(ts: str) -> bool:
+        if since_ts and ts < since_ts:
+            return False
+        if until_ts and ts > until_ts:
+            return False
+        return True
+
+    return WickLogReport(
+        near_misses=[r for r in report.near_misses if _ok(r.ts)],
+        entries=[e for e in report.entries if _ok(e.ts)],
+        skips=[s for s in report.skips if _ok(s.ts)],
+        rebounds=[r for r in report.rebounds if _ok(r.ts)],
+    )
+
+
+def _is_lock_skip(reason: str, detail: str = "") -> bool:
+    r = (reason or "").lower()
+    d = (detail or "").lower()
+    if r == "busy":
+        return True
+    return "lock" in r or "lock" in d
+
+
+def build_weekly_review(
+    report: WickLogReport,
+    *,
+    since_ts: str,
+    until_ts: str,
+    days: int,
+) -> dict:
+    """周复盘五指标：只用完整事件（trigger/opened/skip/rebound），不用近失节流样本。"""
+    triggers = [e for e in report.entries if e.kind == "trigger"]
+    opened = [e for e in report.entries if e.kind == "opened"]
+    n_trig = len(triggers)
+    n_open = len(opened)
+    conversion = (n_open / n_trig) if n_trig > 0 else None
+
+    tip_src = "trigger"
+    tip_vals = [
+        e.tip_gap_pct
+        for e in triggers
+        if e.tip_gap_pct == e.tip_gap_pct and e.tip_gap_pct >= 0
+    ]
+    if not tip_vals:
+        tip_src = "opened"
+        tip_vals = [
+            e.tip_gap_pct
+            for e in opened
+            if e.tip_gap_pct == e.tip_gap_pct and e.tip_gap_pct >= 0
+        ]
+    tip_stat = summarize_gaps(tip_vals)
+
+    speed_vals = [
+        e.signal_to_order_ms
+        for e in opened
+        if e.signal_to_order_ms == e.signal_to_order_ms and e.signal_to_order_ms >= 0
+    ]
+    speed_stat = summarize_gaps(speed_vals)
+
+    lock_skips = [s for s in report.skips if _is_lock_skip(s.reason, s.detail)]
+    skip_reasons: Counter[str] = Counter()
+    for s in lock_skips:
+        key = s.reason
+        if s.detail:
+            key = f"{s.reason} {s.detail}".strip()
+        skip_reasons[key] += 1
+
+    # 与引擎 diag_event 对齐（勿计入 rebound_extend / rebound_done_bar）
+    fire_ev = {"rebound_fire", "rebound_immediate"}
+    fail_ev = {
+        "rebound_abort",
+        "rebound_timeout",
+        "rebound_skip_past_abort",
+    }
+    n_fire = sum(1 for r in report.rebounds if r.event in fire_ev)
+    n_fire_only = sum(1 for r in report.rebounds if r.event == "rebound_fire")
+    n_immediate = sum(1 for r in report.rebounds if r.event == "rebound_immediate")
+    n_fail = sum(1 for r in report.rebounds if r.event in fail_ev)
+    n_enter = sum(1 for r in report.rebounds if r.event == "rebound_enter")
+    # enter 同 tick 被 fire 覆盖时不落日志。会话粗估：max(enter, fire_only)+immediate
+    # （多币/多会话时仍近似，仅供对照，不作严格分母）
+    n_sessions_floor = max(n_enter, n_fire_only) + n_immediate
+    rebound_by_ev: Counter[str] = Counter(r.event for r in report.rebounds)
+
+    # 可执行建议（阈值保守，样本量不足时不瞎指挥）
+    actions: list[str] = []
+    if n_trig == 0 and n_fire == 0 and not lock_skips:
+        actions.append("窗口内无触发/反弹火/占锁跳过：可能无针、日志已清，或策略未运行。")
+    if n_trig >= 5 and conversion is not None and conversion < 0.5:
+        actions.append(
+            f"转化率偏低（{conversion:.0%}）：优先查 has_pos/下单失败/写库；"
+            f"占锁 busy 不进本分母，另看指标4（当前 {len(lock_skips)} 次）。"
+        )
+    if tip_stat.get("n", 0) >= 5 and tip_stat.get("p50", 0) > 2.5:
+        actions.append(
+            f"中位贴尖 {tip_stat['p50']:.2f}% 偏大：检查反弹触发%/grace，或执行是否偏慢。"
+        )
+    if speed_stat.get("n", 0) >= 5 and speed_stat.get("p50", 0) > 400:
+        actions.append(
+            f"中位信号→下单 {speed_stat['p50']:.0f}ms 偏慢：查交易所延迟与账户下单并发。"
+        )
+    if len(lock_skips) >= 3:
+        actions.append(
+            f"占锁/腿锁跳过 {len(lock_skips)} 次：同向腿管理仍可能挡住；可对日志查 leg_lock_timeout。"
+        )
+    if n_fail >= 3 and n_fail > n_fire:
+        actions.append(
+            "反弹放弃/超时多于火：可略加长等反弹秒数，或检查是否尖峰过短。"
+        )
+    if not actions and (n_trig > 0 or n_open > 0):
+        actions.append("五项指标未见明显异常：本周建议不改参数，继续观察。")
+
+    metrics = [
+        {
+            "id": "funnel",
+            "title": "1. 触发→开仓转化",
+            "value": (
+                f"触发 {n_trig} / 开仓 {n_open}"
+                + (f" / 转化 {conversion:.1%}" if conversion is not None else "")
+            ),
+            "detail": {
+                "trigger_total": n_trig,
+                "opened_total": n_open,
+                "conversion": conversion,
+            },
+            "accuracy": (
+                "完整事件：每条 trigger/opened 各计 1 次；opened=市价成交且写库成功。"
+                "busy 锁跳过发生在 trigger 之前，不进本分母（见指标4）。"
+            ),
+            "how_to_use": "转化低先查指标4与 has_pos/下单失败，再查过滤；勿用近失总数当分母。",
+        },
+        {
+            "id": "tip_gap",
+            "title": "2. 中位贴尖 tip_gap%",
+            "value": (
+                f"中位 {tip_stat['p50']:.3f}%（样本 {int(tip_stat['n'])}，来源 {tip_src}）"
+                if tip_stat.get("n")
+                else "暂无 tip_gap 字段（需新格式 trigger/opened 日志）"
+            ),
+            "detail": tip_stat,
+            "accuracy": f"仅统计带 tip_gap% 的完整 {tip_src} 行；越小越贴针尖。",
+            "how_to_use": "中位>2.5% 且样本≥5：优先查反弹/grace/延迟，不是先降 ATR。",
+        },
+        {
+            "id": "speed",
+            "title": "3. 中位信号→下单耗时",
+            "value": (
+                f"中位 {speed_stat['p50']:.0f}ms（样本 {int(speed_stat['n'])}）"
+                if speed_stat.get("n")
+                else "暂无 signal_to_order_ms（需 opened 新日志）"
+            ),
+            "detail": speed_stat,
+            "accuracy": "仅 opened 行且字段≥0；不含写库/挂止盈后台耗时。",
+            "how_to_use": "中位经常>400ms：偏执行层，少靠拧接针倍数解决。",
+        },
+        {
+            "id": "lock_skip",
+            "title": "4. 占锁/腿锁挡单",
+            "value": f"{len(lock_skips)} 次",
+            "detail": {
+                "count": len(lock_skips),
+                "by_reason": dict(skip_reasons.most_common(12)),
+            },
+            "accuracy": "完整 skip 行（reason=busy 或含 lock）；每条日志计 1，无节流。",
+            "how_to_use": "次数高说明同向腿管理仍撞车；对照拆锁后是否仍出现 leg_lock_timeout。",
+        },
+        {
+            "id": "rebound",
+            "title": "5. 反弹火 vs 放弃",
+            "value": (
+                f"火 {n_fire}（immediate {n_immediate}）/ 放弃 {n_fail} / enter日志 {n_enter}"
+                if report.rebounds
+                else "窗口内无 rebound_* 日志（未开反弹或旧日志）"
+            ),
+            "detail": {
+                "enter": n_enter,
+                "fire": n_fire,
+                "fire_only": n_fire_only,
+                "immediate": n_immediate,
+                "fail": n_fail,
+                "sessions_floor": n_sessions_floor,
+                "by_event": dict(rebound_by_ev.most_common()),
+            },
+            "accuracy": (
+                "完整 rebound_* 行、无节流。火=rebound_fire+immediate；"
+                "放弃=abort/timeout/skip_past_abort。不计 extend/done_bar。"
+                "同 tick enter→fire 时只留 fire，故 enter 日志会偏少。"
+            ),
+            "how_to_use": "放弃≫火：略加长等反弹或放宽 abort%；火多但开仓少：回到指标1/4。",
+        },
+    ]
+
+    return {
+        "days": days,
+        "since": since_ts,
+        "until": until_ts,
+        "metrics": metrics,
+        "actions": actions,
+        "notes": [
+            "近失（near-miss）有约 8 秒节流，本周复盘五指标刻意不用它做次数/分母。",
+            "日志轮转或「清除接针日志」会截断历史；以窗口内现存 bot.log 为准。",
+            "转化率分母是 trigger（腿锁内已写 trigger 日志），不含锁外 busy；busy 见指标4。",
+            "opened 需市价成交且写库成功；若仅交易所成交而写库失败，转化会偏低。",
+            "反弹 fire/immediate 后若 busy，会有 rebound 火日志但无 trigger——两指标勿直接相除。",
+        ],
+    }
+
+
+def empty_weekly_review(*, since_ts: str = "", until_ts: str = "", days: int = 0) -> dict:
+    """无策略/无日志时的空周复盘结构，便于前端稳定渲染。"""
+    return build_weekly_review(
+        WickLogReport(),
+        since_ts=since_ts or "",
+        until_ts=until_ts or "",
+        days=days,
     )
 
 
@@ -751,11 +1034,83 @@ def build_symbol_monitor(
             }
         )
 
+    for s in report.skips:
+        if _norm_sym_key(s.symbol) != key:
+            continue
+        detail = f"{s.reason} {s.detail}".strip()
+        why = f"执行跳过：{detail}"
+        if _is_lock_skip(s.reason, s.detail):
+            why = f"占锁/腿锁跳过：{detail}"
+        reason_counts[why.split("：")[0]] += 1
+        events.append(
+            {
+                "ts": s.ts,
+                "kind": "skip",
+                "kind_zh": "跳过",
+                "strategy_id": s.strategy_id,
+                "symbol": s.symbol,
+                "direction": "",
+                "direction_zh": "-",
+                "px": None,
+                "open": None,
+                "ext": None,
+                "thr": None,
+                "pierce": None,
+                "progress": None,
+                "atr_n": None,
+                "vol_x": None,
+                "need_x": None,
+                "tip_gap_pct": None,
+                "reason": why,
+            }
+        )
+
+    _RB_ZH = {
+        "rebound_enter": "反弹进窗",
+        "rebound_extend": "反弹延尖",
+        "rebound_fire": "反弹开火",
+        "rebound_immediate": "反弹即时火",
+        "rebound_abort": "反弹放弃",
+        "rebound_timeout": "反弹超时",
+        "rebound_skip_past_abort": "反弹已放弃跳过",
+        "rebound_done_bar": "反弹本根已结束",
+    }
+    for r in report.rebounds:
+        if _norm_sym_key(r.symbol) != key:
+            continue
+        kind_zh = _RB_ZH.get(r.event, r.event)
+        why = f"{kind_zh}（{r.event}）"
+        reason_counts[kind_zh] += 1
+        events.append(
+            {
+                "ts": r.ts,
+                "kind": "rebound",
+                "kind_zh": kind_zh,
+                "strategy_id": r.strategy_id,
+                "symbol": r.symbol,
+                "direction": "",
+                "direction_zh": "-",
+                "px": None,
+                "open": None,
+                "ext": None,
+                "thr": None,
+                "pierce": None,
+                "progress": None,
+                "atr_n": None,
+                "vol_x": None,
+                "need_x": None,
+                "tip_gap_pct": None,
+                "reason": why,
+            }
+        )
+
     events.sort(key=lambda x: x["ts"], reverse=True)
     listed = events[: max(1, list_limit)]
     near_n = sum(1 for x in events if x["kind"] == "near_miss")
     trig_n = sum(1 for x in events if x["kind"] == "trigger")
     open_n = sum(1 for x in events if x["kind"] == "opened")
+    skip_n = sum(1 for x in events if x["kind"] == "skip")
+    rb_n = sum(1 for x in events if x["kind"] == "rebound")
 
     if not events:
         note = (
@@ -765,7 +1120,8 @@ def build_symbol_monitor(
         )
     else:
         note = (
-            f"共 {len(events)} 条（近失 {near_n} / 触发 {trig_n} / 开仓 {open_n}），"
+            f"共 {len(events)} 条（近失 {near_n} / 触发 {trig_n} / 开仓 {open_n}"
+            f" / 跳过 {skip_n} / 反弹 {rb_n}），"
             f"展示最近 {len(listed)} 条。无记录的分钟 = 当时未接近条件或未监控。"
         )
 
@@ -775,6 +1131,8 @@ def build_symbol_monitor(
         "near_miss_n": near_n,
         "trigger_n": trig_n,
         "opened_n": open_n,
+        "skip_n": skip_n,
+        "rebound_n": rb_n,
         "reason_counts": dict(reason_counts),
         "listed": len(listed),
         "total": len(events),

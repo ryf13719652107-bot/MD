@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import now_beijing
 from ..database import get_db
 from ..models.account import Account
 from ..models.strategy import Strategy
@@ -16,8 +18,11 @@ from ..services.wick_spike_log_stats import (
     analyze_paths,
     build_analysis,
     build_symbol_monitor,
+    build_weekly_review,
+    empty_weekly_review,
     clear_wick_spike_lines,
     filter_report_by_strategies,
+    filter_report_by_time,
     resolve_bot_log_paths,
 )
 from ..services.wick_spike_outcome import enrich_open_outcomes
@@ -110,6 +115,12 @@ async def analyze_wick_spike_logs(
     include_rotated: bool = Query(True, description="是否包含 bot.log.* 轮转文件"),
     enrich_opens: bool = Query(True, description="对齐成交+最终针尖+盈亏"),
     max_enrich: int = Query(40, ge=1, le=100, description="最多对齐多少笔开仓"),
+    days: int = Query(
+        7,
+        ge=0,
+        le=90,
+        description="只统计近 N 天（北京时间）；0=不限（整份可读日志）",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """扫描 bot.log，按账户/信号源过滤后返回接针统计。"""
@@ -118,6 +129,14 @@ async def analyze_wick_spike_logs(
     )
 
     paths = resolve_bot_log_paths(include_rotated=include_rotated)
+    until_dt = now_beijing()
+    until_ts = until_dt.strftime("%Y-%m-%d %H:%M:%S")
+    since_ts = (
+        (until_dt - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        if days > 0
+        else ""
+    )
+
     if not paths:
         return {
             "ok": False,
@@ -132,6 +151,12 @@ async def analyze_wick_spike_logs(
             "log_files": [],
             "near_miss_total": 0,
             "entry_total": 0,
+            "window_days": days,
+            "window_since": since_ts or None,
+            "window_until": until_ts,
+            "weekly_review": empty_weekly_review(
+                since_ts=since_ts or until_ts, until_ts=until_ts, days=days if days > 0 else 0
+            ),
             "text": "未找到日志文件",
         }
 
@@ -158,6 +183,12 @@ async def analyze_wick_spike_logs(
                 "counterfactual": {"need_5_pass": 0, "need_4_5_pass": 0, "total": 0},
             },
             "open_quality": None,
+            "window_days": days,
+            "window_since": since_ts or None,
+            "window_until": until_ts,
+            "weekly_review": empty_weekly_review(
+                since_ts=since_ts or until_ts, until_ts=until_ts, days=days if days > 0 else 0
+            ),
             "text": (
                 f"账户「{acc.name}」下没有匹配信号源「{signal_source}」的策略。"
                 "请切换信号源筛选，或确认该账户已创建接针策略。"
@@ -166,6 +197,18 @@ async def analyze_wick_spike_logs(
 
     try:
         report = filter_report_by_strategies(analyze_paths(paths), strategy_ids)
+        if days > 0:
+            report = filter_report_by_time(report, since_ts=since_ts, until_ts=until_ts)
+        else:
+            # 不限窗时周复盘 since 用最早可见行近似
+            all_ts = (
+                [r.ts for r in report.near_misses]
+                + [e.ts for e in report.entries]
+                + [s.ts for s in report.skips]
+                + [r.ts for r in report.rebounds]
+            )
+            since_ts = min(all_ts) if all_ts else until_ts
+
         data = build_analysis(report, progress_min=progress_min, list_limit=list_limit)
         data["ok"] = True
         data["error"] = None
@@ -177,6 +220,15 @@ async def analyze_wick_spike_logs(
             {"id": sid, **meta[sid]} for sid in sorted(strategy_ids)
         ]
         data["log_files"] = [str(p) for p in paths]
+        data["window_days"] = days
+        data["window_since"] = since_ts if days > 0 else (since_ts or None)
+        data["window_until"] = until_ts
+        data["weekly_review"] = build_weekly_review(
+            report,
+            since_ts=since_ts or until_ts,
+            until_ts=until_ts,
+            days=days if days > 0 else 0,
+        )
 
         if enrich_opens:
             try:

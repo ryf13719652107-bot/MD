@@ -204,6 +204,8 @@ export const api = {
     include_rotated?: boolean;
     enrich_opens?: boolean;
     max_enrich?: number;
+    /** 近 N 天；0=不限 */
+    days?: number;
   }): Promise<WickStatsAnalysis> => {
     const qs = new URLSearchParams();
     qs.set('account_id', String(params.account_id));
@@ -213,6 +215,7 @@ export const api = {
     if (params.include_rotated != null) qs.set('include_rotated', String(params.include_rotated));
     if (params.enrich_opens != null) qs.set('enrich_opens', String(params.enrich_opens));
     if (params.max_enrich != null) qs.set('max_enrich', String(params.max_enrich));
+    if (params.days != null) qs.set('days', String(params.days));
     return request<WickStatsAnalysis>(`/wick-stats/analyze?${qs.toString()}`);
   },
   clearWickStatsLogs: (params: {
@@ -383,7 +386,29 @@ export type WickStatsAnalysis = {
     rows: WickStatsDeepRow[];
   };
   open_quality?: WickStatsOpenQuality | null;
+  window_days?: number;
+  window_since?: string | null;
+  window_until?: string | null;
+  weekly_review?: WickWeeklyReview | null;
   text: string;
+};
+
+export type WickWeeklyMetric = {
+  id: string;
+  title: string;
+  value: string;
+  detail?: Record<string, unknown>;
+  accuracy: string;
+  how_to_use: string;
+};
+
+export type WickWeeklyReview = {
+  days: number;
+  since: string;
+  until: string;
+  metrics: WickWeeklyMetric[];
+  actions: string[];
+  notes: string[];
 };
 
 export type WickSymbolMonitorRow = {
