@@ -30,6 +30,11 @@ arm_grace_max_tip_gap_pct（默认 2）：grace 免回撤时，进场价相对�
   confirm 时有效回撤上限 = min(max_retrace, abort)（避免 confirm 时已过放弃线）。
   arm_wait=0 时若开启 rebound，同刻全条件达标后仍走反弹窗（不再绕过）。
   trigger_pct<=0：confirm 后立刻市价（不等反弹）。
+
+EMA25 趋势过滤（ema25_filter_enabled，产品默认开）：
+  用 1m 本根开盘价 vs 已收盘收盘价 EMA25（热路径内存算，无 REST）。
+  做空：开盘 < EMA25 → 不做空；做多：开盘 > EMA25 → 不做多。
+  缓冲不足（算不出 EMA）时不过滤，避免重启空窗误杀。
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Optional
 
-from .strategy_engine import Signal, calculate_atr
+from .strategy_engine import Signal, calculate_atr, ema
 
 # progress 量能放宽默认阈值（开关打开时生效）
 _VOL_RELAX_PROGRESS_START = 1.0
@@ -77,6 +82,9 @@ class WickSpikeParams:
     rebound_trigger_pct: float = 20.0  # 反弹占针深%触发市价
     rebound_abort_pct: float = 35.0    # 反弹占针深%放弃
     rebound_wait_sec: float = 5.0      # 针尖停住后再等反弹的超时秒数（破新尖重置）
+    # 1m 开盘 vs EMA25 过滤；产品层默认开，此处默认关（单测不受趋势滤）
+    ema25_filter_enabled: bool = False
+    ema25_period: int = 25
 
 
 @dataclass
@@ -90,6 +98,10 @@ class WickBarSnapshot:
     vol_sma: float
     kline_high: float
     kline_low: float
+    # 已收盘 close 的 EMA；nan=样本不足
+    ema25: float = float("nan")
+    # EMA 过滤用开盘（通常=bar_open；非 1m 策略时 runner 可填入 1m open）
+    ema_filter_open: float = float("nan")
 
 
 @dataclass
@@ -138,13 +150,28 @@ def volume_sma(closed_volumes: list[float], period: int) -> Optional[float]:
     return sum(window) / period
 
 
+def _ema_last(closes: list[float], period: int) -> float:
+    """已收盘收盘价序列的末值 EMA；样本不足返回 nan。"""
+    if period <= 0 or len(closes) < period:
+        return float("nan")
+    series = ema(closes, period)
+    if not series:
+        return float("nan")
+    try:
+        v = float(series[-1])
+    except (TypeError, ValueError):
+        return float("nan")
+    return v if v == v and v > 0 else float("nan")
+
+
 def build_bar_snapshot(
     klines: list,
     *,
     atr_period: int = 14,
     volume_sma_period: int = 20,
+    ema_period: int = 25,
 ) -> Optional[WickBarSnapshot]:
-    """从 OHLCV 列表构建当前未收盘 bar 快照；ATR/量均只用已收盘 K。"""
+    """从 OHLCV 列表构建当前未收盘 bar 快照；ATR/量均/EMA 只用已收盘 K。"""
     if not klines or len(klines) < atr_period + 2:
         return None
     forming = klines[-1]
@@ -162,17 +189,82 @@ def build_bar_snapshot(
     if v_sma is None or v_sma <= 0:
         return None
     try:
+        bar_open = float(forming[1])
+        closes = [float(r[4]) for r in closed]
+        ema25 = _ema_last(closes, int(ema_period or 25))
         return WickBarSnapshot(
             bar_open_ts=int(forming[0]),
-            bar_open=float(forming[1]),
+            bar_open=bar_open,
             atr=atr,
             vol_now=float(forming[5]),
             vol_sma=v_sma,
             kline_high=float(forming[2]),
             kline_low=float(forming[3]),
+            ema25=ema25,
+            ema_filter_open=bar_open,
         )
     except (TypeError, ValueError, IndexError):
         return None
+
+
+def apply_1m_ema_filter_fields(
+    snap: WickBarSnapshot,
+    klines_1m: list | None,
+    *,
+    ema_period: int = 25,
+) -> WickBarSnapshot:
+    """非 1m 策略时用 1m peek 结果覆盖 EMA 过滤字段（同步、无 IO）。"""
+    if not klines_1m or len(klines_1m) < 2:
+        return snap
+    try:
+        forming = klines_1m[-1]
+        closed = klines_1m[:-1]
+        ref_open = float(forming[1])
+        closes = [float(r[4]) for r in closed]
+        e = _ema_last(closes, int(ema_period or 25))
+    except (TypeError, ValueError, IndexError):
+        return snap
+    return replace(snap, ema25=e, ema_filter_open=ref_open)
+
+
+def ema25_filter_blocks(params: WickSpikeParams, snap: WickBarSnapshot) -> bool:
+    """True=被 EMA25 趋势过滤拦住（不应武装/确认）。"""
+    if not params.ema25_filter_enabled:
+        return False
+    ema_v = float(snap.ema25)
+    if not (ema_v == ema_v and ema_v > 0):
+        return False
+    open_v = float(snap.ema_filter_open)
+    if not (open_v == open_v and open_v > 0):
+        open_v = float(snap.bar_open)
+    if open_v <= 0:
+        return False
+    d = (params.direction or "").lower()
+    if d == "short":
+        return open_v < ema_v  # 开盘低于 EMA → 不做空
+    if d == "long":
+        return open_v > ema_v  # 开盘高于 EMA → 不做多
+    return False
+
+
+def ema25_filter_reason(params: WickSpikeParams, snap: WickBarSnapshot) -> Optional[str]:
+    """近失文案；未拦住返回 None。"""
+    if not ema25_filter_blocks(params, snap):
+        return None
+    ema_v = float(snap.ema25)
+    open_v = float(snap.ema_filter_open)
+    if not (open_v == open_v and open_v > 0):
+        open_v = float(snap.bar_open)
+    d = (params.direction or "").lower()
+    if d == "short":
+        return (
+            f"EMA25过滤：1m开盘{open_v:.6g}<EMA25={ema_v:.6g}，偏弱不做空"
+        )
+    if d == "long":
+        return (
+            f"EMA25过滤：1m开盘{open_v:.6g}>EMA25={ema_v:.6g}，偏强不做多"
+        )
+    return "EMA25过滤"
 
 
 def _volume_hot(
@@ -583,6 +675,7 @@ def near_miss_diag(
         return None
 
     direction = (params.direction or "").lower()
+    ema_block = ema25_filter_blocks(params, snap)
     hi = state.bar_high if state.bar_high is not None else max(last_price, snap.kline_high)
     lo = state.bar_low if state.bar_low is not None else min(last_price, snap.kline_low)
 
@@ -619,6 +712,12 @@ def near_miss_diag(
     retrace = wick_retrace_pct(direction, snap.bar_open, extreme, last_price)
     waived = _retrace_waived(state, params, ts) if armed else False
 
+    ema_s = ""
+    if ema_block:
+        eo = float(snap.ema_filter_open)
+        if not (eo == eo and eo > 0):
+            eo = float(snap.bar_open)
+        ema_s = f" ema25_block=True ema25={float(snap.ema25):.6g} ema_open={eo:.6g}"
     return (
         f"dir={direction} px={last_price:.6g} open={snap.bar_open:.6g} "
         f"ext={extreme:.6g} thr={thr:.6g} pierce={pierced} "
@@ -626,7 +725,7 @@ def near_miss_diag(
         f"vol×={vol_ratio:.2f} need×={need:g} vol_hot={vol_hot} "
         f"retrace%={retrace:.2f} armed={armed} arm_age_ms={arm_age} "
         f"await_vol={state.armed_awaiting_vol if armed else False} "
-        f"retrace_waived={waived}"
+        f"retrace_waived={waived}{ema_s}"
     )
 
 
@@ -740,6 +839,12 @@ def on_tick(
         params.rebound_enabled
         and state.rebound_done_bar_ts == snap.bar_open_ts
     ):
+        return None
+
+    # 1m 开盘 vs EMA25：拦住则不武装/不确认（已在反弹窗内的不受影响）
+    if ema25_filter_blocks(params, snap):
+        if state.armed_bar_ts == snap.bar_open_ts:
+            clear_arm(state)
         return None
 
     # —— 关闭武装：同刻全条件；若开 rebound 仍进反弹窗（不绕过）——

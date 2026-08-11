@@ -26,6 +26,7 @@ _NEAR_MISS_RE = re.compile(
     + r"(?:\s+arm_age_ms=(?P<arm_age>-?\d+))?"
     + r"(?:\s+await_vol=(?P<await_vol>\w+))?"
     + r"(?:\s+retrace_waived=(?P<retrace_waived>\w+))?"
+    + r"(?:\s+ema25_block=(?P<ema25_block>\w+))?"
 )
 
 # 新格式（含 tip_gap / open / ext / progress）
@@ -104,6 +105,7 @@ class NearMissRow:
     arm_age_ms: int | None = None
     await_vol: bool | None = None
     retrace_waived: bool | None = None
+    ema25_block: bool | None = None
 
     @property
     def tip_gap_pct(self) -> float:
@@ -248,6 +250,9 @@ def parse_line(line: str) -> Optional[object]:
                 _b(gd["retrace_waived"])
                 if gd.get("retrace_waived") is not None
                 else None
+            ),
+            ema25_block=(
+                _b(gd["ema25_block"]) if gd.get("ema25_block") is not None else None
             ),
         )
     m = _OPENED_RE.search(line)
@@ -878,6 +883,13 @@ def _norm_sym_key(s: str) -> str:
 
 def _near_miss_reason_zh(r: NearMissRow) -> str:
     """把 near-miss 字段翻译成可读卡点。"""
+    if r.ema25_block is True:
+        d = (r.direction or "").lower()
+        if d == "short":
+            return "EMA25过滤：1m开盘低于EMA25，偏弱不做空"
+        if d == "long":
+            return "EMA25过滤：1m开盘高于EMA25，偏强不做多"
+        return "EMA25过滤：开盘相对EMA25不符方向"
     if r.pierce and r.vol_x < r.need_x:
         return (
             f"已刺破但量能不足：vol×={r.vol_x:.2f} < need×={r.need_x:g}"

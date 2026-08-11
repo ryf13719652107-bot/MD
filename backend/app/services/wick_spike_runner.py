@@ -51,6 +51,7 @@ from .leverage_prewarm import prewarm_symbols_leverage
 from .wick_spike_engine import (
     WickSpikeParams,
     WickSymbolState,
+    apply_1m_ema_filter_fields,
     build_bar_snapshot,
     clear_rebound,
     enrich_snap_with_trades,
@@ -158,6 +159,12 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             getattr(strategy, "wick_rebound_wait_sec", 5.0)
             if getattr(strategy, "wick_rebound_wait_sec", None) is not None
             else 5.0
+        ),
+        # 1m 开盘 vs EMA25：产品默认开
+        ema25_filter_enabled=(
+            True
+            if getattr(strategy, "wick_ema25_filter_enabled", None) is None
+            else bool(strategy.wick_ema25_filter_enabled)
         ),
     )
     atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
@@ -403,6 +410,12 @@ class WickSpikeRunner:
                         owner=wake_owner,
                     )
                     self._fire_bg(_bg_prewarm_klines(public, list(symbols), timeframe))
+                    # EMA25 过滤看 1m：非 1m 策略后台预热 1m 缓冲（不进热路径）
+                    if params.ema25_filter_enabled and str(timeframe or "").lower() not in (
+                        "1m",
+                        "1min",
+                    ):
+                        self._fire_bg(_bg_prewarm_klines(public, list(symbols), "1m"))
                     self._fire_bg(_bg_prewarm_leverage(auth, list(symbols), leverage))
                     acc_id = int(getattr(_strategy_stub, "account_id", 0) or 0)
                     if auth is not None and acc_id > 0:
@@ -580,9 +593,20 @@ class WickSpikeRunner:
                         klines,
                         atr_period=atr_period,
                         volume_sma_period=vol_period,
+                        ema_period=int(params.ema25_period or 25),
                     )
                     if snap is None:
                         continue
+                    # EMA25 过滤固定看 1m：非 1m 策略时同步 peek 1m 缓冲（无 REST）
+                    if params.ema25_filter_enabled and str(timeframe or "").lower() not in (
+                        "1m",
+                        "1min",
+                    ):
+                        snap = apply_1m_ema_filter_fields(
+                            snap,
+                            kline_stream_manager.peek(public, sym, "1m"),
+                            ema_period=int(params.ema25_period or 25),
+                        )
                     kline_vol_raw = float(snap.vol_now or 0)
                     trade_vol_raw = price_stream_manager.bar_volume(sym_key)
                     # 成交流量/高低补强；bar 未对齐则忽略（防换根串量）

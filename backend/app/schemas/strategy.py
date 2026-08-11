@@ -133,6 +133,10 @@ class StrategyCreate(BaseModel):
         default=True,
         description="市价反弹追踪（方案J）：confirm后等针尖反弹触发市价，追踪真针尖",
     )
+    wick_ema25_filter_enabled: bool = Field(
+        default=True,
+        description="1m开盘vsEMA25：空开盘<EMA不做空；多开盘>EMA不做多",
+    )
     wick_rebound_trigger_pct: float = Field(
         default=20.0, ge=0, le=100, description="反弹占针深%触发市价"
     )
@@ -222,6 +226,7 @@ class StrategyUpdate(BaseModel):
     wick_rebound_trigger_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_abort_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_wait_sec: Optional[float] = Field(default=None, ge=0, le=60)
+    wick_ema25_filter_enabled: Optional[bool] = Field(default=None)
     wick_martingale_mode: Optional[Literal["price_drop", "price_and_wt"]] = None
 
     @model_validator(mode="after")
@@ -311,6 +316,7 @@ class StrategyResponse(BaseModel):
     wick_rebound_trigger_pct: float = 20.0
     wick_rebound_abort_pct: float = 35.0
     wick_rebound_wait_sec: float = 5.0
+    wick_ema25_filter_enabled: bool = True
     wick_martingale_mode: str = "price_and_wt"
     blacklisted_symbols: list[str] = Field(default_factory=list)
     status: str

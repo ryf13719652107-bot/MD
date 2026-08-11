@@ -44,6 +44,7 @@ const schema = z.object({
   wick_arm_retrace_grace_sec: z.number().min(0).max(60),
   wick_arm_grace_max_tip_gap_pct: z.number().min(0).max(20),
   wick_rebound_enabled: z.boolean(),
+  wick_ema25_filter_enabled: z.boolean(),
   wick_rebound_trigger_pct: z.number().min(0).max(100),
   wick_rebound_abort_pct: z.number().min(0).max(100),
   wick_rebound_wait_sec: z.number().min(0).max(60),
@@ -149,6 +150,7 @@ function toFormDefaults(
       wick_arm_retrace_grace_sec: initialData.wick_arm_retrace_grace_sec ?? 5,
       wick_arm_grace_max_tip_gap_pct: initialData.wick_arm_grace_max_tip_gap_pct ?? 2,
       wick_rebound_enabled: initialData.wick_rebound_enabled ?? true,
+      wick_ema25_filter_enabled: initialData.wick_ema25_filter_enabled ?? true,
       wick_rebound_trigger_pct: initialData.wick_rebound_trigger_pct ?? 20,
       wick_rebound_abort_pct: initialData.wick_rebound_abort_pct ?? 35,
       wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 5,
@@ -228,6 +230,7 @@ function toFormDefaults(
     wick_arm_retrace_grace_sec: 5,
     wick_arm_grace_max_tip_gap_pct: 2,
     wick_rebound_enabled: true,
+    wick_ema25_filter_enabled: true,
     wick_rebound_trigger_pct: 20,
     wick_rebound_abort_pct: 35,
     wick_rebound_wait_sec: 5,
@@ -494,6 +497,18 @@ export default function StrategyForm({
               </label>
               <span className="text-xs text-gray-600">
                 默认开。confirm 达标不立刻下单，等价格从针尖反弹到「触发%」再市价；针尖可加深。confirm 回撤上限会与「放弃%」取较小，避免进窗即放弃。
+              </span>
+            </div>
+            <div>
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>1m 开盘 vs EMA25 过滤</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_ema25_filter_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+              </label>
+              <span className="text-xs text-gray-600">
+                默认开。做空：1m 开盘价低于 EMA25 不做空；做多：1m 开盘价高于 EMA25 不做多。用已收盘 K 内存计算，不影响下单速度。
               </span>
             </div>
             <div className="grid grid-cols-3 gap-3">

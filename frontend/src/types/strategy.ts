@@ -36,6 +36,8 @@ export interface Strategy {
   wick_arm_grace_max_tip_gap_pct: number;
   /** 市价反弹追踪（方案J）：confirm 后等针尖反弹触发市价，追踪真针尖 */
   wick_rebound_enabled: boolean;
+  /** 1m 开盘 vs EMA25：空开盘低于EMA不做空；多开盘高于EMA不做多；默认开 */
+  wick_ema25_filter_enabled: boolean;
   /** 反弹占针深 % 触发市价；默认 20 */
   wick_rebound_trigger_pct: number;
   /** 反弹占针深 % 放弃（超此为反转）；默认 35 */
@@ -120,6 +122,7 @@ export interface StrategyFormData {
   wick_arm_retrace_grace_sec: number;
   wick_arm_grace_max_tip_gap_pct: number;
   wick_rebound_enabled: boolean;
+  wick_ema25_filter_enabled: boolean;
   wick_rebound_trigger_pct: number;
   wick_rebound_abort_pct: number;
   wick_rebound_wait_sec: number;

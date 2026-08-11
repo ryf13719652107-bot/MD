@@ -679,3 +679,115 @@ def test_rebound_no_new_extreme_still_times_out():
     assert on_tick(state, params, snap, last_price=109.5, now_ms=6_100) is None
     assert state.rebound_done_bar_ts == snap.bar_open_ts
     assert take_diag_event(state) == "rebound_timeout"
+
+
+def _snap_ema(*, open_, ema25, **kwargs) -> WickBarSnapshot:
+    s = _snap(open_=open_, **kwargs)
+    from dataclasses import replace
+
+    return replace(s, ema25=ema25, ema_filter_open=open_)
+
+
+def test_ema25_filter_blocks_short_below_ema():
+    """做空：开盘 < EMA25 → 即使刺破+量够也不开。"""
+    from app.services.wick_spike_engine import ema25_filter_blocks
+
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=0,
+        arm_wait_sec=0,
+        ema25_filter_enabled=True,
+    )
+    snap = _snap_ema(
+        open_=100.0, ema25=101.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=99.0
+    )
+    assert ema25_filter_blocks(params, snap) is True
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1) is None
+
+
+def test_ema25_filter_allows_short_above_ema():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=0,
+        arm_wait_sec=0,
+        ema25_filter_enabled=True,
+    )
+    snap = _snap_ema(
+        open_=100.0, ema25=99.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=99.0
+    )
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1) == Signal.SHORT
+
+
+def test_ema25_filter_blocks_long_above_ema():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=0,
+        arm_wait_sec=0,
+        ema25_filter_enabled=True,
+    )
+    snap = _snap_ema(
+        open_=100.0, ema25=99.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=101.0, low=90.0
+    )
+    assert on_tick(state, params, snap, last_price=90.0, now_ms=1) is None
+
+
+def test_ema25_filter_allows_long_below_ema():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=0,
+        arm_wait_sec=0,
+        ema25_filter_enabled=True,
+    )
+    snap = _snap_ema(
+        open_=100.0, ema25=101.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=101.0, low=90.0
+    )
+    assert on_tick(state, params, snap, last_price=90.0, now_ms=1) == Signal.LONG
+
+
+def test_ema25_filter_off_ignores_ema():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=0,
+        arm_wait_sec=0,
+        ema25_filter_enabled=False,
+    )
+    snap = _snap_ema(
+        open_=100.0, ema25=101.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=99.0
+    )
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1) == Signal.SHORT
+
+
+def test_ema25_nan_does_not_block():
+    """缓冲不足算不出 EMA 时不过滤。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=0,
+        arm_wait_sec=0,
+        ema25_filter_enabled=True,
+    )
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=99.0)
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1) == Signal.SHORT
