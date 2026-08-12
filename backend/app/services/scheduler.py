@@ -459,83 +459,144 @@ class StrategyScheduler:
                         for jid in (f"strategy_{strategy_id}", f"strategy_{strategy_id}_tp"):
                             if self._scheduler.get_job(jid):
                                 self._scheduler.remove_job(jid)
-                        logger.warning("Strategy %d margin %.2f below threshold %.2f — stopping and closing all positions", strategy_id, total_margin, strategy.margin_threshold)
-                        # Close ALL exchange positions (closePosition + chunked maxQty, same as panic close)
+                        logger.warning(
+                            "Strategy %d margin %.2f below threshold %.2f — stopping and closing bot-owned positions only",
+                            strategy_id,
+                            total_margin,
+                            strategy.margin_threshold,
+                        )
+                        # 只平本策略有 exchange_order_id 的数量，不动手动仓
                         from ..models.trade import Trade
+                        from .position_manager import _bot_owned_positions, _order_fill_avg_price
                         try:
                             auth_binance.pin()
                             margin_trades_to_backup: list[Trade] = []
-                            max_rounds = 3
-                            initial_nonempty = False
-                            for round_i in range(max_rounds):
-                                eps = await auth_binance.fetch_positions()
-                                leg_map = _exchange_leg_map_from_positions(eps)
-                                if not leg_map:
-                                    break
-                                if round_i == 0:
-                                    initial_nonempty = True
-                                logger.info(
-                                    "Strategy %d margin stop: close round %d/%d, %d leg(s)",
-                                    strategy_id, round_i + 1, max_rounds, len(leg_map),
-                                )
-                                stmt_open_batch = select(Position).where(
-                                    Position.strategy_id == strategy_id,
-                                    Position.closed_at.is_(None),
-                                )
-                                pos_batch = list((await session.execute(stmt_open_batch)).scalars().all())
+                            stmt_open_batch = select(Position).where(
+                                Position.strategy_id == strategy_id,
+                                Position.closed_at.is_(None),
+                            )
+                            pos_batch = _bot_owned_positions(
+                                list((await session.execute(stmt_open_batch)).scalars().all())
+                            )
+                            legs: dict[tuple[str, str], list] = {}
+                            for lp in pos_batch:
+                                key = (_norm_sym(lp.symbol), (lp.side or "").lower())
+                                legs.setdefault(key, []).append(lp)
 
-                                for (sym, side), contracts in leg_map.items():
-                                    order = None
-                                    try:
-                                        order = await auth_binance.close_position(sym, side)
-                                    except Exception as ex1:
-                                        logger.error("Margin stop: failed to close %s %s: %s", sym, side, ex1)
-                                        continue
-                                    if not order:
-                                        logger.error(
-                                            "Margin stop: empty order %s %s (contracts=%.6f)",
-                                            sym, side, contracts,
-                                        )
-                                        continue
-                                    from .position_manager import _order_fill_avg_price
-
-                                    exit_price = _order_fill_avg_price(
-                                        order, 0.0, allow_order_price=False
+                            for (sym, side), rows in legs.items():
+                                qty = sum(float(p.quantity or 0) for p in rows)
+                                if qty <= 0:
+                                    continue
+                                # 先撤机器人止盈，避免策略停掉后残留限价继续减仓
+                                try:
+                                    await self._position_mgr.cancel_bot_tps_on_positions(
+                                        auth_binance, sym, rows, strategy_id
                                     )
-                                    exit_time = exit_time_from_order(order)
-                                    sk = _norm_sym(sym)
-                                    sd = side.lower()
-                                    for lp2 in pos_batch:
-                                        if lp2.closed_at is not None:
-                                            continue
-                                        if _norm_sym(lp2.symbol) != sk or (lp2.side or "").lower() != sd:
-                                            continue
-                                        ep_val = exit_price if exit_price > 0 else (lp2.mark_price or lp2.entry_price)
-                                        pnl = (ep_val - lp2.entry_price) * lp2.quantity if lp2.side == "long" else (lp2.entry_price - ep_val) * lp2.quantity
-                                        pct = ((ep_val - lp2.entry_price) / lp2.entry_price * 100) if lp2.side == "long" else ((lp2.entry_price - ep_val) / lp2.entry_price * 100)
-                                        trade = Trade(
-                                            strategy_id=strategy_id, account_id=strategy.account_id,
-                                            symbol=lp2.symbol, side=lp2.side, quantity=lp2.quantity,
-                                            entry_price=lp2.entry_price, exit_price=ep_val,
-                                            realized_pnl=pnl, pnl_pct=round(pct, 2),
-                                            entry_time=lp2.opened_at or exit_time, exit_time=exit_time,
-                                            layer=lp2.layer, close_reason="margin_stop",
-                                        )
-                                        session.add(trade)
-                                        margin_trades_to_backup.append(trade)
-                                        lp2.closed_at = exit_time
-                                    logger.info("Margin stop: closed %s %s (contracts=%s)", sym, side, contracts)
+                                except Exception as e_tp:
+                                    logger.warning(
+                                        "Margin stop: cancel bot TP failed %s %s: %s",
+                                        sym,
+                                        side,
+                                        e_tp,
+                                    )
+                                order = None
+                                try:
+                                    order = await auth_binance.close_position_qty(sym, side, qty)
+                                except Exception as ex1:
+                                    logger.error(
+                                        "Margin stop: failed to close bot qty %s %s x%g: %s",
+                                        sym,
+                                        side,
+                                        qty,
+                                        ex1,
+                                    )
+                                    continue
+                                if not order:
+                                    logger.error(
+                                        "Margin stop: empty order %s %s (bot_qty=%.6f)",
+                                        sym,
+                                        side,
+                                        qty,
+                                    )
+                                    continue
+                                exit_price = _order_fill_avg_price(
+                                    order, 0.0, allow_order_price=False
+                                )
+                                exit_time = exit_time_from_order(order)
+                                for lp2 in rows:
+                                    if lp2.closed_at is not None:
+                                        continue
+                                    ep_val = exit_price if exit_price > 0 else (lp2.mark_price or lp2.entry_price)
+                                    pnl = (ep_val - lp2.entry_price) * lp2.quantity if lp2.side == "long" else (lp2.entry_price - ep_val) * lp2.quantity
+                                    pct = ((ep_val - lp2.entry_price) / lp2.entry_price * 100) if lp2.side == "long" else ((lp2.entry_price - ep_val) / lp2.entry_price * 100)
+                                    trade = Trade(
+                                        strategy_id=strategy_id, account_id=strategy.account_id,
+                                        symbol=lp2.symbol, side=lp2.side, quantity=lp2.quantity,
+                                        entry_price=lp2.entry_price, exit_price=ep_val,
+                                        realized_pnl=pnl, pnl_pct=round(pct, 2),
+                                        entry_time=lp2.opened_at or exit_time, exit_time=exit_time,
+                                        layer=lp2.layer, close_reason="margin_stop",
+                                    )
+                                    session.add(trade)
+                                    margin_trades_to_backup.append(trade)
+                                    lp2.closed_at = exit_time
+                                logger.info(
+                                    "Margin stop: closed bot qty %s %s x%g",
+                                    sym,
+                                    side,
+                                    qty,
+                                )
 
-                            eps_final = await auth_binance.fetch_positions()
-                            remaining = _exchange_leg_map_from_positions(eps_final)
-                            if remaining:
-                                parts = [f"{s} {d} x{c:g}" for (s, d), c in sorted(remaining.items())]
-                                verify_msg = "保证金止损后校验失败，交易所仍有持仓: " + "; ".join(parts)
-                                logger.error("Strategy %d: %s", strategy_id, verify_msg)
-                                strategy_log_service.error(strategy_id, verify_msg)
-                            elif initial_nonempty:
+                            # 无 exchange_order_id 的本地行：只清 DB，不碰交易所
+                            stmt_orphans = select(Position).where(
+                                Position.strategy_id == strategy_id,
+                                Position.closed_at.is_(None),
+                            )
+                            orphan_rows = [
+                                p
+                                for p in (await session.execute(stmt_orphans)).scalars().all()
+                                if not (p.exchange_order_id or "").strip()
+                            ]
+                            now_local = now_beijing()
+                            for lp2 in orphan_rows:
+                                ep_val = lp2.mark_price or lp2.entry_price or 0.0
+                                pnl = (
+                                    (ep_val - lp2.entry_price) * lp2.quantity
+                                    if lp2.side == "long"
+                                    else (lp2.entry_price - ep_val) * lp2.quantity
+                                )
+                                pct = (
+                                    ((ep_val - lp2.entry_price) / lp2.entry_price * 100)
+                                    if lp2.side == "long" and lp2.entry_price
+                                    else (
+                                        ((lp2.entry_price - ep_val) / lp2.entry_price * 100)
+                                        if lp2.entry_price
+                                        else 0
+                                    )
+                                )
+                                trade = Trade(
+                                    strategy_id=strategy_id,
+                                    account_id=strategy.account_id,
+                                    symbol=lp2.symbol,
+                                    side=lp2.side,
+                                    quantity=lp2.quantity,
+                                    entry_price=lp2.entry_price,
+                                    exit_price=ep_val,
+                                    realized_pnl=pnl,
+                                    pnl_pct=round(pct, 2),
+                                    entry_time=lp2.opened_at or now_local,
+                                    exit_time=now_local,
+                                    layer=lp2.layer,
+                                    close_reason="margin_stop_local_only",
+                                )
+                                session.add(trade)
+                                margin_trades_to_backup.append(trade)
+                                lp2.closed_at = now_local
+
+                            if pos_batch or orphan_rows:
                                 strategy_log_service.success(
-                                    strategy_id, "保证金止损平仓已完成（交易所校验无持仓）"
+                                    strategy_id,
+                                    "保证金止损：已平机器人持仓（手动仓未动）",
                                 )
                             await session.commit()
                             for t in margin_trades_to_backup:
@@ -968,6 +1029,23 @@ class StrategyScheduler:
                                 strategy = await _rollback_and_refresh_strategy(
                                     session, strategy
                                 )
+                                # 成交已发生：用本笔单号补建，避免「不领养」后永久失管
+                                try:
+                                    ok = await self._position_mgr.recover_bot_open_after_db_fail(
+                                        session, strategy, res, auth_binance
+                                    )
+                                    if ok:
+                                        await session.commit()
+                                except Exception as e2:
+                                    logger.error(
+                                        "Strategy %d: open DB fail recover for %s failed: %s",
+                                        strategy_id,
+                                        cand.symbol,
+                                        e2,
+                                    )
+                                    strategy = await _rollback_and_refresh_strategy(
+                                        session, strategy
+                                    )
 
                     # Persist strategy.last_signal/last_rsi if no open DB commit happened last.
                     try:

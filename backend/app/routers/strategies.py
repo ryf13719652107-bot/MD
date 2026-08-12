@@ -383,73 +383,51 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
             "id": strategy_id,
         }
 
+    from ..services.position_manager import (
+        PositionManager,
+        _bot_owned_positions,
+        _order_fill_avg_price,
+    )
+
+    # 只平机器人开仓数量；无 exchange_order_id 的本地行只做 DB 收尾，不碰交易所
+    bot_rows = _bot_owned_positions(open_rows)
     legs_to_close: dict[tuple[str, str], list[Position]] = {}
-    for p in open_rows:
+    for p in bot_rows:
         key = (_panic_symbol_key(p.symbol), p.side.lower())
         legs_to_close.setdefault(key, []).append(p)
 
     results = []
     now = now_beijing()
+    pm = PositionManager()
 
     for (sym_key, side), positions in legs_to_close.items():
+        qty = sum(float(p.quantity or 0) for p in positions)
+        if qty <= 0:
+            results.append({"symbol": sym_key, "side": side, "status": "failed", "error": "zero_qty"})
+            continue
+        # 先撤机器人止盈，避免策略停掉后残留限价继续减仓（伤到同向手动仓）
         try:
-            order = await binance.close_position(sym_key, side)
-        except Exception as e1:
-            try:
-                remaining = await _panic_exchange_leg_contracts(binance, sym_key, side)
-            except Exception as verify_error:
-                results.append({"symbol": sym_key, "side": side, "status": "failed", "error": str(e1)})
-                logging.error(
-                    "Panic close: failed %s %s: %s; verify failed: %s",
-                    sym_key,
-                    side,
-                    e1,
-                    verify_error,
-                )
-                continue
-            if remaining > 0:
-                results.append({"symbol": sym_key, "side": side, "status": "failed", "error": str(e1)})
-                logging.error(
-                    "Panic close: failed %s %s: %s; exchange still has %.8f contracts",
-                    sym_key,
-                    side,
-                    e1,
-                    remaining,
-                )
-                continue
-            order = None
-            logging.warning(
-                "Panic close: close order errored but exchange leg is flat %s %s: %s",
-                sym_key,
-                side,
-                e1,
+            await pm.cancel_bot_tps_on_positions(
+                binance, sym_key, positions, strategy_id
             )
-        if not order:
-            try:
-                remaining = await _panic_exchange_leg_contracts(binance, sym_key, side)
-            except Exception as verify_error:
-                results.append({"symbol": sym_key, "side": side, "status": "failed", "error": "empty_order_response"})
-                logging.error(
-                    "Panic close: empty response %s %s; verify failed: %s",
-                    sym_key,
-                    side,
-                    verify_error,
-                )
-                continue
-            if remaining > 0:
-                results.append({"symbol": sym_key, "side": side, "status": "failed", "error": "empty_order_response"})
-                logging.error(
-                    "Panic close: empty response %s %s; exchange still has %.8f contracts",
-                    sym_key,
-                    side,
-                    remaining,
-                )
-                continue
-        from ..services.position_manager import _order_fill_avg_price
+        except Exception as e_tp:
+            logging.warning(
+                "Panic close: cancel bot TP failed %s %s: %s", sym_key, side, e_tp
+            )
+        try:
+            order = await binance.close_position_qty(sym_key, side, qty)
+        except Exception as e1:
+            results.append({"symbol": sym_key, "side": side, "status": "failed", "error": str(e1)})
+            logging.error("Panic close: failed %s %s qty=%g: %s", sym_key, side, qty, e1)
+            continue
+        if not order or not order.get("id"):
+            results.append({"symbol": sym_key, "side": side, "status": "failed", "error": "empty_order_response"})
+            logging.error("Panic close: empty response %s %s qty=%g", sym_key, side, qty)
+            continue
 
         exit_price = _order_fill_avg_price(order or {}, 0.0, allow_order_price=False)
         results.append({"symbol": sym_key, "side": side, "status": "ok", "exit_price": exit_price, "order": order})
-        logging.info("Panic close: closed %s %s", sym_key, side)
+        logging.info("Panic close: closed bot qty %s %s x%g", sym_key, side, qty)
 
     from ..services.order_times import exit_time_from_order
 
@@ -485,12 +463,54 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
             trades_to_backup.append(trade)
             p.closed_at = exit_time
 
+    # 无 exchange_order_id 的历史/手动领养行：只清本地，不碰交易所
+    orphan_rows = [
+        p
+        for p in open_rows
+        if not (p.exchange_order_id or "").strip() and p.closed_at is None
+    ]
+    for p in orphan_rows:
+        ep = p.mark_price or p.entry_price or 0.0
+        pnl = (ep - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - ep) * p.quantity
+        pct = (
+            ((ep - p.entry_price) / p.entry_price * 100)
+            if p.side == "long" and p.entry_price > 0
+            else ((p.entry_price - ep) / p.entry_price * 100)
+            if p.entry_price > 0
+            else 0
+        )
+        trade = Trade(
+            strategy_id=strategy_id,
+            account_id=account.id,
+            symbol=p.symbol,
+            side=p.side,
+            quantity=p.quantity,
+            entry_price=p.entry_price,
+            exit_price=ep,
+            realized_pnl=pnl,
+            pnl_pct=round(pct, 2),
+            entry_time=p.opened_at or now,
+            exit_time=now,
+            layer=p.layer,
+            close_reason="panic_close_local_only",
+        )
+        db.add(trade)
+        trades_to_backup.append(trade)
+        p.closed_at = now
+        results.append(
+            {
+                "symbol": _panic_symbol_key(p.symbol),
+                "side": (p.side or "").lower(),
+                "status": "ok_local_only",
+            }
+        )
+
     await db.commit()
     for t in trades_to_backup:
         backup_trade(t)
     await strategy_scheduler.remove_strategy(strategy_id)
 
-    closed_count = sum(1 for r in results if r["status"] == "ok")
+    closed_count = sum(1 for r in results if r["status"] in ("ok", "ok_local_only"))
     failed_count = sum(1 for r in results if r["status"] == "failed")
     return {"closed": closed_count, "failed": failed_count, "results": results, "id": strategy_id}
 

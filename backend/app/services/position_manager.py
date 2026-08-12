@@ -427,6 +427,15 @@ RECONCILE_SKIPPED_OTHER_STRATEGY = "skipped_other_strategy"  # same acc: another
 RECONCILE_DB_ERROR = "db_error"
 
 
+def _bot_owned_positions(positions: list) -> list:
+    """仅机器人开仓记录（有 exchange_order_id）。无单号视为手动/领养仓，不管理。"""
+    return [
+        p
+        for p in positions
+        if (getattr(p, "exchange_order_id", None) or "").strip()
+    ]
+
+
 def _klines_for_confirmed_signal_only(klines: list, timeframe: str) -> list:
     """仅使用已收盘 K 线算信号，对齐 TradingView 等「收盘确认」逻辑。
 
@@ -575,6 +584,55 @@ class PositionManager:
             pass
         return False
 
+    async def _cancel_bot_tp_order_ids(
+        self,
+        auth_binance: BinanceService,
+        symbol: str,
+        order_ids: list[str] | set[str],
+        strategy_id: int,
+        *,
+        keep_id: str = "",
+    ) -> None:
+        """只撤销机器人自己记下的止盈单号，绝不扫撤手动限价。"""
+        keep = str(keep_id or "")
+        seen: set[str] = set()
+        for oid in order_ids:
+            oid_s = str(oid or "").strip()
+            if not oid_s or oid_s == keep or oid_s in seen:
+                continue
+            seen.add(oid_s)
+            ok = await self._cancel_tp_order_confirmed(auth_binance, oid_s, symbol)
+            if ok:
+                strategy_log_service.info(
+                    strategy_id, f"{symbol} 撤销机器人止盈限价单 id={oid_s}"
+                )
+            else:
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 撤销机器人止盈单失败 id={oid_s}"
+                )
+
+    async def cancel_bot_tps_on_positions(
+        self,
+        auth_binance: BinanceService,
+        symbol: str,
+        positions: list,
+        strategy_id: int,
+    ) -> None:
+        """平仓前撤掉这些仓位上的机器人止盈单，避免策略停掉后残留限价继续减仓。"""
+        ids = {
+            str(getattr(p, "tp_limit_order_id", None) or "").strip()
+            for p in positions
+            if str(getattr(p, "tp_limit_order_id", None) or "").strip()
+        }
+        if not ids:
+            return
+        await self._cancel_bot_tp_order_ids(
+            auth_binance, symbol, ids, strategy_id, keep_id=""
+        )
+        for p in positions:
+            if getattr(p, "tp_limit_order_id", None):
+                p.tp_limit_order_id = None
+
     async def _cancel_duplicate_tp_limits(
         self,
         auth_binance: BinanceService,
@@ -582,21 +640,19 @@ class PositionManager:
         matches: list[dict],
         keep_id: str,
         strategy_id: int,
+        *,
+        only_bot_ids: set[str] | None = None,
     ) -> None:
-        keep = str(keep_id)
-        for o in matches:
-            oid = str(o.get("id") or "")
-            if not oid or oid == keep:
-                continue
-            ok = await self._cancel_tp_order_confirmed(auth_binance, oid, symbol)
-            if ok:
-                strategy_log_service.info(
-                    strategy_id, f"{symbol} 撤销重复止盈限价单 id={oid}"
-                )
-            else:
-                strategy_log_service.warning(
-                    strategy_id, f"{symbol} 撤销重复止盈单失败 id={oid}"
-                )
+        """兼容旧调用：默认只撤 only_bot_ids；未传则不撤任何「匹配到的」陌生单。"""
+        if only_bot_ids is None:
+            return
+        await self._cancel_bot_tp_order_ids(
+            auth_binance,
+            symbol,
+            only_bot_ids,
+            strategy_id,
+            keep_id=keep_id,
+        )
 
     async def _bind_tp_limit_from_open_orders(
         self,
@@ -609,43 +665,11 @@ class PositionManager:
         strategy_id: int | None = None,
         cancel_duplicates: bool = False,
     ) -> None:
-        """关联交易所平本腿的限价止盈单（币安不强制 reduceOnly）。
+        """不再认领交易所上的陌生限价单（避免把手动止盈绑给机器人）。
 
-        数量与总仓不一致的同腿旧单：在 cancel_duplicates 时全部撤销且不绑定，
-        交给调用方按新总量重挂，避免加仓后「认旧单 + 再挂一张」重复。
+        机器人止盈只使用本地 tp_limit_order_id 或自行新挂。
         """
-        if pos.tp_limit_order_id:
-            return
-        orders = await self._fetch_open_orders_raw(auth_binance, symbol)
-        matches = self._list_matching_tp_close_limits(
-            orders,
-            position_side=position_side,
-            contracts=contracts,
-            auth_binance=auth_binance,
-            require_qty_match=False,
-        )
-        if not matches:
-            return
-        chosen = self._pick_best_tp_match(matches, contracts) or matches[0]
-        if self._tp_qty_ok(chosen, contracts):
-            pos.tp_limit_order_id = str(chosen.get("id"))
-            opx = float(chosen.get("price", 0) or 0)
-            if opx > 0:
-                pos.take_profit_price = opx
-            if cancel_duplicates and strategy_id is not None and len(matches) > 1:
-                await self._cancel_duplicate_tp_limits(
-                    auth_binance, symbol, matches, pos.tp_limit_order_id, strategy_id
-                )
-            return
-        # 数量过时：有策略上下文则撤干净，留给 ensure/马丁重挂
-        if cancel_duplicates and strategy_id is not None:
-            await self._cancel_duplicate_tp_limits(
-                auth_binance, symbol, matches, keep_id="", strategy_id=strategy_id
-            )
-            strategy_log_service.info(
-                strategy_id,
-                f"{symbol} 同腿止盈数量与仓位不符(≈{contracts:.4f})，已撤销待重挂",
-            )
+        return
 
     async def _ensure_tp_limit_orders(
         self,
@@ -659,119 +683,68 @@ class PositionManager:
         total_qty: float,
         pos_side: str,
     ) -> None:
-        """限价止盈开启时：无 tp_limit_order_id 则先关联交易所挂单，否则补挂。
+        """限价止盈：只管理机器人自己的 tp_limit_order_id，按策略数量挂单。
 
-        仅对机器人本地开仓记录补挂（至少一层有 exchange_order_id）。
-        交易所有仓但本地无开仓单号的领养/手动仓：只尝试关联已有挂单，绝不新挂。
+        不认领/不撤销手动限价；无 exchange_order_id 的仓不挂止盈。
         """
         if not getattr(strategy, "take_profit_limit_order", False):
             return
-        if total_qty <= 0 or not open_positions:
+        bot_positions = _bot_owned_positions(open_positions)
+        if not bot_positions:
             return
-
+        bot_qty = sum(float(p.quantity or 0) for p in bot_positions)
+        if bot_qty <= 0:
+            return
+        # 调用方可能传入整腿 total_qty；止盈数量以机器人记账为准
+        qty = bot_qty
         strategy_id = strategy.id
         existing_ids = {
             (p.tp_limit_order_id or "").strip()
-            for p in open_positions
+            for p in bot_positions
             if (p.tp_limit_order_id or "").strip()
         }
-        # 已有本地止盈单号：扫同腿（含数量过时），数量对则去重；不对则撤干净后重挂
+
         if existing_ids:
-            orders = await self._fetch_open_orders_raw(auth_binance, symbol)
-            matches = self._list_matching_tp_close_limits(
-                orders,
-                position_side=pos_side,
-                contracts=total_qty,
-                auth_binance=auth_binance,
-                require_qty_match=False,
-            )
             keep = sorted(existing_ids)[0]
-            by_id = {str(o.get("id")): o for o in matches if o.get("id")}
-            keep_order = by_id.get(keep)
-            if keep_order is None and matches:
-                keep_order = self._pick_best_tp_match(matches, total_qty) or matches[0]
-                keep = str(keep_order.get("id"))
-            if keep_order is not None and self._tp_qty_ok(keep_order, total_qty):
-                for p in open_positions:
-                    p.tp_limit_order_id = keep
+            keep_order = None
+            try:
+                keep_order = await asyncio.wait_for(
+                    _fetch_order(auth_binance, keep, symbol), timeout=3.0
+                )
+            except (Exception, asyncio.TimeoutError):
+                keep_order = None
+            st = ((keep_order or {}).get("status") or "").lower()
+            if keep_order and st in ("open", "new", "partially_filled", "partial"):
+                if self._tp_qty_ok(keep_order, qty):
                     px = float(keep_order.get("price", 0) or 0)
-                    if px > 0:
-                        p.take_profit_price = px
-                if len(matches) > 1:
-                    await self._cancel_duplicate_tp_limits(
-                        auth_binance, symbol, matches, keep, strategy_id
+                    for p in bot_positions:
+                        p.tp_limit_order_id = keep
+                        if px > 0:
+                            p.take_profit_price = px
+                    # 只撤其它机器人记下的重复 id，不动手动单
+                    await self._cancel_bot_tp_order_ids(
+                        auth_binance, symbol, existing_ids, strategy_id, keep_id=keep
                     )
+                    await session.flush()
+                    return
+                # 数量不符：只撤机器人自己的旧单后重挂
+                await self._cancel_bot_tp_order_ids(
+                    auth_binance, symbol, existing_ids, strategy_id, keep_id=""
+                )
+                for p in bot_positions:
+                    p.tp_limit_order_id = None
                 await session.flush()
+            elif keep_order and st in ("closed", "filled"):
+                # 已成交：交给 TP 成交检测，这里不重挂
                 return
-            if not matches:
-                # 未见同腿挂单：保留本地 id（可能暂态空列表或已成交由 TP 检测处理），禁止盲挂
-                return
-            # 同腿有单但数量不符 / 本地 id 不在簿：撤干净后重挂
-            await self._cancel_duplicate_tp_limits(
-                auth_binance, symbol, matches, keep_id="", strategy_id=strategy_id
-            )
-            for p in open_positions:
-                p.tp_limit_order_id = None
-            await session.flush()
-            # 落入下方补挂
-
-        bot_opened = any((p.exchange_order_id or "").strip() for p in open_positions)
-        anchor = max(open_positions, key=lambda p: p.layer)
-        await self._bind_tp_limit_from_open_orders(
-            auth_binance,
-            symbol,
-            pos_side,
-            anchor,
-            total_qty,
-            strategy_id=strategy_id,
-            cancel_duplicates=True,
-        )
-        if (anchor.tp_limit_order_id or "").strip():
-            oid = str(anchor.tp_limit_order_id)
-            for p in open_positions:
-                p.tp_limit_order_id = oid
-                if anchor.take_profit_price:
-                    p.take_profit_price = anchor.take_profit_price
-            strategy_log_service.info(
-                strategy_id, f"{symbol} 补关联交易所止盈限价单 id={oid}"
-            )
-            await session.flush()
-            return
-
-        if not bot_opened:
-            # 非策略开仓（无 exchange_order_id）：不挂止盈，避免干预手动单
-            return
-
-        # 再扫一次：仅数量匹配的才沿用，禁止「认旧偏小单」后仍新挂
-        orders = await self._fetch_open_orders_raw(auth_binance, symbol)
-        matches = self._list_matching_tp_close_limits(
-            orders,
-            position_side=pos_side,
-            contracts=total_qty,
-            auth_binance=auth_binance,
-            require_qty_match=False,
-        )
-        qty_ok = [o for o in matches if self._tp_qty_ok(o, total_qty)]
-        if qty_ok:
-            chosen = self._pick_best_tp_match(qty_ok, total_qty) or qty_ok[0]
-            oid = str(chosen.get("id"))
-            px = float(chosen.get("price", 0) or 0)
-            for p in open_positions:
-                p.tp_limit_order_id = oid
-                if px > 0:
-                    p.take_profit_price = px
-            await self._cancel_duplicate_tp_limits(
-                auth_binance, symbol, matches, oid, strategy_id
-            )
-            await session.flush()
-            strategy_log_service.info(
-                strategy_id, f"{symbol} 补关联交易所止盈限价单 id={oid}"
-            )
-            return
-        if matches:
-            await self._cancel_duplicate_tp_limits(
-                auth_binance, symbol, matches, keep_id="", strategy_id=strategy_id
-            )
+            else:
+                # 查不到/已取消：清本地 id 后重挂
+                await self._cancel_bot_tp_order_ids(
+                    auth_binance, symbol, existing_ids, strategy_id, keep_id=""
+                )
+                for p in bot_positions:
+                    p.tp_limit_order_id = None
+                await session.flush()
 
         tp_price = eng.get_take_profit_price(avg_entry, pos_side)
         if tp_price <= 0:
@@ -783,7 +756,7 @@ class PositionManager:
                 tp_order = await auth_binance.create_limit_order(
                     symbol,
                     close_side,
-                    total_qty,
+                    qty,
                     tp_price,
                     reduce_only=_tp_limit_reduce_only(auth_binance),
                     position_side=ps,
@@ -791,13 +764,13 @@ class PositionManager:
                 oid = tp_order.get("id", "")
                 if oid:
                     oid_s = str(oid)
-                    for p in open_positions:
+                    for p in bot_positions:
                         p.tp_limit_order_id = oid_s
                         p.take_profit_price = tp_price
                     await session.flush()
                     strategy_log_service.info(
                         strategy_id,
-                        f"{symbol} 补挂止盈限价单 @{tp_price:.6f} qty={total_qty:.4f} id={oid_s}",
+                        f"{symbol} 补挂止盈限价单 @{tp_price:.6f} qty={qty:.4f} id={oid_s}",
                     )
                     return
                 strategy_log_service.warning(
@@ -826,12 +799,20 @@ class PositionManager:
         current_price: float,
         *,
         raw_exchange_positions: list[dict[str, Any]] | None = None,
+        adopt: bool = False,
+        exchange_order_id: str = "",
+        quantity: float | None = None,
+        entry_price_override: float | None = None,
     ) -> str:
-        """Sync exchange net position into this strategy's DB row when missing.
+        """仅在机器人刚成交但本地无行时补建（须 adopt=True 且带 exchange_order_id）。
 
-        Returns one of RECONCILE_* constants.
+        默认不领养交易所手动仓。Returns one of RECONCILE_* constants.
         """
         strategy_id = strategy.id
+        oid = str(exchange_order_id or "").strip()
+        if not adopt or not oid:
+            return RECONCILE_NO_ORPHAN
+
         sym_target = _norm_sym(symbol)
         if raw_exchange_positions is not None:
             eps = [
@@ -902,14 +883,19 @@ class PositionManager:
                 )
                 continue
 
-            entry_price = float(ep.get("entryPrice") or ep.get("entry_price") or 0)
+            entry_price = float(entry_price_override or 0)
+            if entry_price <= 0:
+                entry_price = float(ep.get("entryPrice") or ep.get("entry_price") or 0)
             if entry_price <= 0:
                 entry_price = float(ep.get("markPrice") or ep.get("mark_price") or current_price)
             mark_price = float(ep.get("markPrice") or ep.get("mark_price") or current_price)
             upnl = float(ep.get("unrealizedPnl") or ep.get("unrealized_pnl") or 0)
+            qty = float(quantity or 0)
+            if qty <= 0:
+                qty = contracts
 
             eng = MartingaleEngine(
-                base_quantity=contracts,
+                base_quantity=qty,
                 multiplier=strategy.martingale_mult,
                 max_layers=strategy.max_layers,
                 price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0),
@@ -924,17 +910,16 @@ class PositionManager:
                 account_id=strategy.account_id,
                 symbol=ep_sym,
                 side=side,
-                quantity=contracts,
+                quantity=qty,
                 entry_price=entry_price,
                 mark_price=mark_price,
                 unrealized_pnl=upnl,
                 layer=0,
                 take_profit_price=tp_price,
-                exchange_order_id="",
+                exchange_order_id=oid,
                 opened_at=opened_at,
             )
             session.add(pos)
-            await self._bind_tp_limit_from_open_orders(auth_binance, symbol, side, pos, contracts)
             try:
                 await session.flush()
             except Exception as e:
@@ -949,20 +934,18 @@ class PositionManager:
             created = True
             own_keys.add((ep_sym, side))
             logger.warning(
-                "Strategy %d: reconciled DB Position from exchange — %s %s qty=%.6f entry=%.6f (local row was missing)",
+                "Strategy %d: reconciled bot open into DB — %s %s qty=%.6f entry=%.6f order=%s",
                 strategy_id,
                 ep_sym,
                 side,
-                contracts,
+                qty,
                 entry_price,
+                oid,
             )
-            msg = (
-                f"{ep_sym} 交易所有{side}仓但本地无开仓记录 — 已恢复一条持仓(L0)防重复开仓；"
-                f"非策略原单不自动挂止盈"
+            strategy_log_service.warning(
+                strategy_id,
+                f"{ep_sym} 写库缺失已按成交单 {oid} 补建持仓(L0) qty={qty:.6f}",
             )
-            if pos.tp_limit_order_id:
-                msg += f"（已关联交易所已有限价单 id={pos.tp_limit_order_id}）"
-            strategy_log_service.warning(strategy_id, msg)
 
         if created:
             return RECONCILE_CREATED
@@ -1831,6 +1814,42 @@ class PositionManager:
             f"price={result.avg_price:.4f} {_open_signal_log_suffix(result.signal_label, result.rsi)}",
         )
 
+    async def recover_bot_open_after_db_fail(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        result: OpenApiResult,
+        auth_binance: BinanceService,
+    ) -> bool:
+        """市价已成交但 execute_open_db 失败时，仅用本笔成交单号补建（不领养手动仓）。"""
+        oid = str((result.order or {}).get("id") or "").strip()
+        if not oid:
+            logger.error(
+                "Strategy %d: open DB fail recover skipped — missing fill order id (%s)",
+                strategy.id,
+                result.symbol,
+            )
+            return False
+        qty = float(result.filled_qty or 0) or float(getattr(result, "base_qty", 0) or 0) or None
+        outcome = await self._reconcile_orphan_from_exchange(
+            session,
+            strategy,
+            result.symbol,
+            auth_binance,
+            float(result.avg_price or result.current_price or 0),
+            adopt=True,
+            exchange_order_id=oid,
+            quantity=qty,
+            entry_price_override=float(result.avg_price or 0) or None,
+        )
+        if outcome == RECONCILE_CREATED:
+            strategy_log_service.warning(
+                strategy.id,
+                f"{_norm_sym(result.symbol)} 写库失败后已用成交单号补建仓位记录",
+            )
+            return True
+        return False
+
     async def process_symbol(
         self,
         session: AsyncSession,
@@ -1978,20 +1997,6 @@ class PositionManager:
                     candidate.current_price,
                     raw_exchange_positions=ctx.raw_exchange_positions,
                 )
-                if outcome == RECONCILE_CREATED:
-                    open_positions = list(
-                        (await session.execute(self._open_positions_stmt(strategy_id, sym_key))).scalars().all()
-                    )
-                    if open_positions:
-                        strategy_log_service.info(
-                            strategy_id,
-                            f"{symbol} 交易所已有{side}仓，已同步本地记录并进入管理",
-                        )
-                        await self.manage_symbol(
-                            session, strategy, symbol, auth_binance, public_binance,
-                            open_positions, total_margin, leverage, ctx,
-                        )
-                        return
                 if outcome == RECONCILE_SKIPPED_OTHER_STRATEGY:
                     strategy_log_service.info(
                         strategy_id,
@@ -2006,9 +2011,10 @@ class PositionManager:
                         f"{symbol} 写入持仓数据库失败 — 已阻止重复市价开仓，请查看 logs/bot.log 中的异常详情",
                     )
                     return
-                strategy_log_service.warning(
+                # 默认不领养手动仓：有同向净仓则跳过新开，避免叠在手动腿上
+                strategy_log_service.info(
                     strategy_id,
-                    f"{symbol} 交易所有{side}仓但未能为本策略创建本地记录 — 已阻止重复市价开仓（若非双策略抢同一方向，请查看 bot.log reconcile 日志）",
+                    f"{symbol} 交易所已有{side}仓（可能为手动）— 不领养、不开新仓",
                 )
                 return
             except Exception as e:
@@ -2027,8 +2033,28 @@ class PositionManager:
             strategy_id, symbol, candidate.signal.value,
         )
         api_result = await self.execute_open_api(candidate, strategy, auth_binance, leverage)
-        if api_result:
+        if not api_result:
+            return
+        try:
             await self.execute_open_db(session, strategy, api_result)
+        except Exception:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            try:
+                recovered = await self.recover_bot_open_after_db_fail(
+                    session, strategy, api_result, auth_binance
+                )
+                if recovered:
+                    return
+            except Exception as e2:
+                logger.error(
+                    "Strategy %d: open DB fail recover for %s failed: %s",
+                    strategy_id,
+                    symbol,
+                    e2,
+                )
 
     async def _open_position(
         self,
@@ -2062,6 +2088,16 @@ class PositionManager:
         self, session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines=None, ctx: TickContext | None = None
     ):
         strategy_id = strategy.id
+        # 只管理机器人开仓；无 exchange_order_id 视为手动/历史领养，不碰交易所
+        bot_positions = _bot_owned_positions(open_positions)
+        if not bot_positions:
+            logger.info(
+                "Strategy %d: skip manage %s — no bot-owned rows (missing exchange_order_id)",
+                strategy_id,
+                symbol,
+            )
+            return
+        open_positions = bot_positions
         pos_side = open_positions[0].side
 
         positions_data = [{"quantity": p.quantity, "entry_price": p.entry_price} for p in open_positions]
@@ -2083,16 +2119,8 @@ class PositionManager:
         has_open_tp_limit = bool(strategy.take_profit_limit_order) and any(
             (p.tp_limit_order_id or "").strip() for p in open_positions
         )
-        exchange_upnl = _symbol_unrealized_pnl_from_exchange(
-            ctx.raw_exchange_positions if ctx else [],
-            symbol,
-            pos_side,
-        )
-        symbol_unrealized_pnl = (
-            exchange_upnl
-            if exchange_upnl is not None
-            else sum(float(p.unrealized_pnl or 0) for p in open_positions)
-        )
+        # 单币止损只用机器人记账浮亏，避免把同向手动仓盈亏算进来
+        symbol_unrealized_pnl = sum(float(p.unrealized_pnl or 0) for p in open_positions)
         symbol_floating_loss = max(0.0, -symbol_unrealized_pnl)
         # total_margin 来自 tick 的 extract_margin_balance（权益，非钱包）
         margin_balance = float(total_margin)
@@ -2115,7 +2143,7 @@ class PositionManager:
                 margin_balance,
                 margin_balance * (threshold_pct / 100.0),
                 threshold_pct,
-                "exchange" if exchange_upnl is not None else "local",
+                "bot_local",
             )
             strategy_log_service.warning(
                 strategy_id,
@@ -2213,7 +2241,7 @@ class PositionManager:
             Position.strategy_id == strategy_id, Position.closed_at.is_(None)
         )
         result = await session.execute(stmt)
-        open_positions = list(result.scalars().all())
+        open_positions = _bot_owned_positions(list(result.scalars().all()))
 
         processed_symbols: set[tuple[str, str]] = set()
         for p in open_positions:
@@ -2291,6 +2319,15 @@ class PositionManager:
         fill_order: dict | None = None,
     ):
         strategy_id = strategy.id
+        # 双保险：市价减仓只针对机器人开仓行
+        open_positions = _bot_owned_positions(list(open_positions or []))
+        if not open_positions:
+            logger.info(
+                "Strategy %d: _close_positions skip %s — no bot-owned rows",
+                strategy_id,
+                symbol,
+            )
+            return
 
         exit_price = 0.0
 
@@ -2376,7 +2413,14 @@ class PositionManager:
                             pass
                         p.tp_limit_order_id = None
                 try:
-                    result = await auth_binance.close_position(symbol, pos_side)
+                    close_qty = sum(
+                        float(p.quantity or 0)
+                        for p in open_positions
+                        if p.closed_at is None
+                    )
+                    result = await auth_binance.close_position_qty(
+                        symbol, pos_side, close_qty
+                    )
                     if result and result.get("id"):
                         # fallback=0：禁止用 K 线价写库，必须解析市价成交均价
                         exit_price, fill_order = await _resolve_market_close_exit(
@@ -2391,7 +2435,7 @@ class PositionManager:
                         close_reason = "take_profit"
                         strategy_log_service.success(
                             strategy_id,
-                            f"{symbol} 兜底市价止盈 成交均价@{exit_price:.8g}",
+                            f"{symbol} 兜底市价止盈 成交均价@{exit_price:.8g} qty={close_qty:g}",
                         )
                     else:
                         strategy_log_service.warning(strategy_id, f"{symbol} 兜底平仓失败 — 未找到交易所仓位")
@@ -2437,7 +2481,14 @@ class PositionManager:
 
             if exit_price <= 0:
                 try:
-                    result = await auth_binance.close_position(symbol, pos_side)
+                    close_qty = sum(
+                        float(p.quantity or 0)
+                        for p in open_positions
+                        if p.closed_at is None
+                    )
+                    result = await auth_binance.close_position_qty(
+                        symbol, pos_side, close_qty
+                    )
                     if result and result.get("id"):
                         exit_price, fill_order = await _resolve_market_close_exit(
                             auth_binance, symbol, result, 0.0
@@ -2692,87 +2743,50 @@ class PositionManager:
                     f"{symbol} 加仓后止盈未更新（旧单未撤净）；下次 manage 将尝试关联/去重",
                 )
             else:
-                # 撤单后：数量正确的同腿单才沿用；偏小旧单撤干净再新挂
-                orders = await self._fetch_open_orders_raw(auth_binance, symbol)
-                matches = self._list_matching_tp_close_limits(
-                    orders,
-                    position_side=pos_side,
-                    contracts=new_total,
-                    auth_binance=auth_binance,
-                    require_qty_match=False,
-                )
-                qty_ok = [o for o in matches if self._tp_qty_ok(o, new_total)]
-                if qty_ok:
-                    chosen = self._pick_best_tp_match(qty_ok, new_total) or qty_ok[0]
-                    keep = str(chosen.get("id"))
-                    px = float(chosen.get("price", 0) or 0)
-                    pos.tp_limit_order_id = keep
-                    if px > 0:
-                        pos.take_profit_price = px
-                    for p in open_positions:
-                        p.tp_limit_order_id = keep
-                        if px > 0:
-                            p.take_profit_price = px
-                    await self._cancel_duplicate_tp_limits(
-                        auth_binance, symbol, matches, keep, strategy_id
-                    )
-                    await session.flush()
-                    strategy_log_service.info(
-                        strategy_id,
-                        f"{symbol} 加仓后沿用交易所止盈限价 id={keep} qty≈{new_total:.4f}",
-                    )
-                else:
-                    if matches:
-                        await self._cancel_duplicate_tp_limits(
-                            auth_binance,
+                # 旧机器人止盈已撤：按策略总数量新挂，不认领/不撤手动限价
+                tp_placed = False
+                close_side = "sell" if pos_side == "long" else "buy"
+                for attempt in range(2):
+                    try:
+                        tp_order = await auth_binance.create_limit_order(
                             symbol,
-                            matches,
-                            keep_id="",
-                            strategy_id=strategy_id,
+                            close_side,
+                            new_total,
+                            tp_price,
+                            reduce_only=_tp_limit_reduce_only(auth_binance),
+                            position_side=ps,
                         )
-                    tp_placed = False
-                    close_side = "sell" if pos_side == "long" else "buy"
-                    for attempt in range(2):
-                        try:
-                            tp_order = await auth_binance.create_limit_order(
-                                symbol,
-                                close_side,
-                                new_total,
-                                tp_price,
-                                reduce_only=_tp_limit_reduce_only(auth_binance),
-                                position_side=ps,
-                            )
-                            tp_order_id = tp_order.get("id", "")
-                            if tp_order_id:
-                                pos.tp_limit_order_id = tp_order_id
-                                for p in open_positions:
-                                    p.tp_limit_order_id = str(tp_order_id)
-                                    p.take_profit_price = tp_price
-                                await session.flush()
-                                strategy_log_service.info(
-                                    strategy_id,
-                                    f"{symbol} 更新止盈挂单 @{tp_price:.6f} qty={new_total:.4f}",
-                                )
-                                tp_placed = True
-                                break
-                            strategy_log_service.warning(
-                                strategy_id, f"{symbol} 更新止盈单异常 — 返回无id: {tp_order}"
-                            )
-                        except Exception as tp_err:
-                            logger.error(
-                                "Strategy %d: TP limit update failed for %s (attempt %d): %s",
+                        tp_order_id = tp_order.get("id", "")
+                        if tp_order_id:
+                            pos.tp_limit_order_id = tp_order_id
+                            for p in open_positions:
+                                p.tp_limit_order_id = str(tp_order_id)
+                                p.take_profit_price = tp_price
+                            await session.flush()
+                            strategy_log_service.info(
                                 strategy_id,
-                                symbol,
-                                attempt + 1,
-                                tp_err,
+                                f"{symbol} 更新止盈挂单 @{tp_price:.6f} qty={new_total:.4f}",
                             )
-                            if attempt == 0:
-                                await asyncio.sleep(0.5)
-                    if not tp_placed:
+                            tp_placed = True
+                            break
                         strategy_log_service.warning(
-                            strategy_id,
-                            f"{symbol} 止盈挂单更新失败(已重试) — 下次tick将用市价止盈兜底",
+                            strategy_id, f"{symbol} 更新止盈单异常 — 返回无id: {tp_order}"
                         )
+                    except Exception as tp_err:
+                        logger.error(
+                            "Strategy %d: TP limit update failed for %s (attempt %d): %s",
+                            strategy_id,
+                            symbol,
+                            attempt + 1,
+                            tp_err,
+                        )
+                        if attempt == 0:
+                            await asyncio.sleep(0.5)
+                if not tp_placed:
+                    strategy_log_service.warning(
+                        strategy_id,
+                        f"{symbol} 止盈挂单更新失败(已重试) — 下次tick将用市价止盈兜底",
+                    )
 
         logger.info("Strategy %d: martingale add layer %d for %s qty=%.4f price=%.4f drop=%.1f%%",
                     strategy_id, result.next_layer, symbol, result.next_quantity, new_avg, result.price_drop_from_last)

@@ -43,7 +43,7 @@ from .log_service import strategy_log_service
 from .kline_stream import kline_stream_manager, _timeframe_ms
 from .price_stream import price_stream_manager
 from .account_position_stream import account_position_stream
-from .position_manager import PositionManager, _norm_sym, RECONCILE_CREATED
+from .position_manager import PositionManager, _norm_sym
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem
 from .strategy_concurrency import hold_strategy_symbol
@@ -1070,6 +1070,12 @@ class WickSpikeRunner:
                     symbol,
                     e,
                 )
+                # fail-closed：查不到持仓则不开，避免叠在手动同向腿上
+                strategy_log_service.warning(
+                    strategy_id,
+                    f"{symbol} 接针开仓前持仓复检失败，跳过本轮 — {e}",
+                )
+                return skip("retryable_fail", "pos_recheck_failed")
 
         detect_ms = (
             (time.perf_counter() - signal_detect_perf) * 1000.0
@@ -1237,24 +1243,16 @@ class WickSpikeRunner:
                     if attempt + 1 < _DB_WRITE_RETRIES:
                         await asyncio.sleep(_DB_WRITE_RETRY_DELAY_SEC)
 
-            # 重试耗尽：孤儿仓对账补写
+            # 重试耗尽：仅用本笔成交单号补建（不领养手动仓）
             try:
                 async with async_session() as session:
                     db_strategy = await session.get(Strategy, strategy_id)
                     if db_strategy is not None:
-                        outcome = await self._position_mgr._reconcile_orphan_from_exchange(
-                            session,
-                            db_strategy,
-                            symbol,
-                            auth,
-                            float(api_res.avg_price or price or 0),
+                        recovered = await self._position_mgr.recover_bot_open_after_db_fail(
+                            session, db_strategy, api_res, auth
                         )
                         await session.commit()
-                        if outcome == RECONCILE_CREATED:
-                            strategy_log_service.warning(
-                                strategy_id,
-                                f"{symbol} 写库重试失败后已通过对账补建仓位记录",
-                            )
+                        if recovered:
                             logger.warning(
                                 "wick_spike %d %s DB fail recovered via orphan reconcile",
                                 strategy_id,

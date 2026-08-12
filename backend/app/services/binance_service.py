@@ -825,27 +825,55 @@ class BinanceService:
             params=self._order_params(position_side, reduce_only),
         )
 
-    async def close_position(self, symbol: str, side: str) -> dict:
-        """Close entire symbol+side leg. Hedge: prefer Binance closePosition; else chunked reduce."""
+    async def close_position_qty(self, symbol: str, side: str, amount: float) -> dict:
+        """按数量减仓平仓（reduceOnly），不扫整腿、不用 closePosition。
+
+        用于只平机器人记账数量，保留同向手动仓。
+        """
+        qty = float(amount or 0)
+        if qty <= 0:
+            logger.warning("close_position_qty: non-positive amount for %s %s", symbol, side)
+            return {}
         formatted_symbol = self._format_symbol(symbol)
         await self.exchange.load_markets()
         position_side = "LONG" if side == "long" else "SHORT"
         close_side = "sell" if side == "long" else "buy"
 
-        if self.hedge_mode:
-            params = dict(self._order_params(position_side, reduce_only=True))
-            params["closePosition"] = True
+        max_mkt = self._futures_market_max_order_qty(formatted_symbol)
+        if max_mkt is None or max_mkt <= 0 or qty <= max_mkt:
             try:
-                return await self.exchange.create_order(
-                    formatted_symbol, "market", close_side, 0, None, params
+                return await self.create_market_order(
+                    symbol,
+                    close_side,
+                    qty,
+                    reduce_only=True,
+                    position_side=position_side,
                 )
             except Exception as e:
-                logger.warning(
-                    "close_position: closePosition failed for %s %s, falling back to chunked reduce: %s",
-                    symbol,
-                    side,
-                    e,
-                )
+                err = str(e)
+                if "-1106" in err:
+                    return await self.create_market_order(
+                        symbol,
+                        close_side,
+                        qty,
+                        reduce_only=False,
+                        position_side=position_side,
+                    )
+                if "-4005" in err:
+                    return await self._create_market_reduce_chunked(
+                        symbol, close_side, qty, position_side
+                    )
+                raise
+        return await self._create_market_reduce_chunked(
+            symbol, close_side, qty, position_side
+        )
+
+    async def close_position(self, symbol: str, side: str) -> dict:
+        """Close entire symbol+side leg (账户删除等场景)。策略平仓请用 close_position_qty。"""
+        formatted_symbol = self._format_symbol(symbol)
+        await self.exchange.load_markets()
+        position_side = "LONG" if side == "long" else "SHORT"
+        close_side = "sell" if side == "long" else "buy"
 
         positions = await self.fetch_positions([symbol])
         total_contracts = 0.0
@@ -858,24 +886,7 @@ class BinanceService:
             logger.warning("close_position: no contracts found for %s %s (positions: %d)", symbol, side, len(positions))
             return {}
 
-        max_mkt = self._futures_market_max_order_qty(formatted_symbol)
-        if max_mkt is None or max_mkt <= 0 or total_contracts <= max_mkt:
-            try:
-                return await self.create_market_order(
-                    symbol, close_side, total_contracts,
-                    reduce_only=True, position_side=position_side,
-                )
-            except Exception as e:
-                err = str(e)
-                if "-1106" in err:
-                    return await self.create_market_order(
-                        symbol, close_side, total_contracts,
-                        reduce_only=False, position_side=position_side,
-                    )
-                if "-4005" in err:
-                    return await self._create_market_reduce_chunked(symbol, close_side, total_contracts, position_side)
-                raise
-        return await self._create_market_reduce_chunked(symbol, close_side, total_contracts, position_side)
+        return await self.close_position_qty(symbol, side, total_contracts)
 
     async def close_position_with_limit(self, symbol: str, side: str, price: float) -> dict:
         """Close position using a limit order at the specified price. Handles hedge mode."""

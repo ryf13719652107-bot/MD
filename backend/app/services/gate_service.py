@@ -786,12 +786,27 @@ class GateService:
         )
         return self._order_qty_to_base(order, cs)
 
-    async def close_position(self, symbol: str, side: str) -> dict:
-        formatted = self._format_symbol(symbol)
+    async def close_position_qty(self, symbol: str, side: str, amount: float) -> dict:
+        """按数量减仓平仓（reduceOnly），不扫整腿。"""
+        qty = float(amount or 0)
+        if qty <= 0:
+            logger.warning("Gate close_position_qty: non-positive amount for %s %s", symbol, side)
+            return {}
         await self.ensure_markets_loaded()
         position_side = "LONG" if side == "long" else "SHORT"
         close_side = "sell" if side == "long" else "buy"
+        return await self.create_market_order(
+            symbol,
+            close_side,
+            qty,
+            reduce_only=True,
+            position_side=position_side,
+        )
 
+    async def close_position(self, symbol: str, side: str) -> dict:
+        """Close entire symbol+side leg（账户删除等）。策略平仓请用 close_position_qty。"""
+        formatted = self._format_symbol(symbol)
+        await self.ensure_markets_loaded()
         want = side.lower()
         positions = await self.fetch_positions([symbol])
         total_base = 0.0
@@ -809,19 +824,15 @@ class GateService:
             return {}
 
         try:
-            return await self.create_market_order(
-                symbol,
-                close_side,
-                total_base,
-                reduce_only=True,
-                position_side=position_side,
-            )
+            return await self.close_position_qty(symbol, side, total_base)
         except Exception as e:
             logger.warning(
                 "Gate close_position sized reduce failed for %s %s, try auto_size: %s",
                 symbol, side, e,
             )
 
+        position_side = "LONG" if side == "long" else "SHORT"
+        close_side = "sell" if side == "long" else "buy"
         auto = "close_long" if want == "long" else "close_short"
         params = {"settle": "usdt", "reduceOnly": True, "auto_size": auto}
         try:

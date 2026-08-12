@@ -54,20 +54,31 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
 
     binance = await get_exchange_for_account(account)
 
-    # Cancel existing TP limit order before closing
-    if position.tp_limit_order_id:
-        try:
-            await binance.cancel_order(position.tp_limit_order_id, position.symbol)
-        except Exception:
-            pass
-
-    result = await binance.close_position(position.symbol, position.side)
-    if not result or not result.get("id"):
-        raise HTTPException(status_code=500, detail="Exchange did not confirm the close order")
-
     from ..services.position_manager import _order_fill_avg_price
 
-    exit_price = _order_fill_avg_price(result, 0.0, allow_order_price=False)
+    bot_owned = bool((position.exchange_order_id or "").strip())
+    result = None
+    exit_price = 0.0
+
+    if bot_owned:
+        # 只撤机器人自己的止盈单号
+        if position.tp_limit_order_id:
+            try:
+                await binance.cancel_order(position.tp_limit_order_id, position.symbol)
+            except Exception:
+                pass
+        close_qty = float(position.quantity or 0)
+        if close_qty <= 0:
+            raise HTTPException(status_code=400, detail="持仓数量无效")
+        result = await binance.close_position_qty(
+            position.symbol, position.side, close_qty
+        )
+        if not result or not result.get("id"):
+            raise HTTPException(
+                status_code=500, detail="Exchange did not confirm the close order"
+            )
+        exit_price = _order_fill_avg_price(result, 0.0, allow_order_price=False)
+    # 无 exchange_order_id：视为非机器人仓，只清本地记录，不碰交易所
     if exit_price <= 0:
         exit_price = position.mark_price or position.entry_price
 
