@@ -81,7 +81,7 @@ class WickSpikeParams:
     rebound_enabled: bool = False
     rebound_trigger_pct: float = 20.0  # 反弹占针深%触发市价
     rebound_abort_pct: float = 35.0    # 反弹占针深%放弃
-    rebound_wait_sec: float = 5.0      # 针尖停住后再等反弹的超时秒数（破新尖重置）
+    rebound_wait_sec: float = 0.0      # 针尖停住后再等反弹的超时秒数（破新尖重置）；0=不超时
     # 1m 开盘 vs EMA25 过滤；产品层默认开，此处默认关（单测不受趋势滤）
     ema25_filter_enabled: bool = False
     ema25_period: int = 25
@@ -630,8 +630,9 @@ def is_arm_active(
         and state.triggered_bar_ts != bar_open_ts
     ):
         rw = float(params.rebound_wait_sec or 0)
+        # wait<=0：不超时，整根 K 内保持强制重判（直到开火/放弃/换根）
         if rw <= 0:
-            return False
+            return True
         return (now_ms - state.rebound_at_ms) <= int(rw * 1000) + 1
 
     # 原武装窗检查

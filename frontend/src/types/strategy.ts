@@ -42,7 +42,7 @@ export interface Strategy {
   wick_rebound_trigger_pct: number;
   /** 反弹占针深 % 放弃（超此为反转）；默认 35 */
   wick_rebound_abort_pct: number;
-  /** confirm 后等反弹超时秒数；默认 5 */
+  /** confirm 后等反弹超时秒数；默认 0=不超时 */
   wick_rebound_wait_sec: number;
   /** 接针加仓：默认 price_and_wt；price_drop=仅涨跌幅 */
   wick_martingale_mode: 'price_drop' | 'price_and_wt';

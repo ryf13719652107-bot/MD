@@ -156,9 +156,9 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             else 35.0
         ),
         rebound_wait_sec=float(
-            getattr(strategy, "wick_rebound_wait_sec", 5.0)
+            getattr(strategy, "wick_rebound_wait_sec", 0.0)
             if getattr(strategy, "wick_rebound_wait_sec", None) is not None
-            else 5.0
+            else 0.0
         ),
         # 1m 开盘 vs EMA25：产品默认开
         ema25_filter_enabled=(
@@ -667,10 +667,19 @@ class WickSpikeRunner:
                             f"{snap.vol_sma:.1f}",
                         )
                     if signal is None:
-                        # 武装且等量时后台 REST 补强本根 K 线，解决 WS 量能/极值滞后
-                        if (
+                        # 武装等量 / 反弹窗内：后台 REST 补强本根，解决 WS 高低/量滞后
+                        # （反弹窗尤其需要：尖峰常比成交价流晚到 K 线）
+                        in_rebound = (
+                            st.rebound_bar_ts == snap.bar_open_ts
+                            and st.rebound_at_ms > 0
+                            and st.triggered_bar_ts != snap.bar_open_ts
+                        )
+                        need_forming_rest = in_rebound or (
                             st.armed_bar_ts == snap.bar_open_ts
                             and st.armed_awaiting_vol
+                        )
+                        if (
+                            need_forming_rest
                             and sym_key not in arm_rest_inflight
                             and now - last_arm_rest.get(sym_key, 0.0) >= _ARM_REST_SEC
                         ):

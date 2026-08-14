@@ -76,9 +76,9 @@ class Strategy(Base):
     wick_rebound_abort_pct: Mapped[float] = mapped_column(
         Float, default=35.0, server_default="35.0"
     )
-    # confirm后等反弹超时秒数
+    # confirm后等反弹超时秒数；0=不超时（整根 K 内等开火/放弃）
     wick_rebound_wait_sec: Mapped[float] = mapped_column(
-        Float, default=5.0, server_default="5.0"
+        Float, default=0.0, server_default="0.0"
     )
     # 接针加仓模式：price_drop=仅涨跌幅；price_and_wt=涨跌幅+WT确认（默认）
     wick_martingale_mode: Mapped[str] = mapped_column(

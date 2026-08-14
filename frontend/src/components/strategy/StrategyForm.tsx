@@ -153,7 +153,7 @@ function toFormDefaults(
       wick_ema25_filter_enabled: initialData.wick_ema25_filter_enabled ?? true,
       wick_rebound_trigger_pct: initialData.wick_rebound_trigger_pct ?? 20,
       wick_rebound_abort_pct: initialData.wick_rebound_abort_pct ?? 35,
-      wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 5,
+      wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 0,
       wick_martingale_mode:
         initialData.wick_martingale_mode === 'price_drop' ? 'price_drop' : 'price_and_wt',
       margin_threshold: initialData.margin_threshold,
@@ -233,7 +233,7 @@ function toFormDefaults(
     wick_ema25_filter_enabled: true,
     wick_rebound_trigger_pct: 20,
     wick_rebound_abort_pct: 35,
-    wick_rebound_wait_sec: 5,
+    wick_rebound_wait_sec: 0,
     wick_martingale_mode: 'price_and_wt',
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
@@ -525,7 +525,7 @@ export default function StrategyForm({
               <div>
                 <label className={labelClass}>等反弹超时(秒)</label>
                 <input type="number" step="0.5" {...register('wick_rebound_wait_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">针尖停住后再等反弹最久秒数（破新尖会重置计时）；默认 5</span>
+                <span className="text-xs text-gray-600">针尖停住后再等反弹最久秒数（破新尖会重置计时）；默认 0=不超时</span>
               </div>
             </div>
           </div>

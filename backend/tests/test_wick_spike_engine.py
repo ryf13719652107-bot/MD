@@ -681,6 +681,36 @@ def test_rebound_no_new_extreme_still_times_out():
     assert take_diag_event(state) == "rebound_timeout"
 
 
+def test_is_arm_active_rebound_wait_zero_stays_active():
+    """等反弹超时=0 表示不超时，反弹窗内应保持强制重判（修 ACE 进窗后失访）。"""
+    from app.services.wick_spike_engine import is_arm_active
+
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="short",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=35.0,
+        rebound_wait_sec=0.0,
+    )
+    snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=100.0)
+    assert on_tick(state, params, snap, last_price=110.0, now_ms=1_000) is None
+    assert state.rebound_bar_ts == snap.bar_open_ts
+    assert is_arm_active(state, params, snap.bar_open_ts, now_ms=1_000) is True
+    # 数十秒后仍应 active（不因 wait=0 被当成「已过期」）
+    assert is_arm_active(state, params, snap.bar_open_ts, now_ms=60_000) is True
+    # 新高应仍能延尖
+    snap2 = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=112.0, low=100.0)
+    assert on_tick(state, params, snap2, last_price=112.0, now_ms=2_000) is None
+    assert state.rebound_extreme == 112.0
+    assert take_diag_event(state) == "rebound_extend"
+
+
 def _snap_ema(*, open_, ema25, **kwargs) -> WickBarSnapshot:
     s = _snap(open_=open_, **kwargs)
     from dataclasses import replace

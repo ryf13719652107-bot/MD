@@ -144,7 +144,7 @@ class StrategyCreate(BaseModel):
         default=35.0, ge=0, le=100, description="反弹占针深%放弃（超此为反转）"
     )
     wick_rebound_wait_sec: float = Field(
-        default=5.0, ge=0, le=60, description="confirm后等反弹超时秒数"
+        default=0.0, ge=0, le=60, description="confirm后等反弹超时秒数；0=不超时"
     )
     wick_martingale_mode: Literal["price_drop", "price_and_wt"] = Field(
         default="price_and_wt",
@@ -315,7 +315,7 @@ class StrategyResponse(BaseModel):
     wick_rebound_enabled: bool = True
     wick_rebound_trigger_pct: float = 20.0
     wick_rebound_abort_pct: float = 35.0
-    wick_rebound_wait_sec: float = 5.0
+    wick_rebound_wait_sec: float = 0.0
     wick_ema25_filter_enabled: bool = True
     wick_martingale_mode: str = "price_and_wt"
     blacklisted_symbols: list[str] = Field(default_factory=list)
