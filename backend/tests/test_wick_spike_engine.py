@@ -821,3 +821,49 @@ def test_ema25_nan_does_not_block():
     )
     snap = _snap(open_=100.0, atr=1.0, vol_now=80.0, vol_sma=10.0, high=110.0, low=99.0)
     assert on_tick(state, params, snap, last_price=110.0, now_ms=1) == Signal.SHORT
+
+
+def test_merge_synthetic_forming_bar_builds_new_root():
+    from app.services.wick_spike_engine import merge_synthetic_forming_bar
+
+    # 两根已收盘；forming 停在旧根
+    klines = [
+        [60_000, 100.0, 101.0, 99.0, 100.5, 10.0],
+        [120_000, 100.5, 102.0, 100.0, 101.0, 12.0],
+    ]
+    out = merge_synthetic_forming_bar(
+        klines,
+        current_bar_ts=180_000,
+        last_price=103.0,
+        trade_high=104.0,
+        trade_low=100.8,
+        trade_vol=5.0,
+    )
+    assert out is not None
+    assert len(out) == 3
+    assert out[-1][0] == 180_000
+    assert out[-1][1] == 101.0  # prev close as open
+    assert out[-1][2] == 104.0
+    assert out[-1][3] == 100.8
+    assert out[-1][4] == 103.0
+    assert out[-1][5] == 5.0
+
+
+def test_merge_synthetic_noop_when_forming_current():
+    from app.services.wick_spike_engine import merge_synthetic_forming_bar
+
+    klines = [
+        [60_000, 100.0, 101.0, 99.0, 100.5, 10.0],
+        [120_000, 100.5, 102.0, 100.0, 101.0, 12.0],
+    ]
+    out = merge_synthetic_forming_bar(
+        klines,
+        current_bar_ts=120_000,
+        last_price=101.5,
+        trade_high=102.0,
+        trade_low=100.0,
+        trade_vol=1.0,
+    )
+    assert out is not None
+    assert len(out) == 2
+    assert out[-1][0] == 120_000

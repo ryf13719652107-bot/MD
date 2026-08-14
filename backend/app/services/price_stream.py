@@ -105,6 +105,38 @@ class PriceStreamManager:
     def bar_open_ms(self, symbol: str) -> int:
         return int(self._bar_open_ms.get(_norm_sym(symbol), 0) or 0)
 
+    def ratchet_bar_from_kline(
+        self,
+        symbol: str,
+        *,
+        bar_open_ts: int,
+        high: float = 0.0,
+        low: float = 0.0,
+        volume: float = 0.0,
+    ) -> None:
+        """REST/K 线补强后并入本根成交聚合（只增不减），弥补断连丢 tip。"""
+        sym = _norm_sym(symbol)
+        if not sym or bar_open_ts <= 0:
+            return
+        cur_bar = self._bar_open_ms.get(sym)
+        if cur_bar is not None and int(cur_bar) != int(bar_open_ts):
+            # 成交流已在新根：不要用旧/错根 K 线污染
+            return
+        if cur_bar is None:
+            self._bar_open_ms[sym] = int(bar_open_ts)
+            self._bar_vol[sym] = 0.0
+        if high and high > 0:
+            prev = float(self._bar_high.get(sym, 0.0) or 0.0)
+            self._bar_high[sym] = max(prev, float(high)) if prev > 0 else float(high)
+        if low and low > 0:
+            prev_lo = float(self._bar_low.get(sym, 0.0) or 0.0)
+            self._bar_low[sym] = (
+                min(prev_lo, float(low)) if prev_lo > 0 else float(low)
+            )
+        if volume and volume > 0:
+            prev_v = float(self._bar_vol.get(sym, 0.0) or 0.0)
+            self._bar_vol[sym] = max(prev_v, float(volume))
+
     def instant_vol_annualized(self, symbol: str, window_sec: float = 5.0) -> float:
         """最近 window_sec 秒成交量折算到分钟（与 vol_sma 可比）。
 
@@ -129,6 +161,21 @@ class PriceStreamManager:
         out = set(self._resync_needed)
         self._resync_needed.clear()
         return out
+
+    def take_resync_needed(self, symbols: set[str] | list[str]) -> set[str]:
+        """只取出并移除给定集合内的币；其它策略池外的币保留在队列。"""
+        if not self._resync_needed:
+            return set()
+        want = {_norm_sym(s) for s in symbols if s}
+        taken = self._resync_needed & want
+        self._resync_needed -= taken
+        return taken
+
+    def note_resync_needed(self, symbol: str) -> None:
+        """后台补 tip 失败时重新排队，避免 consume 后丢失。"""
+        sym = _norm_sym(symbol)
+        if sym:
+            self._resync_needed.add(sym)
 
     @property
     def global_seq(self) -> int:

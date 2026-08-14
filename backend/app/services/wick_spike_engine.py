@@ -207,6 +207,55 @@ def build_bar_snapshot(
         return None
 
 
+def merge_synthetic_forming_bar(
+    klines: list,
+    *,
+    current_bar_ts: int,
+    last_price: float,
+    trade_high: float = 0.0,
+    trade_low: float = 0.0,
+    trade_vol: float = 0.0,
+) -> Optional[list]:
+    """forming WS 停滞时：用已收盘 K + 成交合成当前根，避免换分钟口整段停访。
+
+    开盘价取上一根收盘（连续合约近似官方 open）；高低/量取成交流。
+    若缓冲里已有 ≥ current_bar_ts 的根则原样返回（无需合成）。
+    """
+    if not klines or last_price <= 0 or current_bar_ts <= 0:
+        return None
+    try:
+        last_ts = int(klines[-1][0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if last_ts >= current_bar_ts:
+        return list(klines)
+    closed = [r for r in klines if int(r[0]) < current_bar_ts]
+    if not closed:
+        return None
+    try:
+        prev_close = float(closed[-1][4])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if prev_close <= 0:
+        return None
+    open_px = prev_close
+    hi_cand = [open_px, last_price]
+    if trade_high and trade_high > 0:
+        hi_cand.append(float(trade_high))
+    lo_cand = [open_px, last_price]
+    if trade_low and trade_low > 0:
+        lo_cand.append(float(trade_low))
+    forming = [
+        int(current_bar_ts),
+        open_px,
+        max(hi_cand),
+        min(lo_cand),
+        float(last_price),
+        max(0.0, float(trade_vol or 0.0)),
+    ]
+    return list(closed) + [forming]
+
+
 def apply_1m_ema_filter_fields(
     snap: WickBarSnapshot,
     klines_1m: list | None,

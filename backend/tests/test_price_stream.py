@@ -47,3 +47,34 @@ def test_apply_trade_resets_bar_on_boundary():
     m._apply_trade("X", 1.2, 3.0, 120_000)  # new bar
     assert m.bar_open_ms("X") == 120_000
     assert m.bar_volume("X") == 3.0
+
+
+def test_ratchet_bar_from_kline_raises_tip():
+    m = PriceStreamManager()
+    m._tf_ms_by_sym["ACEUSDT"] = 60_000
+    m._apply_trade("ACEUSDT", 0.33, 1.0, 60_100)
+    assert m.bar_high("ACEUSDT") == 0.33
+    # REST 补到更高 tip
+    m.ratchet_bar_from_kline(
+        "ACEUSDT", bar_open_ts=60_000, high=0.339, low=0.32, volume=50.0
+    )
+    assert m.bar_high("ACEUSDT") == 0.339
+    assert m.bar_low("ACEUSDT") == 0.32
+    assert m.bar_volume("ACEUSDT") == 50.0
+    # 错根不污染
+    m.ratchet_bar_from_kline(
+        "ACEUSDT", bar_open_ts=120_000, high=0.5, low=0.1, volume=999.0
+    )
+    assert m.bar_high("ACEUSDT") == 0.339
+
+
+def test_take_resync_needed_keeps_other_symbols():
+    m = PriceStreamManager()
+    m.note_resync_needed("AAAUSDT")
+    m.note_resync_needed("BBBUSDT")
+    m.note_resync_needed("CCCUSDT")
+    taken = m.take_resync_needed({"AAAUSDT", "XXXUSDT"})
+    assert taken == {"AAAUSDT"}
+    # 其它策略池币仍在队列
+    left = m.consume_resync_needed()
+    assert left == {"BBBUSDT", "CCCUSDT"}

@@ -519,6 +519,19 @@ class StrategyScheduler:
                                         qty,
                                     )
                                     continue
+                                try:
+                                    from .account_position_stream import (
+                                        account_position_stream,
+                                    )
+
+                                    account_position_stream.apply_local_close(
+                                        int(getattr(strategy, "account_id", 0) or 0),
+                                        sym,
+                                        side,
+                                        qty,
+                                    )
+                                except Exception:
+                                    pass
                                 exit_price = _order_fill_avg_price(
                                     order, 0.0, allow_order_price=False
                                 )

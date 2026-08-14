@@ -2516,6 +2516,26 @@ class PositionManager:
         open_positions = _collapse_phantom_l0_duplicates(
             list(open_positions), now=exit_time
         )
+        # 只扣本策略实际入账平仓量，保留同向手动仓残余
+        bot_close_qty = sum(
+            float(p.quantity or 0)
+            for p in open_positions
+            if getattr(p, "closed_at", None) is None
+        )
+        try:
+            from .account_position_stream import account_position_stream
+
+            acc_id = int(getattr(strategy, "account_id", 0) or 0)
+            if acc_id > 0 and bot_close_qty > 0:
+                account_position_stream.apply_local_close(
+                    acc_id, symbol, pos_side, bot_close_qty
+                )
+        except Exception:
+            logger.debug(
+                "Strategy %d: clear account leg after close failed",
+                strategy_id,
+                exc_info=True,
+            )
         trades_to_backup: list[Trade] = []
         for p in open_positions:
             if p.closed_at is not None:

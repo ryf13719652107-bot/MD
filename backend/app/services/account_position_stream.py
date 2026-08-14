@@ -73,6 +73,12 @@ class AccountPositionStream:
             legs.pop(key, None)
         self._updated_at[account_id] = time.time()
 
+    def clear_leg(self, account_id: int, symbol: str, side: str) -> None:
+        """平仓后立刻清腿，避免空心跳续期导致假 has_pos 挡新开。"""
+        if account_id <= 0:
+            return
+        self.set_leg(account_id, symbol, side, 0.0)
+
     def apply_local_fill(
         self, account_id: int, symbol: str, side: str, qty: float
     ) -> None:
@@ -82,6 +88,25 @@ class AccountPositionStream:
         key = (_norm_sym(symbol), (side or "").lower())
         legs = self._legs.setdefault(account_id, {})
         legs[key] = float(legs.get(key, 0.0) or 0.0) + float(qty)
+        self._updated_at[account_id] = time.time()
+
+    def apply_local_close(
+        self, account_id: int, symbol: str, side: str, qty: float | None = None
+    ) -> None:
+        """本地平仓后立刻减腿；qty 缺省或 ≥ 缓存则清零。"""
+        if account_id <= 0:
+            return
+        key = (_norm_sym(symbol), (side or "").lower())
+        legs = self._legs.setdefault(account_id, {})
+        cur = float(legs.get(key, 0.0) or 0.0)
+        if qty is None or float(qty) >= cur - 1e-12:
+            legs.pop(key, None)
+        else:
+            left = cur - float(qty)
+            if left > 1e-12:
+                legs[key] = left
+            else:
+                legs.pop(key, None)
         self._updated_at[account_id] = time.time()
 
     async def ensure_watching(self, account_id: int, auth_client, *, owner: str) -> None:

@@ -428,6 +428,17 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
         exit_price = _order_fill_avg_price(order or {}, 0.0, allow_order_price=False)
         results.append({"symbol": sym_key, "side": side, "status": "ok", "exit_price": exit_price, "order": order})
         logging.info("Panic close: closed bot qty %s %s x%g", sym_key, side, qty)
+        try:
+            from ..services.account_position_stream import account_position_stream
+
+            account_position_stream.apply_local_close(
+                int(getattr(strategy, "account_id", 0) or 0),
+                sym_key,
+                side,
+                qty,
+            )
+        except Exception:
+            pass
 
     from ..services.order_times import exit_time_from_order
 

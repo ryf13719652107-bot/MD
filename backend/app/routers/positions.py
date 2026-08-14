@@ -78,6 +78,17 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
                 status_code=500, detail="Exchange did not confirm the close order"
             )
         exit_price = _order_fill_avg_price(result, 0.0, allow_order_price=False)
+        try:
+            from ..services.account_position_stream import account_position_stream
+
+            account_position_stream.apply_local_close(
+                int(position.account_id or 0),
+                position.symbol,
+                position.side,
+                close_qty,
+            )
+        except Exception:
+            pass
     # 无 exchange_order_id：视为非机器人仓，只清本地记录，不碰交易所
     if exit_price <= 0:
         exit_price = position.mark_price or position.entry_price

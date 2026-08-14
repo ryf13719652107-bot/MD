@@ -53,3 +53,19 @@ def test_nonempty_ingest_replaces_snapshot():
     )
     assert s.leg_qty(5, "BTCUSDT", "long") == 0.0
     assert s.leg_qty(5, "ETHUSDT", "short") == 2.0
+
+
+def test_apply_local_close_clears_and_partial():
+    s = AccountPositionStream()
+    s.set_leg(6, "BTCUSDT", "long", 1.0)
+    s.apply_local_close(6, "BTCUSDT", "long", 0.4)
+    assert abs(s.leg_qty(6, "BTCUSDT", "long") - 0.6) < 1e-9
+    s.apply_local_close(6, "BTCUSDT", "long")
+    assert s.leg_qty(6, "BTCUSDT", "long") == 0.0
+
+
+def test_clear_leg_alias():
+    s = AccountPositionStream()
+    s.set_leg(7, "ETHUSDT", "short", 2.0)
+    s.clear_leg(7, "ETHUSDT", "short")
+    assert s.leg_qty(7, "ETHUSDT", "short") == 0.0

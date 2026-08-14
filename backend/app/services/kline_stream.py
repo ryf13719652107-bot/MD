@@ -285,7 +285,9 @@ class KlineStreamManager:
         symbol: str,
         timeframe: str,
         limit: int = 2,
-    ) -> None:
+        *,
+        force: bool = False,
+    ) -> list | None:
         """轻量 REST 拉最近 N 根并合并；武装后补强本根 K 线真实 high/volume 专用。
 
         仅对本根（未收盘 / buffer 最后一根）的 high/low/volume 取极值（只增不减），
@@ -293,26 +295,42 @@ class KlineStreamManager:
 
         已收盘 K 必须全量采用 REST（可降可升）：若也对已收盘只增不减，
         会把盘中毛刺高点锁进历史，ATR/量均系统性偏高（可到一到两成）。
+
+        force=True：跳过节流（价流重连补 tip 用）。成功返回合并后的最近 rows 快照。
         """
         key = self._key(public_client, symbol, timeframe)
         now = time.time()
         self._last_access[key] = now
         if key in self._forming_inflight:
-            return
-        if now - self._forming_last.get(key, 0.0) < _FORMING_MIN_INTERVAL_SEC:
-            return
+            if not force:
+                return None
+            # force：短等进行中的合并结束，避免重连补 tip 被吞
+            for _ in range(25):
+                await asyncio.sleep(0.04)
+                if key not in self._forming_inflight:
+                    break
+            else:
+                return None
+        if (
+            not force
+            and now - self._forming_last.get(key, 0.0) < _FORMING_MIN_INTERVAL_SEC
+        ):
+            return None
+        # force 路径再检一次，避免刚等到又被别人占上
+        if key in self._forming_inflight:
+            return None
         self._forming_inflight.add(key)
-        self._forming_last[key] = now
+        self._forming_last[key] = time.time()
         try:
             data = await public_client.fetch_klines(symbol, timeframe, limit=limit)
             if not data:
-                return
+                return None
             rows = _normalize_candles(data)
             buf = self._buffers.get(key) or []
             if not buf:
                 # 冷启动：直接灌入
                 self._buffers[key] = list(rows)[-self._max_bars:]
-                return
+                return list(self._buffers[key][-limit:])
             forming_ts = int(buf[-1][0])
             idx = {int(r[0]): i for i, r in enumerate(buf)}
             for r in rows:
@@ -349,10 +367,12 @@ class KlineStreamManager:
             if len(buf) > self._max_bars:
                 buf = buf[-self._max_bars:]
             self._buffers[key] = buf
+            return list(buf[-limit:])
         except Exception as e:
             logger.debug(
                 "kline_stream refresh_forming failed for %s %s: %s", symbol, timeframe, e
             )
+            return None
         finally:
             self._forming_inflight.discard(key)
 
