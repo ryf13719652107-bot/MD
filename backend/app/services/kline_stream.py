@@ -288,8 +288,11 @@ class KlineStreamManager:
     ) -> None:
         """轻量 REST 拉最近 N 根并合并；武装后补强本根 K 线真实 high/volume 专用。
 
-        对本根（未收盘）的 high/low/volume 取极值（只增不减），避免 REST 网络延迟
-        期间 WS 已推送更高 high 时被 REST 旧值覆盖倒退。close/open/ts 不动。
+        仅对本根（未收盘 / buffer 最后一根）的 high/low/volume 取极值（只增不减），
+        避免 REST 延迟把 WS 已推的更高 high 盖掉。
+
+        已收盘 K 必须全量采用 REST（可降可升）：若也对已收盘只增不减，
+        会把盘中毛刺高点锁进历史，ATR/量均系统性偏高（可到一到两成）。
         """
         key = self._key(public_client, symbol, timeframe)
         now = time.time()
@@ -310,30 +313,35 @@ class KlineStreamManager:
                 # 冷启动：直接灌入
                 self._buffers[key] = list(rows)[-self._max_bars:]
                 return
+            forming_ts = int(buf[-1][0])
             idx = {int(r[0]): i for i, r in enumerate(buf)}
             for r in rows:
                 try:
                     ts = int(r[0])
                 except (TypeError, ValueError, IndexError):
                     continue
-                rest_high = float(r[2]) if len(r) > 2 else 0.0
-                rest_low = float(r[3]) if len(r) > 3 else 0.0
-                rest_vol = float(r[5]) if len(r) > 5 else 0.0
                 if ts in idx:
-                    cur = buf[idx[ts]]
-                    try:
-                        cur_high = float(cur[2]) if len(cur) > 2 else 0.0
-                        cur_low = float(cur[3]) if len(cur) > 3 else 0.0
-                        cur_vol = float(cur[5]) if len(cur) > 5 else 0.0
-                    except (TypeError, ValueError, IndexError):
-                        cur_high = cur_low = cur_vol = 0.0
-                    # 极值只增不减，防 REST 旧值覆盖 WS 新值倒退
-                    new_high = max(cur_high, rest_high) if cur_high > 0 else rest_high
-                    new_low = min(cur_low, rest_low) if cur_low > 0 else rest_low
-                    new_vol = max(cur_vol, rest_vol)
-                    buf[idx[ts]] = [
-                        cur[0], cur[1], new_high, new_low, cur[4], new_vol
-                    ]
+                    if ts == forming_ts:
+                        cur = buf[idx[ts]]
+                        try:
+                            rest_high = float(r[2]) if len(r) > 2 else 0.0
+                            rest_low = float(r[3]) if len(r) > 3 else 0.0
+                            rest_vol = float(r[5]) if len(r) > 5 else 0.0
+                            cur_high = float(cur[2]) if len(cur) > 2 else 0.0
+                            cur_low = float(cur[3]) if len(cur) > 3 else 0.0
+                            cur_vol = float(cur[5]) if len(cur) > 5 else 0.0
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        new_high = max(cur_high, rest_high) if cur_high > 0 else rest_high
+                        new_low = min(cur_low, rest_low) if cur_low > 0 else rest_low
+                        new_vol = max(cur_vol, rest_vol)
+                        # 本根：open/close/ts 不动，仅极值与量只增不减
+                        buf[idx[ts]] = [
+                            cur[0], cur[1], new_high, new_low, cur[4], new_vol
+                        ]
+                    else:
+                        # 已收盘：信任 REST 官方 OHLC，允许高点回落
+                        buf[idx[ts]] = list(r)
                 else:
                     buf.append(list(r))
                     idx[ts] = len(buf) - 1
