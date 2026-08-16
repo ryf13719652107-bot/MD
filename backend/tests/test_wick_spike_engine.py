@@ -953,3 +953,24 @@ def test_merge_synthetic_noop_when_forming_current():
     assert out is not None
     assert len(out) == 2
     assert out[-1][0] == 120_000
+
+
+def test_merge_synthetic_uses_trade_open():
+    """trade_open（第一笔成交价）优先于 prev_close 做开盘价。"""
+    from app.services.wick_spike_engine import merge_synthetic_forming_bar
+
+    klines = [
+        [60_000, 100.0, 101.0, 99.0, 100.5, 10.0],
+        [120_000, 100.5, 102.0, 100.0, 101.0, 12.0],
+    ]
+    out = merge_synthetic_forming_bar(
+        klines,
+        current_bar_ts=180_000,
+        last_price=103.0,
+        trade_high=104.0,
+        trade_low=100.8,
+        trade_vol=5.0,
+        trade_open=102.5,  # 第一笔成交价 ≠ prev_close(101.0)
+    )
+    assert out is not None
+    assert out[-1][1] == 102.5  # trade_open as open, not prev_close

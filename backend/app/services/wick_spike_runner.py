@@ -622,6 +622,7 @@ class WickSpikeRunner:
                             trade_high=price_stream_manager.bar_high(sym_key),
                             trade_low=price_stream_manager.bar_low(sym_key),
                             trade_vol=price_stream_manager.bar_volume(sym_key),
+                            trade_open=price_stream_manager.bar_open_px(sym_key),
                         )
                         if not synth:
                             continue

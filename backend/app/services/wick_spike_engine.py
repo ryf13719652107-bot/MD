@@ -217,11 +217,12 @@ def merge_synthetic_forming_bar(
     trade_high: float = 0.0,
     trade_low: float = 0.0,
     trade_vol: float = 0.0,
+    trade_open: float = 0.0,
 ) -> Optional[list]:
     """forming WS 停滞时：用已收盘 K + 成交合成当前根，避免换分钟口整段停访。
 
-    开盘价取上一根收盘（连续合约近似官方 open）；高低/量取成交流。
-    若缓冲里已有 ≥ current_bar_ts 的根则原样返回（无需合成）。
+    开盘价优先取成交流第一笔价格（最准确）；无成交则退回上一根收盘。
+    高低/量取成交流。若缓冲里已有 ≥ current_bar_ts 的根则原样返回（无需合成）。
     """
     if not klines or last_price <= 0 or current_bar_ts <= 0:
         return None
@@ -240,7 +241,11 @@ def merge_synthetic_forming_bar(
         return None
     if prev_close <= 0:
         return None
-    open_px = prev_close
+    # 优先用成交流第一笔价格做开盘（最准确）；无成交则退回上根收盘
+    if trade_open and float(trade_open) > 0:
+        open_px = float(trade_open)
+    else:
+        open_px = prev_close
     hi_cand = [open_px, last_price]
     if trade_high and trade_high > 0:
         hi_cand.append(float(trade_high))

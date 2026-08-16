@@ -60,6 +60,7 @@ class PriceStreamManager:
         self._bar_vol: dict[str, float] = {}
         self._bar_high: dict[str, float] = {}
         self._bar_low: dict[str, float] = {}
+        self._bar_open_px: dict[str, float] = {}  # 本根第一笔成交价（合成K线开盘用）
         # owner → Event：成交到达时 set，供接针 runner 事件驱动唤醒
         self._wake_events: dict[str, asyncio.Event] = {}
         # 可选轻量回调（禁止在回调里 await 下单）
@@ -100,6 +101,11 @@ class PriceStreamManager:
 
     def bar_low(self, symbol: str) -> float:
         v = self._bar_low.get(_norm_sym(symbol))
+        return float(v) if v is not None and v > 0 else 0.0
+
+    def bar_open_px(self, symbol: str) -> float:
+        """本根第一笔成交价（供合成 K 线开盘价，比上根收盘更准）。"""
+        v = self._bar_open_px.get(_norm_sym(symbol))
         return float(v) if v is not None and v > 0 else 0.0
 
     def bar_open_ms(self, symbol: str) -> int:
@@ -257,6 +263,10 @@ class PriceStreamManager:
             self._bar_vol[symbol_norm] = 0.0
             self._bar_high[symbol_norm] = px
             self._bar_low[symbol_norm] = px
+            self._bar_open_px[symbol_norm] = px
+        elif not self._bar_open_px.get(symbol_norm) or self._bar_open_px[symbol_norm] <= 0:
+            # ratchet_bar_from_kline 先设了 _bar_open_ms 但没设 _bar_open_px
+            self._bar_open_px[symbol_norm] = px
         if amount > 0:
             self._bar_vol[symbol_norm] = float(self._bar_vol.get(symbol_norm, 0.0)) + amount
         hi = self._bar_high.get(symbol_norm, px)
