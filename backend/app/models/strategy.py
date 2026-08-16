@@ -76,7 +76,7 @@ class Strategy(Base):
     wick_rebound_abort_pct: Mapped[float] = mapped_column(
         Float, default=35.0, server_default="35.0"
     )
-    # confirm后等反弹超时秒数；0=不超时（整根 K 内等开火/放弃）
+    # confirm后等反弹超时秒数；0=本根内不超时（换根未反弹仍超时并锁新根）
     wick_rebound_wait_sec: Mapped[float] = mapped_column(
         Float, default=0.0, server_default="0.0"
     )

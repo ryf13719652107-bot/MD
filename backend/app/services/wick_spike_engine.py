@@ -27,6 +27,8 @@ arm_grace_max_tip_gap_pct（默认 2）：grace 免回撤时，进场价相对�
   现价从针尖反弹达 trigger% → 市价信号（保留 rebound 态，开仓失败可同根重试）；
   反弹达 abort% 或超时 → 放弃。
   超时从「最后一次加深针尖」起算：破新高/新低则重置等待，避免针还在拉就被 timeout。
+  rebound_wait=0：本根 K 内不按秒超时；换根时若仍在反弹窗 → 记 timeout，并锁住新根
+  （禁止同一次插针跨分钟立刻再进窗开火）。
   confirm 时有效回撤上限 = min(max_retrace, abort)（避免 confirm 时已过放弃线）。
   arm_wait=0 时若开启 rebound，同刻全条件达标后仍走反弹窗（不再绕过）。
   trigger_pct<=0：confirm 后立刻市价（不等反弹）。
@@ -81,7 +83,7 @@ class WickSpikeParams:
     rebound_enabled: bool = False
     rebound_trigger_pct: float = 20.0  # 反弹占针深%触发市价
     rebound_abort_pct: float = 35.0    # 反弹占针深%放弃
-    rebound_wait_sec: float = 0.0      # 针尖停住后再等反弹的超时秒数（破新尖重置）；0=不超时
+    rebound_wait_sec: float = 0.0      # 针尖停住后再等反弹的超时秒数（破新尖重置）；0=本根内不超时（换根仍超时）
     # 1m 开盘 vs EMA25 过滤；产品层默认开，此处默认关（单测不受趋势滤）
     ema25_filter_enabled: bool = False
     ema25_period: int = 25
@@ -826,16 +828,30 @@ def on_tick(
     if last_price <= 0 or snap.bar_open <= 0 or snap.atr <= 0:
         return None
 
-    # 新 K：重置极值与武装
+    # 新 K：重置极值与武装；换根时若仍在反弹窗 → 视为超时并锁新根
+    # （禁止同一次插针跨分钟立刻 rebound_enter→开火，如 AIO 08:01→08:02）
     if state.bar_open_ts != snap.bar_open_ts:
+        old_ts = state.bar_open_ts
+        was_in_rebound = (
+            old_ts is not None
+            and bool(params.rebound_enabled)
+            and state.rebound_bar_ts == old_ts
+            and state.rebound_at_ms > 0
+            and state.triggered_bar_ts != old_ts
+        )
         state.bar_open_ts = snap.bar_open_ts
         state.bar_low = min(last_price, snap.kline_low) if snap.kline_low > 0 else last_price
         state.bar_high = max(last_price, snap.kline_high) if snap.kline_high > 0 else last_price
         clear_arm(state)
         clear_rebound(state)
-        state.rebound_done_bar_ts = None
         state.armed_expired_bar_ts = None
         state.armed_expired_progress = 0.0
+        if was_in_rebound:
+            # 锁住新根：本根不再武装/进反弹（上一根针已超时）
+            state.rebound_done_bar_ts = int(snap.bar_open_ts)
+            state.diag_event = "rebound_timeout"
+        else:
+            state.rebound_done_bar_ts = None
 
     # 极值：成交价 + K 线 H/L 取更极端
     lo = min(last_price, snap.kline_low) if snap.kline_low > 0 else last_price

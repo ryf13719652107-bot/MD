@@ -711,6 +711,92 @@ def test_is_arm_active_rebound_wait_zero_stays_active():
     assert take_diag_event(state) == "rebound_extend"
 
 
+def test_rebound_bar_rollover_timeouts_and_locks_new_bar():
+    """换根时仍在反弹窗 → timeout，且新根不得立刻再进窗开火（AIO 跨分钟开仓）。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=5.0,
+        min_move_pct=0,
+        max_retrace_pct=50.0,
+        arm_wait_sec=0,
+        rebound_enabled=True,
+        rebound_trigger_pct=20.0,
+        rebound_abort_pct=35.0,
+        rebound_wait_sec=0.0,
+    )
+    # 01 分：刺破低点进反弹窗，一直延尖未反弹
+    snap1 = _snap(
+        open_=100.0,
+        atr=1.0,
+        vol_now=80.0,
+        vol_sma=10.0,
+        high=100.0,
+        low=90.0,
+        ts=1_000_000,
+    )
+    assert on_tick(state, params, snap1, last_price=90.0, now_ms=1_000) is None
+    assert state.rebound_bar_ts == snap1.bar_open_ts
+    assert take_diag_event(state) == "rebound_enter"
+    # :59 仍在加深针尖
+    snap1b = _snap(
+        open_=100.0,
+        atr=1.0,
+        vol_now=80.0,
+        vol_sma=10.0,
+        high=100.0,
+        low=88.0,
+        ts=1_000_000,
+    )
+    assert on_tick(state, params, snap1b, last_price=88.0, now_ms=59_000) is None
+    assert take_diag_event(state) == "rebound_extend"
+
+    # 02 分：同价位继续深跌+放量，旧逻辑会立刻 rebound_enter→fire；现应 timeout 并锁新根
+    snap2 = _snap(
+        open_=89.0,
+        atr=1.0,
+        vol_now=80.0,
+        vol_sma=10.0,
+        high=89.5,
+        low=87.0,
+        ts=1_060_000,
+    )
+    assert on_tick(state, params, snap2, last_price=87.0, now_ms=60_000) is None
+    assert take_diag_event(state) == "rebound_timeout"
+    assert state.rebound_bar_ts is None
+    assert state.rebound_done_bar_ts == snap2.bar_open_ts
+
+    # 同根稍后即使刺破+反弹触及 trigger，也不得开火
+    snap2b = _snap(
+        open_=89.0,
+        atr=1.0,
+        vol_now=80.0,
+        vol_sma=10.0,
+        high=89.5,
+        low=87.0,
+        ts=1_060_000,
+    )
+    # 从 87 反弹到足够触发的价位（相对 tip87、open89 的 20%）
+    assert on_tick(state, params, snap2b, last_price=88.5, now_ms=61_000) is None
+    assert state.triggered_bar_ts != snap2.bar_open_ts
+
+    # 再下一根（03 分）应解除锁定，可正常进反弹
+    snap3 = _snap(
+        open_=100.0,
+        atr=1.0,
+        vol_now=80.0,
+        vol_sma=10.0,
+        high=100.0,
+        low=90.0,
+        ts=1_120_000,
+    )
+    assert on_tick(state, params, snap3, last_price=90.0, now_ms=120_000) is None
+    assert state.rebound_done_bar_ts is None
+    assert state.rebound_bar_ts == snap3.bar_open_ts
+    assert take_diag_event(state) == "rebound_enter"
+
+
 def _snap_ema(*, open_, ema25, **kwargs) -> WickBarSnapshot:
     s = _snap(open_=open_, **kwargs)
     from dataclasses import replace

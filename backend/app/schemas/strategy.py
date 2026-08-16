@@ -144,7 +144,10 @@ class StrategyCreate(BaseModel):
         default=35.0, ge=0, le=100, description="反弹占针深%放弃（超此为反转）"
     )
     wick_rebound_wait_sec: float = Field(
-        default=0.0, ge=0, le=60, description="confirm后等反弹超时秒数；0=不超时"
+        default=0.0,
+        ge=0,
+        le=60,
+        description="confirm后等反弹超时秒数；0=本根内不超时，换根未反弹仍超时",
     )
     wick_martingale_mode: Literal["price_drop", "price_and_wt"] = Field(
         default="price_and_wt",

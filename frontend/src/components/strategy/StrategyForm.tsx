@@ -525,7 +525,7 @@ export default function StrategyForm({
               <div>
                 <label className={labelClass}>等反弹超时(秒)</label>
                 <input type="number" step="0.5" {...register('wick_rebound_wait_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">针尖停住后再等反弹最久秒数（破新尖会重置计时）；默认 0=不超时</span>
+                <span className="text-xs text-gray-600">针尖停住后再等反弹最久秒数（破新尖会重置计时）；默认 0=本根内不超时，换根未反弹仍超时</span>
               </div>
             </div>
           </div>
