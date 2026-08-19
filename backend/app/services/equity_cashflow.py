@@ -300,6 +300,11 @@ def normalize_baseline_to_gross(
     返回 (baseline_gross, healed)。
     """
     stored = float(stored_baseline)
+    # 已存基准为非正数（之前BUG导致负数）：用首条快照修复
+    if stored <= 0:
+        if first_snap_total is not None and float(first_snap_total) > 0:
+            return float(first_snap_total), True
+        return stored, False
     if set_at is None:
         return stored, False
     cf_before = cum_net_external((t, a) for t, a in cashflows if t <= set_at)
@@ -308,7 +313,11 @@ def normalize_baseline_to_gross(
     ref = float(first_snap_total) if first_snap_total is not None else stored + cf_before
     # 旧基准≈当时校正权益（明显小于毛余额）；新种子基准≈毛余额
     if stored < ref - abs(cf_before) * 0.35:
-        return stored + cf_before, True
+        candidate = stored + cf_before
+        # 防止大额提现等极端情况导致基准变负数
+        if candidate <= 0:
+            return stored, False
+        return candidate, True
     return stored, False
 
 

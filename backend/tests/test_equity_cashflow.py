@@ -89,6 +89,28 @@ def test_normalize_old_adjusted_baseline_avoids_fake_thousands_pct():
     assert abs(raw - 203.0) < 1e-6
 
 
+def test_normalize_negative_baseline_auto_heals():
+    """已存基准为负数（之前BUG导致）：用首条快照修复。"""
+    t_set = datetime(2026, 8, 1, 10, 0, 0)
+    cfs = [(datetime(2026, 8, 1, 9, 0, 0), -400.0)]
+    healed, did = normalize_baseline_to_gross(
+        -194.67, set_at=t_set, cashflows=cfs, first_snap_total=200.0
+    )
+    assert did is True
+    assert abs(healed - 200.0) < 1e-6
+
+
+def test_normalize_heal_does_not_go_negative():
+    """大额提现导致 stored+cf_before < 0 时：不升级，保持原值。"""
+    t_set = datetime(2026, 8, 1, 10, 0, 0)
+    cfs = [(datetime(2026, 8, 1, 9, 0, 0), -400.0)]
+    healed, did = normalize_baseline_to_gross(
+        200.0, set_at=t_set, cashflows=cfs, first_snap_total=200.0
+    )
+    assert did is False
+    assert abs(healed - 200.0) < 1e-6
+
+
 def test_transfer_in_does_not_change_adjusted():
     t0 = datetime(2026, 7, 1, 10, 0, 0)
     t1 = datetime(2026, 7, 1, 11, 0, 0)
