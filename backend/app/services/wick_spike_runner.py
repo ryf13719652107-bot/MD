@@ -969,6 +969,13 @@ class WickSpikeRunner:
             raw_pos = []
         exchange_legs = exchange_legs_from_positions(raw_pos or [])
 
+        # REST 快照对账：清除 UDS 中已平仓但仍残留的腿（防假 has_pos 屏蔽币）
+        acc_id_for_reconcile = int(getattr(strategy, "account_id", 0) or 0)
+        if acc_id_for_reconcile > 0:
+            account_position_stream.reconcile_from_rest(
+                acc_id_for_reconcile, exchange_legs
+            )
+
         pool_symbols: list[str] = []
         pool_entry_norms: frozenset[str] | None = None
         exclude_norm: frozenset[str] = blacklist

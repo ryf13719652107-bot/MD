@@ -148,6 +148,18 @@ class AccountPositionStream:
                 "account_position_stream seed account=%d failed: %s", account_id, e
             )
 
+    def reconcile_from_rest(self, account_id: int, rest_legs: dict[tuple[str, str], float]) -> None:
+        """REST 快照对账：清除 UDS 中已不存在的腿（防平仓后 UDS 不清导致假 has_pos）。
+
+        只删不加：UDS 负责低延迟新增，REST 负责清理过期腿。
+        """
+        uds_legs = self._legs.get(account_id)
+        if uds_legs is None:
+            return
+        stale_keys = [k for k in list(uds_legs) if k not in rest_legs]
+        for k in stale_keys:
+            uds_legs.pop(k, None)
+
     def _ingest_positions(self, account_id: int, positions: list) -> None:
         """写入推送。
 
