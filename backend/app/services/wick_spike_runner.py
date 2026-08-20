@@ -1149,6 +1149,71 @@ class WickSpikeRunner:
             buckets.setdefault(sym_key, []).append(mem)
         self._trailing_mems[strategy_id] = buckets
 
+    async def _inject_trailing_mem_after_open(
+        self,
+        session,
+        strategy_id: int,
+        symbol: str,
+    ) -> None:
+        """开仓成功后立即把新 Position 推入内存 mems，消除 15s 空窗。
+
+        在 _post_open_async 的 session 里调用（execute_open_db 已 flush，id 已有）。
+        用真实 position_id 构建 mem，确保 _refresh_trailing 的 old_by_pid 能匹配，
+        peak_pct 不丢失。trailing 关闭或非 armed 状态时跳过。
+        """
+        params = self._trailing_params.get(strategy_id)
+        if params is None or not params.enabled:
+            return
+        sym_key = _norm_sym(symbol)
+        now_ms = int(time.time() * 1000)
+        try:
+            rows = list(
+                (
+                    await session.execute(
+                        select(Position).where(
+                            Position.strategy_id == strategy_id,
+                            Position.closed_at.is_(None),
+                            Position.trailing_tp_state == STATE_ARMED,
+                        )
+                    )
+                ).scalars().all()
+            )
+        except Exception:
+            return
+        rows = [r for r in rows if _norm_sym(r.symbol) == sym_key]
+        if not rows:
+            return
+        buckets = self._trailing_mems.setdefault(strategy_id, {})
+        existing = buckets.setdefault(sym_key, [])
+        existing_pids = {m.position_id for m in existing if m.position_id > 0}
+        for r in rows:
+            pid = int(r.id)
+            if pid in existing_pids:
+                continue
+            try:
+                opened_ms = int(
+                    r.opened_at.replace(tzinfo=BEIJING_TZ).timestamp() * 1000
+                )
+            except Exception:
+                opened_ms = now_ms
+            existing.append(
+                TrailingTpMemState(
+                    position_id=pid,
+                    symbol=sym_key,
+                    side=(r.side or "").lower(),
+                    entry_price=float(r.entry_price or 0),
+                    opened_at_ms=opened_ms,
+                    state=STATE_ARMED,
+                    peak_pct=float(r.trailing_tp_peak_pct or 0.0),
+                    peak_price=0.0,
+                )
+            )
+            existing_pids.add(pid)
+        logger.info(
+            "wick_spike trailing_tp inject strategy=%d %s — 开仓后立即追踪（零空窗）",
+            strategy_id, sym_key,
+        )
+
     def get_trailing_status(
         self, strategy_id: int, sym_key: str
     ) -> list[dict]:
@@ -1751,6 +1816,11 @@ class WickSpikeRunner:
                         db_strategy.last_rsi = round(vol_ratio, 2)
                         await self._position_mgr.execute_open_db(
                             session, db_strategy, api_res
+                        )
+                        # 开仓成功立即推入 trailing mems，消除 15s 空窗
+                        # （不等 _refresh_context，下一个 tick 即开始追踪）
+                        await self._inject_trailing_mem_after_open(
+                            session, strategy_id, symbol
                         )
                         await session.commit()
                     fill_px = float(api_res.avg_price or 0) or float(price)
