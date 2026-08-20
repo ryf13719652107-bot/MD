@@ -112,7 +112,7 @@ class StrategyCreate(BaseModel):
         description="开盘→极值回撤占比上限%；超过则跳过；0=关闭",
     )
     wick_arm_wait_sec: float = Field(
-        default=12.0,
+        default=0.0,
         ge=-1,
         le=120,
         description="刺破后等量窗口秒数；>0=本根内N秒超时；0=本根内不超时换根才超时；-1=关闭武装",
@@ -330,7 +330,7 @@ class StrategyResponse(BaseModel):
     wick_vol_relax_mult: float = 5.0
     wick_min_move_pct: float = 3.0
     wick_max_retrace_pct: float = 50.0
-    wick_arm_wait_sec: float = 12.0
+    wick_arm_wait_sec: float = 0.0
     wick_arm_retrace_grace_sec: float = 5.0
     wick_arm_grace_max_tip_gap_pct: float = 2.0
     wick_rebound_enabled: bool = True

@@ -134,9 +134,9 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             else 50.0
         ),
         arm_wait_sec=float(
-            getattr(strategy, "wick_arm_wait_sec", 12.0)
+            getattr(strategy, "wick_arm_wait_sec", 0.0)
             if getattr(strategy, "wick_arm_wait_sec", None) is not None
-            else 12.0
+            else 0.0
         ),
         arm_retrace_grace_sec=float(
             getattr(strategy, "wick_arm_retrace_grace_sec", 5.0)
