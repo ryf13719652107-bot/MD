@@ -476,7 +476,7 @@ export default function StrategyForm({
               <div>
                 <label className={labelClass}>刺破等量窗口(秒)</label>
                 <input type="number" step="1" {...register('wick_arm_wait_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">刺破后等量窗口；>0=本根内N秒超时；0=本根内不超时换根才超时(跟反弹一致)；-1=关闭武装</span>
+                <span className="text-xs text-gray-600">刺破后等量窗口；&gt;0=本根内N秒超时；0=本根内不超时换根才超时(跟反弹一致)；-1=关闭武装</span>
               </div>
               <div>
                 <label className={labelClass}>等量免回撤(秒)</label>
