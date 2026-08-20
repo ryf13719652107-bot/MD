@@ -40,7 +40,7 @@ const schema = z.object({
   wick_vol_relax_mult: z.number().min(0).max(100),
   wick_min_move_pct: z.number().min(0).max(50),
   wick_max_retrace_pct: z.number().min(0).max(100),
-  wick_arm_wait_sec: z.number().min(0).max(120),
+  wick_arm_wait_sec: z.number().min(-1).max(120),
   wick_arm_retrace_grace_sec: z.number().min(0).max(60),
   wick_arm_grace_max_tip_gap_pct: z.number().min(0).max(20),
   wick_rebound_enabled: z.boolean(),
@@ -476,7 +476,7 @@ export default function StrategyForm({
               <div>
                 <label className={labelClass}>刺破等量窗口(秒)</label>
                 <input type="number" step="1" {...register('wick_arm_wait_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">刺破后最多等多久量能；默认 12，填 0 关闭武装</span>
+                <span className="text-xs text-gray-600">刺破后等量窗口；>0=本根内N秒超时；0=本根内不超时换根才超时(跟反弹一致)；-1=关闭武装</span>
               </div>
               <div>
                 <label className={labelClass}>等量免回撤(秒)</label>

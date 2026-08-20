@@ -28,7 +28,7 @@ export interface Strategy {
   wick_min_move_pct: number;
   /** 开盘→极值回撤占比上限%；0=关闭 */
   wick_max_retrace_pct: number;
-  /** 刺破后等量窗口秒数；0=关闭武装 */
+  /** 刺破后等量窗口秒数；>0=本根内N秒超时；0=本根内不超时换根才超时；-1=关闭武装 */
   wick_arm_wait_sec: number;
   /** 武装时量不够，确认前 N 秒免回撤 */
   wick_arm_retrace_grace_sec: number;
