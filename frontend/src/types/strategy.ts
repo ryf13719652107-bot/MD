@@ -46,6 +46,20 @@ export interface Strategy {
   wick_rebound_wait_sec: number;
   /** 接针加仓：默认 price_and_wt；price_drop=仅涨跌幅 */
   wick_martingale_mode: 'price_drop' | 'price_and_wt';
+  /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
+  trailing_tp_enabled: boolean;
+  /** 激活窗口（秒），默认 300=5 分钟 */
+  trailing_tp_window_sec: number;
+  /** 基础回撤比例 %（盈利 < tier1 时生效） */
+  trailing_tp_drawdown_base_pct: number;
+  /** 盈利≥tier1_threshold 时收紧至此回撤比例 % */
+  trailing_tp_drawdown_tier1_pct: number;
+  /** 盈利≥tier2_threshold 时进一步收紧至此回撤比例 % */
+  trailing_tp_drawdown_tier2_pct: number;
+  /** 阶梯1触发盈利 %（默认 2.5） */
+  trailing_tp_tier1_threshold: number;
+  /** 阶梯2触发盈利 %（默认 5.0） */
+  trailing_tp_tier2_threshold: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;
@@ -128,6 +142,20 @@ export interface StrategyFormData {
   wick_rebound_wait_sec: number;
   /** 接针加仓：默认 price_and_wt；price_drop=仅涨跌幅 */
   wick_martingale_mode: 'price_drop' | 'price_and_wt';
+  /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
+  trailing_tp_enabled: boolean;
+  /** 激活窗口（秒），默认 300=5 分钟 */
+  trailing_tp_window_sec: number;
+  /** 基础回撤比例 %（盈利 < tier1 时生效） */
+  trailing_tp_drawdown_base_pct: number;
+  /** 盈利≥tier1_threshold 时收紧至此回撤比例 % */
+  trailing_tp_drawdown_tier1_pct: number;
+  /** 盈利≥tier2_threshold 时进一步收紧至此回撤比例 % */
+  trailing_tp_drawdown_tier2_pct: number;
+  /** 阶梯1触发盈利 %（默认 2.5） */
+  trailing_tp_tier1_threshold: number;
+  /** 阶梯2触发盈利 %（默认 5.0） */
+  trailing_tp_tier2_threshold: number;
   margin_threshold: number;
   base_qty_type: 'margin_pct' | 'usdt';
   base_qty_value: number;

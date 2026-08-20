@@ -153,6 +153,17 @@ class StrategyCreate(BaseModel):
         default="price_and_wt",
         description="接针加仓：price_drop=仅涨跌幅；price_and_wt=涨跌幅+WT确认（默认）",
     )
+    # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
+    trailing_tp_enabled: bool = Field(
+        default=False,
+        description="开仓后窗口内达到止盈阈值则激活毫秒级移动追踪；超时回退限价止盈",
+    )
+    trailing_tp_window_sec: float = Field(default=300.0, gt=0, le=3600)
+    trailing_tp_drawdown_base_pct: float = Field(default=30.0, ge=0, le=100)
+    trailing_tp_drawdown_tier1_pct: float = Field(default=20.0, ge=0, le=100)
+    trailing_tp_drawdown_tier2_pct: float = Field(default=15.0, ge=0, le=100)
+    trailing_tp_tier1_threshold: float = Field(default=2.5, ge=0, le=100)
+    trailing_tp_tier2_threshold: float = Field(default=5.0, ge=0, le=100)
 
     @model_validator(mode="after")
     def _check_rebound_pcts(self):
@@ -229,8 +240,15 @@ class StrategyUpdate(BaseModel):
     wick_rebound_trigger_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_abort_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_wait_sec: Optional[float] = Field(default=None, ge=0, le=60)
-    wick_ema25_filter_enabled: Optional[bool] = Field(default=None)
+    wick_ema25_filter_enabled: Optional[bool] = None
     wick_martingale_mode: Optional[Literal["price_drop", "price_and_wt"]] = None
+    trailing_tp_enabled: Optional[bool] = None
+    trailing_tp_window_sec: Optional[float] = Field(default=None, gt=0, le=3600)
+    trailing_tp_drawdown_base_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    trailing_tp_drawdown_tier1_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    trailing_tp_drawdown_tier2_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    trailing_tp_tier1_threshold: Optional[float] = Field(default=None, ge=0, le=100)
+    trailing_tp_tier2_threshold: Optional[float] = Field(default=None, ge=0, le=100)
 
     @model_validator(mode="after")
     def _check_rebound_pcts(self):
@@ -321,6 +339,13 @@ class StrategyResponse(BaseModel):
     wick_rebound_wait_sec: float = 0.0
     wick_ema25_filter_enabled: bool = True
     wick_martingale_mode: str = "price_and_wt"
+    trailing_tp_enabled: bool = False
+    trailing_tp_window_sec: float = 300.0
+    trailing_tp_drawdown_base_pct: float = 30.0
+    trailing_tp_drawdown_tier1_pct: float = 20.0
+    trailing_tp_drawdown_tier2_pct: float = 15.0
+    trailing_tp_tier1_threshold: float = 2.5
+    trailing_tp_tier2_threshold: float = 5.0
     blacklisted_symbols: list[str] = Field(default_factory=list)
     status: str
     started_at: Optional[datetime] = None

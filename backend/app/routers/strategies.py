@@ -581,3 +581,42 @@ async def get_strategy_logs(strategy_id: int, limit: int = 50):
     return strategy_log_service.get(strategy_id, limit)
 
 
+@router.get("/{strategy_id}/trailing-status")
+async def get_strategy_trailing_status(strategy_id: int, db: AsyncSession = Depends(get_db)):
+    """时间移动止盈实时状态：遍历该策略所有 open positions 的 symbol，
+    调用 wick_spike_runner.get_trailing_status(strategy_id, sym_key) 聚合返回 {symbol: [...states]}。
+
+    每条 state 含 position_id, side, state, peak_pct, remaining_sec, drawdown_limit_pct, entry_price。
+    开关关闭或无持仓时对应 symbol 返回空列表。"""
+    strategy = await db.get(Strategy, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    stmt_open = select(Position).where(
+        Position.strategy_id == strategy_id,
+        Position.closed_at.is_(None),
+    )
+    open_rows = list((await db.execute(stmt_open)).scalars().all())
+
+    # 保留插入顺序：该策略持仓涉及的所有 symbol（即使 trailing 已关闭也列出空列表）
+    sym_keys: list[str] = []
+    seen: set[str] = set()
+    for p in open_rows:
+        key = _panic_symbol_key(p.symbol)
+        if key and key not in seen:
+            seen.add(key)
+            sym_keys.append(key)
+
+    from ..services.wick_spike_runner import wick_spike_runner
+
+    result: dict[str, list[dict]] = {}
+    for sym_key in sym_keys:
+        try:
+            states = wick_spike_runner.get_trailing_status(strategy_id, sym_key)
+        except Exception:
+            states = []
+        result[sym_key] = states
+    return result
+
+
+

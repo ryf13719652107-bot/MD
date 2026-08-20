@@ -49,6 +49,13 @@ const schema = z.object({
   wick_rebound_abort_pct: z.number().min(0).max(100),
   wick_rebound_wait_sec: z.number().min(0).max(60),
   wick_martingale_mode: z.enum(['price_drop', 'price_and_wt']),
+  trailing_tp_enabled: z.boolean(),
+  trailing_tp_window_sec: z.number().min(1).max(3600),
+  trailing_tp_drawdown_base_pct: z.number().min(0).max(100),
+  trailing_tp_drawdown_tier1_pct: z.number().min(0).max(100),
+  trailing_tp_drawdown_tier2_pct: z.number().min(0).max(100),
+  trailing_tp_tier1_threshold: z.number().min(0).max(100),
+  trailing_tp_tier2_threshold: z.number().min(0).max(100),
   margin_threshold: z.number().min(0),
   base_qty_type: z.enum(['margin_pct', 'usdt']),
   base_qty_value: z.number().min(0.01),
@@ -156,6 +163,13 @@ function toFormDefaults(
       wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 0,
       wick_martingale_mode:
         initialData.wick_martingale_mode === 'price_drop' ? 'price_drop' : 'price_and_wt',
+      trailing_tp_enabled: initialData.trailing_tp_enabled ?? false,
+      trailing_tp_window_sec: initialData.trailing_tp_window_sec ?? 300,
+      trailing_tp_drawdown_base_pct: initialData.trailing_tp_drawdown_base_pct ?? 30,
+      trailing_tp_drawdown_tier1_pct: initialData.trailing_tp_drawdown_tier1_pct ?? 20,
+      trailing_tp_drawdown_tier2_pct: initialData.trailing_tp_drawdown_tier2_pct ?? 15,
+      trailing_tp_tier1_threshold: initialData.trailing_tp_tier1_threshold ?? 2.5,
+      trailing_tp_tier2_threshold: initialData.trailing_tp_tier2_threshold ?? 5.0,
       margin_threshold: initialData.margin_threshold,
       base_qty_type: initialData.base_qty_type,
       base_qty_value: initialData.base_qty_value,
@@ -235,6 +249,13 @@ function toFormDefaults(
     wick_rebound_abort_pct: 35,
     wick_rebound_wait_sec: 0,
     wick_martingale_mode: 'price_and_wt',
+    trailing_tp_enabled: false,
+    trailing_tp_window_sec: 300,
+    trailing_tp_drawdown_base_pct: 30,
+    trailing_tp_drawdown_tier1_pct: 20,
+    trailing_tp_drawdown_tier2_pct: 15,
+    trailing_tp_tier1_threshold: 2.5,
+    trailing_tp_tier2_threshold: 5.0,
     margin_threshold: 0,
     base_qty_type: 'margin_pct',
     base_qty_value: 6,
@@ -311,6 +332,7 @@ export default function StrategyForm({
   const excludeFunding = watch('exclude_funding', false);
   const martingaleRsiEnabled = watch('martingale_rsi_enabled', true);
   const wickMartingaleMode = watch('wick_martingale_mode', 'price_and_wt');
+  const trailingTpEnabled = watch('trailing_tp_enabled', false);
 
   // Auto-adjust RSI threshold on mount and when direction changes
   useEffect(() => {
@@ -949,6 +971,53 @@ export default function StrategyForm({
               </label>
               <span className="text-xs text-gray-500">{watch('take_profit_limit_order') ? '限价单' : '市价单'}</span>
             </label>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-emerald-500/35 bg-emerald-950/20 px-3 py-2.5 flex items-start gap-3">
+          <label className="relative inline-flex items-center cursor-pointer mt-0.5 shrink-0">
+            <input type="checkbox" {...register('trailing_tp_enabled')} className="sr-only peer" />
+            <div className="w-9 h-5 bg-gray-600 peer-checked:bg-emerald-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all" />
+          </label>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-emerald-100/95">时间移动止盈</div>
+            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+              开仓后5分钟内达到止盈阈值则激活毫秒级移动追踪，超时回退限价止盈；开关关闭按原逻辑运行。
+            </p>
+            {trailingTpEnabled && (
+              <div className="mt-2 grid grid-cols-3 gap-3">
+                <div>
+                  <label className={labelClass}>激活窗口(秒)</label>
+                  <input type="number" step="1" {...register('trailing_tp_window_sec', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">默认 300=5 分钟</span>
+                </div>
+                <div>
+                  <label className={labelClass}>基础回撤 %</label>
+                  <input type="number" step="0.1" {...register('trailing_tp_drawdown_base_pct', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">盈利&lt;阶梯1 时生效；默认 30</span>
+                </div>
+                <div>
+                  <label className={labelClass}>阶梯1 回撤 %</label>
+                  <input type="number" step="0.1" {...register('trailing_tp_drawdown_tier1_pct', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">盈利≥阶梯1 收紧至此；默认 20</span>
+                </div>
+                <div>
+                  <label className={labelClass}>阶梯2 回撤 %</label>
+                  <input type="number" step="0.1" {...register('trailing_tp_drawdown_tier2_pct', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">盈利≥阶梯2 进一步收紧；默认 15</span>
+                </div>
+                <div>
+                  <label className={labelClass}>阶梯1 阈值 %</label>
+                  <input type="number" step="0.1" {...register('trailing_tp_tier1_threshold', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">默认 2.5</span>
+                </div>
+                <div>
+                  <label className={labelClass}>阶梯2 阈值 %</label>
+                  <input type="number" step="0.1" {...register('trailing_tp_tier2_threshold', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">默认 5.0</span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

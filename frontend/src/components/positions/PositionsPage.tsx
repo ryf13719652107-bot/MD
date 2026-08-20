@@ -1,14 +1,21 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
-import { api } from '../../services/api';
+import { api, type TrailingState } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
 import type { DashboardData, Position } from '../../types';
 import { ArrowDown, ArrowUp, Check, ChevronsUpDown, Minus } from 'lucide-react';
 
 type ExchangePos = DashboardData['exchange_positions'][number];
 
+/** 与后端 _panic_symbol_key 对齐：upper + 去 / + 去 :USDT + 去 _ */
+function normSym(s: string): string {
+  return (s || '').replace(/\//g, '').replace(/:USDT/g, '').replace(/_/g, '').toUpperCase();
+}
+
 type DisplayRow = {
   key: string;
   symbol: string;
+  /** 与后端 trailing-status 返回 key 对齐的归一化 symbol，用于止盈模式查表 */
+  symbol_norm: string;
   side: 'long' | 'short';
   notional_usdt: number;
   entry_price: number;
@@ -61,6 +68,7 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
       return {
         key: `${sym}-${side}`,
         symbol: ep.symbol,
+        symbol_norm: normSym(ep.symbol),
         side,
         notional_usdt: exchangeNotionalUsdt(ep),
         entry_price: ep.entry_price,
@@ -81,6 +89,7 @@ function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): D
       return {
         key: String(p.id),
         symbol: p.symbol,
+        symbol_norm: normSym(p.symbol),
         side: p.side,
         notional_usdt: px * p.quantity,
         entry_price: p.entry_price,
@@ -150,13 +159,69 @@ function SortTh({
   );
 }
 
+/** 根据 row.symbol_norm + side 从 trailing map 查询并渲染止盈模式单元格 */
+function renderTrailingMode(
+  row: DisplayRow,
+  map: Record<string, TrailingState[]>,
+) {
+  const states = map[row.symbol_norm] ?? [];
+  const matching = states.filter(
+    (s) => (s.side || '').toLowerCase() === row.side,
+  );
+  // 优先展示信息量最大的状态：active > armed > 其他
+  const pick =
+    matching.find((s) => s.state === 'active')
+    ?? matching.find((s) => s.state === 'armed')
+    ?? matching[0];
+  if (!pick) {
+    return (
+      <span className="text-gray-500 text-xs" title="按原限价止盈逻辑运行">
+        限价止盈
+      </span>
+    );
+  }
+  if (pick.state === 'armed') {
+    const rem = pick.remaining_sec;
+    return (
+      <span
+        className="text-amber-300 text-xs"
+        title="开仓窗口内等待激活，超时回退限价止盈"
+      >
+        移动止盈{rem != null ? `(剩余${rem.toFixed(0)}s)` : ''}
+      </span>
+    );
+  }
+  if (pick.state === 'active') {
+    const peak = pick.peak_pct;
+    const lim = pick.drawdown_limit_pct;
+    const peakTxt = peak != null ? `峰值${peak.toFixed(2)}%` : '';
+    const limTxt = lim != null ? ` 限${lim.toFixed(1)}%` : '';
+    return (
+      <span
+        className="text-emerald-300 text-xs"
+        title="已激活毫秒级移动追踪"
+      >
+        移动追踪({peakTxt}{limTxt})
+      </span>
+    );
+  }
+  // expired 或未知状态：回退限价止盈
+  return (
+    <span className="text-gray-500 text-xs" title="窗口超时，回退限价止盈">
+      限价止盈
+    </span>
+  );
+}
+
 export default function PositionsPage() {
   const { selectedAccountId } = useDashboardStore();
   const [dbPositions, setDbPositions] = useState<Position[]>([]);
   const [exchangePositions, setExchangePositions] = useState<ExchangePos[]>([]);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [trailingMap, setTrailingMap] = useState<Record<string, TrailingState[]>>({});
   const loadRef = useRef<() => void>(() => {});
+  const trailingRef = useRef<() => void>(() => {});
 
   const load = async () => {
     const acc = selectedAccountId ?? undefined;
@@ -179,12 +244,52 @@ export default function PositionsPage() {
   };
   loadRef.current = load;
 
+  // 时间移动止盈状态：遍历当前持仓涉及的每个 strategy_id，调用 trailing-status 聚合
+  const loadTrailing = async () => {
+    const ids = Array.from(
+      new Set(
+        dbPositions
+          .map((p) => p.strategy_id)
+          .filter((id): id is number => id != null),
+      ),
+    );
+    if (ids.length === 0) {
+      setTrailingMap({});
+      return;
+    }
+    try {
+      const maps = await Promise.all(ids.map((id) => api.getTrailingStatus(id)));
+      const merged: Record<string, TrailingState[]> = {};
+      for (const m of maps) {
+        for (const [sym, states] of Object.entries(m)) {
+          if (!states?.length) continue;
+          merged[sym] = merged[sym] ? merged[sym].concat(states) : states;
+        }
+      }
+      setTrailingMap(merged);
+    } catch {
+      /* 保留上一次结果 */
+    }
+  };
+  trailingRef.current = loadTrailing;
+
   useEffect(() => {
     load();
   }, [selectedAccountId]);
 
   useEffect(() => {
+    // 持仓变化后立即刷新一次止盈模式
+    trailingRef.current();
+  }, [dbPositions]);
+
+  useEffect(() => {
     const timer = setInterval(() => loadRef.current(), 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    // 每 2 秒轮询 trailing-status 更新止盈模式显示
+    const timer = setInterval(() => trailingRef.current(), 2000);
     return () => clearInterval(timer);
   }, []);
 
@@ -214,7 +319,7 @@ export default function PositionsPage() {
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
         <h2 className="text-xl font-bold">当前持仓</h2>
         <span className="text-xs text-gray-500">
-          名义 USDT 来自交易所；限价止盈来自本地策略库 · 每 30 秒刷新
+          名义 USDT 来自交易所；限价止盈来自本地策略库 · 每 30 秒刷新；止盈模式每 2 秒刷新
           <span className="ml-2 text-gray-600 font-mono" title="每次 npm run build 更新；若与执行时间不符说明浏览器或 CDN 仍在用旧包">
             build:{__FRONTEND_BUILD_STAMP__}
           </span>
@@ -242,6 +347,7 @@ export default function PositionsPage() {
               <th className="p-3">层数</th>
               <th className="p-3">入场价</th>
               <th className="p-3">限价止盈</th>
+              <th className="p-3">止盈模式</th>
               <SortTh
                 label="未实现盈亏"
                 active={sortKey === 'pnl'}
@@ -289,6 +395,9 @@ export default function PositionsPage() {
                     <span className="text-gray-600 text-xs">-</span>
                   )}
                 </td>
+                <td className="p-3 whitespace-nowrap">
+                  {renderTrailingMode(row, trailingMap)}
+                </td>
                 <td className={`p-3 font-mono ${row.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                   {row.unrealized_pnl >= 0 ? '+' : ''}
                   {row.unrealized_pnl.toFixed(2)} USDT
@@ -298,7 +407,7 @@ export default function PositionsPage() {
             ))}
             {sortedRows.length === 0 && (
               <tr>
-                <td colSpan={8} className="p-8 text-center text-gray-600">
+                <td colSpan={9} className="p-8 text-center text-gray-600">
                   暂无持仓
                 </td>
               </tr>

@@ -85,6 +85,36 @@ class Strategy(Base):
         String(32), default="price_and_wt", server_default="price_and_wt"
     )
 
+    # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
+    # 开仓后 window_sec 内达到 take_profit_pct → 激活毫秒级追踪；超时则回退限价止盈
+    trailing_tp_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    # 激活窗口（秒），默认 300=5分钟
+    trailing_tp_window_sec: Mapped[float] = mapped_column(
+        Float, default=300.0, server_default="300.0"
+    )
+    # 基础回撤比例 %（盈利<tier1 时生效）
+    trailing_tp_drawdown_base_pct: Mapped[float] = mapped_column(
+        Float, default=30.0, server_default="30.0"
+    )
+    # 盈利≥tier1_threshold 时收紧至此回撤比例 %
+    trailing_tp_drawdown_tier1_pct: Mapped[float] = mapped_column(
+        Float, default=20.0, server_default="20.0"
+    )
+    # 盈利≥tier2_threshold 时进一步收紧至此回撤比例 %
+    trailing_tp_drawdown_tier2_pct: Mapped[float] = mapped_column(
+        Float, default=15.0, server_default="15.0"
+    )
+    # 阶梯1触发盈利 %（默认 2.5）
+    trailing_tp_tier1_threshold: Mapped[float] = mapped_column(
+        Float, default=2.5, server_default="2.5"
+    )
+    # 阶梯2触发盈利 %（默认 5.0）
+    trailing_tp_tier2_threshold: Mapped[float] = mapped_column(
+        Float, default=5.0, server_default="5.0"
+    )
+
     # General params
     rsi_period: Mapped[int] = mapped_column(Integer, default=14)
     timeframe: Mapped[str] = mapped_column(String(10), default="1m")

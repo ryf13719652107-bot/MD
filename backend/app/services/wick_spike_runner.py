@@ -20,7 +20,7 @@ from ..models.account import Account
 from ..models.position import Position
 from ..models.strategy import Strategy
 from ..models.strategy_blacklist import StrategySymbolBlacklist
-from ..config import now_beijing
+from ..config import now_beijing, BEIJING_TZ
 from .binance_service import (
     get_strategy_pool_exclude_symbols,
     filter_pool_symbols_by_funding,
@@ -69,6 +69,14 @@ from .wick_spike_engine import (
     tip_gap_pct,
 )
 from .strategy_engine import Signal
+from .trailing_tp_engine import (
+    TrailingTpParams,
+    TrailingTpMemState,
+    apply_tick,
+    STATE_ARMED,
+    STATE_ACTIVE,
+    STATE_EXPIRED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +201,15 @@ class WickSpikeRunner:
         self._tasks: dict[int, asyncio.Task] = {}
         self._bg_tasks: set[asyncio.Task] = set()
         self._position_mgr = PositionManager()
+        # 时间移动止盈：按 strategy_id 分桶的内存状态（_refresh_context 异步刷新）
+        # trailing_params: strategy_id -> TrailingTpParams（开关关闭时为 None）
+        # trailing_mems: strategy_id -> {sym_key -> list[TrailingTpMemState]}
+        # trailing_auth: strategy_id -> auth client（后台平仓/撤单用）
+        # trailing_close_inflight: strategy_id -> set[sym_key]（防同币并发平仓）
+        self._trailing_params: dict[int, TrailingTpParams | None] = {}
+        self._trailing_mems: dict[int, dict[str, list[TrailingTpMemState]]] = {}
+        self._trailing_auth: dict[int, object] = {}
+        self._trailing_close_inflight: dict[int, set[str]] = {}
 
     def _fire_bg(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -567,6 +584,13 @@ class WickSpikeRunner:
                         st_ts is not None
                         and is_arm_active(st, params, st_ts, now_ms)
                     )
+
+                    # --- 时间移动止盈：毫秒级追踪（开关关闭则 params=None 跳过，零影响）---
+                    # 价格有变化或武装/反弹 force_retry 时执行；armed 超时也在此检查
+                    if price > 0 and (price_changed or arm_active):
+                        self._tick_trailing(
+                            strategy_id, sym_key, price, now_ms
+                        )
 
                     if not self._position_mgr._passes_new_entry_filters(
                         sym, filter_strategy, tick_ctx
@@ -1046,7 +1070,382 @@ class WickSpikeRunner:
         # Keep auth client in scheduler cache path if present
         if strategy.account_id not in strategy_scheduler._exchange_services:
             strategy_scheduler._exchange_services[strategy.account_id] = auth
+
+        # --- 时间移动止盈：刷新内存状态（开关关闭则清空，零影响）---
+        self._refresh_trailing(strategy_id, strategy, open_rows, auth)
+
         return strategy, watch, tick_ctx, total_margin, auth, public, leverage
+
+    def _refresh_trailing(
+        self,
+        strategy_id: int,
+        strategy: Strategy,
+        open_rows: list,
+        auth,
+    ) -> None:
+        """从 DB Position 重建内存 trailing 状态。开关关闭则清空本策略桶。
+
+        在 _refresh_context 后台任务里调用（单线程 asyncio，主循环读安全）。
+        已平仓/缺失的 Position 自然从字典消失；新开仓的 armed 状态被加入。
+        """
+        if not getattr(strategy, "trailing_tp_enabled", False):
+            self._trailing_params.pop(strategy_id, None)
+            self._trailing_mems.pop(strategy_id, None)
+            self._trailing_auth.pop(strategy_id, None)
+            self._trailing_close_inflight.pop(strategy_id, None)
+            return
+
+        params = TrailingTpParams(
+            enabled=True,
+            window_sec=float(strategy.trailing_tp_window_sec or 300.0),
+            activate_threshold_pct=float(strategy.take_profit_pct or 2.0),
+            drawdown_base_pct=float(strategy.trailing_tp_drawdown_base_pct or 30.0),
+            drawdown_tier1_pct=float(strategy.trailing_tp_drawdown_tier1_pct or 20.0),
+            drawdown_tier2_pct=float(strategy.trailing_tp_drawdown_tier2_pct or 15.0),
+            tier1_threshold=float(strategy.trailing_tp_tier1_threshold or 2.5),
+            tier2_threshold=float(strategy.trailing_tp_tier2_threshold or 5.0),
+        )
+        self._trailing_params[strategy_id] = params
+        self._trailing_auth[strategy_id] = auth
+        self._trailing_close_inflight.setdefault(strategy_id, set())
+
+        buckets: dict[str, list[TrailingTpMemState]] = {}
+        # 旧内存状态：position_id -> mem（保留热路径更新的 peak_pct/state，避免 refresh 丢失）
+        old_buckets = self._trailing_mems.get(strategy_id, {})
+        old_by_pid: dict[int, TrailingTpMemState] = {}
+        for _mems in old_buckets.values():
+            for _m in _mems:
+                old_by_pid[int(_m.position_id)] = _m
+
+        for p in open_rows:
+            state_str = (p.trailing_tp_state or "").strip()
+            if state_str not in (STATE_ARMED, STATE_ACTIVE, STATE_EXPIRED):
+                continue
+            sym_key = _norm_sym(p.symbol)
+            try:
+                opened_ms = int(p.opened_at.replace(tzinfo=BEIJING_TZ).timestamp() * 1000)
+            except Exception:
+                opened_ms = 0
+            pid = int(p.id)
+            # 优先用旧 mem 的 state/peak_pct/peak_price（热路径最新值）
+            old_mem = old_by_pid.get(pid)
+            if old_mem is not None:
+                state_str = old_mem.state
+                peak_pct = old_mem.peak_pct
+                peak_price = old_mem.peak_price
+            else:
+                peak_pct = float(p.trailing_tp_peak_pct or 0.0)
+                peak_price = 0.0
+            mem = TrailingTpMemState(
+                position_id=pid,
+                symbol=sym_key,
+                side=(p.side or "").lower(),
+                entry_price=float(p.entry_price or 0),
+                opened_at_ms=opened_ms,
+                state=state_str,
+                peak_pct=peak_pct,
+                peak_price=peak_price,
+            )
+            buckets.setdefault(sym_key, []).append(mem)
+        self._trailing_mems[strategy_id] = buckets
+
+    def get_trailing_status(
+        self, strategy_id: int, sym_key: str
+    ) -> list[dict]:
+        """供前端 API 查询：返回本币种的 trailing 状态快照（实时，读内存不查 DB）。
+
+        每条包含：position_id, side, state, peak_pct, remaining_sec, drawdown_limit。
+        开关关闭或无持仓时返回空列表。
+        """
+        params = self._trailing_params.get(strategy_id)
+        if params is None or not params.enabled:
+            return []
+        buckets = self._trailing_mems.get(strategy_id)
+        if not buckets:
+            return []
+        mems = buckets.get(sym_key)
+        if not mems:
+            return []
+        now_ms = int(time.time() * 1000)
+        from .trailing_tp_engine import (
+            remaining_window_sec,
+            current_drawdown_limit,
+        )
+        out: list[dict] = []
+        for m in mems:
+            rem = (
+                remaining_window_sec(m, now_ms, params.window_sec)
+                if m.state == STATE_ARMED
+                else None
+            )
+            ddlimit = (
+                current_drawdown_limit(params, m.peak_pct)
+                if m.state == STATE_ACTIVE
+                else None
+            )
+            out.append({
+                "position_id": m.position_id,
+                "side": m.side,
+                "state": m.state,
+                "peak_pct": round(m.peak_pct, 4),
+                "remaining_sec": round(rem, 1) if rem is not None else None,
+                "drawdown_limit_pct": round(ddlimit, 2) if ddlimit is not None else None,
+                "entry_price": m.entry_price,
+            })
+        return out
+
+    def _tick_trailing(
+        self,
+        strategy_id: int,
+        sym_key: str,
+        price: float,
+        now_ms: int,
+    ) -> None:
+        """热路径：对本 sym 的 trailing mems 调用 apply_tick，事件 fire-and-forget。
+
+        开关关闭（params=None）或本 sym 无 mem 时 O(1) 跳过，零影响。
+        平仓事件用 inflight 集合防同币并发；撤单/挂单事件可并发。
+        """
+        params = self._trailing_params.get(strategy_id)
+        if params is None or not params.enabled:
+            return
+        buckets = self._trailing_mems.get(strategy_id)
+        if not buckets:
+            return
+        mems = buckets.get(sym_key)
+        if not mems:
+            return
+
+        close_inflight = self._trailing_close_inflight.setdefault(strategy_id, set())
+        auth = self._trailing_auth.get(strategy_id)
+
+        for mem in mems:
+            if mem.state == STATE_EXPIRED:
+                continue
+            event = apply_tick(mem, params, price, now_ms)
+            if event is None:
+                continue
+            if event == "close":
+                if sym_key in close_inflight:
+                    continue
+                close_inflight.add(sym_key)
+                # mem.state 已是 active；传入 mem 供后台任务读 entry/peak
+                self._fire_bg(self._post_trailing_close_async(
+                    strategy_id, sym_key, mem, price
+                ))
+            elif event == "activated":
+                # armed→active：撤旧限价止盈单（如有）
+                self._fire_bg(self._post_trailing_activate_async(
+                    strategy_id, sym_key, mem
+                ))
+                logger.info(
+                    "wick_spike trailing_tp activated strategy=%d %s "
+                    "entry=%.6g peak=%.4f%% px=%.6g",
+                    strategy_id, sym_key, mem.entry_price, mem.peak_pct, price,
+                )
+            elif event == "window_expired":
+                # armed→expired：回退挂限价止盈单
+                self._fire_bg(self._post_trailing_expire_async(
+                    strategy_id, sym_key, mem
+                ))
+                logger.info(
+                    "wick_spike trailing_tp window_expired strategy=%d %s "
+                    "entry=%.6g — 回退限价止盈",
+                    strategy_id, sym_key, mem.entry_price,
+                )
+
+    async def _post_trailing_activate_async(
+        self,
+        strategy_id: int,
+        sym_key: str,
+        mem: TrailingTpMemState,
+    ) -> None:
+        """armed→active：撤旧 tp_limit_order_id（如有），让移动追踪接管。
+
+        异常只 log 不抛；mem.state 已由热路径切 active，DB state 由下次 refresh 同步。
+        """
+        try:
+            async with async_session() as session:
+                rows = list(
+                    (
+                        await session.execute(
+                            select(Position).where(
+                                Position.strategy_id == strategy_id,
+                                Position.closed_at.is_(None),
+                                Position.symbol == sym_key,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                oids = [
+                    (p.tp_limit_order_id or "").strip()
+                    for p in rows
+                    if (p.tp_limit_order_id or "").strip()
+                ]
+                if not oids:
+                    return
+                auth = self._trailing_auth.get(strategy_id)
+                if auth is None:
+                    return
+                # 复用 position_mgr 的撤单逻辑（_cancel_bot_tp_order_ids）
+                await self._position_mgr._cancel_bot_tp_order_ids(
+                    auth, sym_key, set(oids), strategy_id, keep_id=""
+                )
+                for p in rows:
+                    p.tp_limit_order_id = None
+                    p.trailing_tp_state = STATE_ACTIVE
+                await session.commit()
+                strategy_log_service.info(
+                    strategy_id,
+                    f"{sym_key} trailing_tp 激活 — 撤旧限价单 {len(oids)} 张，"
+                    f"开始毫秒级移动追踪",
+                )
+        except Exception as e:
+            logger.error(
+                "wick_spike trailing_tp activate strategy=%d %s: %s",
+                strategy_id, sym_key, e,
+            )
+
+    async def _post_trailing_expire_async(
+        self,
+        strategy_id: int,
+        sym_key: str,
+        mem: TrailingTpMemState,
+    ) -> None:
+        """armed→expired：窗口超时，回退到原限价止盈逻辑。
+
+        更新 DB state='expired'，并调用 _ensure_tp_limit_orders 挂限价单。
+        之后 scheduler 的 _manage_positions 会正常接管（trailing_taken_over=False）。
+        """
+        try:
+            async with async_session() as session:
+                db_strategy = await session.get(Strategy, strategy_id)
+                if db_strategy is None or db_strategy.status != "running":
+                    return
+                open_positions = list(
+                    (
+                        await session.execute(
+                            select(Position).where(
+                                Position.strategy_id == strategy_id,
+                                Position.closed_at.is_(None),
+                                Position.symbol == sym_key,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                if not open_positions:
+                    return
+                for p in open_positions:
+                    p.trailing_tp_state = STATE_EXPIRED
+                await session.flush()
+
+                auth = self._trailing_auth.get(strategy_id)
+                if auth is None:
+                    await session.commit()
+                    return
+                # 复用马丁引擎算 avg_entry / 止盈价
+                from .martingale_engine import MartingaleEngine
+                positions_data = [
+                    {"quantity": p.quantity, "entry_price": p.entry_price}
+                    for p in open_positions
+                ]
+                eng = MartingaleEngine(
+                    base_quantity=0,
+                    multiplier=db_strategy.martingale_mult,
+                    max_layers=db_strategy.max_layers,
+                    price_drop_pct=db_strategy.price_drop_pct,
+                    price_drop_multiplier=float(db_strategy.price_drop_multiplier or 1.0),
+                    take_profit_pct=db_strategy.take_profit_pct,
+                )
+                avg_entry, total_qty = eng.get_avg_entry_price(positions_data)
+                pos_side = (open_positions[0].side or "").lower()
+                await self._position_mgr._ensure_tp_limit_orders(
+                    session, db_strategy, sym_key, auth,
+                    open_positions, eng, avg_entry, total_qty, pos_side,
+                )
+                await session.commit()
+                strategy_log_service.info(
+                    strategy_id,
+                    f"{sym_key} trailing_tp 窗口超时 — 回退限价止盈逻辑",
+                )
+        except Exception as e:
+            logger.error(
+                "wick_spike trailing_tp expire strategy=%d %s: %s",
+                strategy_id, sym_key, e,
+            )
+
+    async def _post_trailing_close_async(
+        self,
+        strategy_id: int,
+        sym_key: str,
+        mem: TrailingTpMemState,
+        trigger_price: float,
+    ) -> None:
+        """active 触发回撤平仓：市价平仓 + 清 inflight + 清 mem。
+
+        复用 _close_positions；平仓后 Position.closed_at 写入，下次 refresh
+        自然从 mems 字典消失。inflight 在 finally 清除（无论成功失败）。
+        """
+        try:
+            async with async_session() as session:
+                db_strategy = await session.get(Strategy, strategy_id)
+                if db_strategy is None or db_strategy.status != "running":
+                    return
+                open_positions = list(
+                    (
+                        await session.execute(
+                            select(Position).where(
+                                Position.strategy_id == strategy_id,
+                                Position.closed_at.is_(None),
+                                Position.symbol == sym_key,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                if not open_positions:
+                    return
+                auth = self._trailing_auth.get(strategy_id)
+                if auth is None:
+                    return
+                from .martingale_engine import MartingaleEngine
+                positions_data = [
+                    {"quantity": p.quantity, "entry_price": p.entry_price}
+                    for p in open_positions
+                ]
+                eng = MartingaleEngine(
+                    base_quantity=0,
+                    multiplier=db_strategy.martingale_mult,
+                    max_layers=db_strategy.max_layers,
+                    price_drop_pct=db_strategy.price_drop_pct,
+                    price_drop_multiplier=float(db_strategy.price_drop_multiplier or 1.0),
+                    take_profit_pct=db_strategy.take_profit_pct,
+                )
+                avg_entry, total_qty = eng.get_avg_entry_price(positions_data)
+                pos_side = (open_positions[0].side or "").lower()
+                strategy_log_service.success(
+                    strategy_id,
+                    f"{sym_key} trailing_tp 平仓 — 触发价 {trigger_price:.6g} "
+                    f"峰值盈利 {mem.peak_pct:.2f}%",
+                )
+                await self._position_mgr._close_positions(
+                    session, db_strategy, sym_key, auth,
+                    open_positions, eng, avg_entry, pos_side,
+                    "trailing_tp", trigger_price,
+                )
+                await session.commit()
+        except Exception as e:
+            logger.error(
+                "wick_spike trailing_tp close strategy=%d %s: %s",
+                strategy_id, sym_key, e,
+            )
+        finally:
+            inflight = self._trailing_close_inflight.get(strategy_id)
+            if inflight is not None:
+                inflight.discard(sym_key)
+            # 从内存字典移除（避免下次 tick 重复触发；refresh 会重建）
+            buckets = self._trailing_mems.get(strategy_id)
+            if buckets is not None:
+                buckets.pop(sym_key, None)
 
     async def _try_open(
         self,

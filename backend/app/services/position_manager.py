@@ -1455,8 +1455,24 @@ class PositionManager:
         strategy: Strategy,
         result: OpenApiResult,
     ) -> OpenApiResult:
-        """市价成交后挂止盈限价（不计入接针 open_api_ms）。"""
+        """市价成交后挂止盈限价（不计入接针 open_api_ms）。
+
+        trailing_tp_enabled=True 时跳过挂限价单：改由 wick_spike_runner 实时循环
+        在窗口内激活移动追踪；超时则由 _ensure_tp_limit_orders 回退挂单。
+        开关关闭时此函数行为不变（原限价止盈逻辑零影响）。
+        """
         if not strategy.take_profit_limit_order or result.tp_price <= 0:
+            return result
+        # trailing_tp：仅 wick_spike 策略跳过挂限价单（place_open_tp_limit 只在
+        # wick_spike_runner._post_open_async 调用，但加 signal_source 守卫双保险）
+        if getattr(strategy, "trailing_tp_enabled", False) and (
+            strategy.signal_source or ""
+        ) == "wick_spike":
+            strategy_log_service.info(
+                strategy.id,
+                f"{result.symbol} trailing_tp 已启用 — 跳过挂限价止盈单，"
+                f"进入 armed 状态等待窗口内激活",
+            )
             return result
         strategy_id = strategy.id
         symbol = result.symbol
@@ -1757,6 +1773,12 @@ class PositionManager:
                     primary.exchange_order_id = str(oid)
                 if result.tp_limit_order_id:
                     primary.tp_limit_order_id = result.tp_limit_order_id
+                # trailing_tp：merge 路径也设置 armed（仅 wick_spike）
+                if getattr(strategy, "trailing_tp_enabled", False) and (
+                    strategy.signal_source or ""
+                ) == "wick_spike":
+                    primary.trailing_tp_state = "armed"
+                    primary.trailing_tp_peak_pct = 0.0
                 await session.flush()
                 logger.warning(
                     "Strategy %d: open DB merge into existing %s %s "
@@ -1787,6 +1809,13 @@ class PositionManager:
             )
             if result.tp_limit_order_id:
                 pos.tp_limit_order_id = result.tp_limit_order_id
+            # trailing_tp：仅 wick_spike 策略启用（只有 wick_spike_runner 有实时追踪）；
+            # 非 wick_spike 误开则不设 armed，避免 scheduler 跳过 TP 却无追踪→裸奔
+            if getattr(strategy, "trailing_tp_enabled", False) and (
+                strategy.signal_source or ""
+            ) == "wick_spike":
+                pos.trailing_tp_state = "armed"
+                pos.trailing_tp_peak_pct = 0.0
             session.add(pos)
             await session.flush()
         except Exception as e:
@@ -2119,6 +2148,18 @@ class PositionManager:
         has_open_tp_limit = bool(strategy.take_profit_limit_order) and any(
             (p.tp_limit_order_id or "").strip() for p in open_positions
         )
+        # trailing_tp 接管判断：仅 wick_spike 策略 + armed/active 状态下，
+        # 止盈由 wick_spike_runner 实时循环（毫秒级）管理；scheduler 不挂限价单、
+        # 不市价兜底，避免冲突。止损逻辑不受影响（trailing 只管止盈）。
+        # 非 wick_spike 策略即使误开了开关也不接管（无 runner 追踪会裸奔）。
+        # 开关关闭时 state 为 NULL → 不接管 → 原限价止盈逻辑零影响。
+        trailing_taken_over = (
+            (strategy.signal_source or "") == "wick_spike"
+            and any(
+                (p.trailing_tp_state or "") in ("armed", "active")
+                for p in open_positions
+            )
+        )
         # 单币止损只用机器人记账浮亏，避免把同向手动仓盈亏算进来
         symbol_unrealized_pnl = sum(float(p.unrealized_pnl or 0) for p in open_positions)
         symbol_floating_loss = max(0.0, -symbol_unrealized_pnl)
@@ -2154,8 +2195,9 @@ class PositionManager:
             close_reason = "single_symbol_stop_loss"
         elif strategy.stop_loss_enabled and self.risk_mgr.check_stop_loss(avg_entry, current_price, strategy.stop_loss_pct, pos_side):
             close_reason = "stop_loss"
-        elif not has_open_tp_limit:
+        elif not has_open_tp_limit and not trailing_taken_over:
             # 将走市价止盈：触发判定必须用交易所最新价，禁止滞后 K 线 close
+            # trailing 接管时跳过（由 wick_spike_runner 实时循环处理止盈）
             live_for_tp = await _live_last_price(auth_binance, symbol, 0.0)
             if live_for_tp > 0 and eng.check_take_profit(
                 avg_entry, live_for_tp, pos_side
@@ -2170,7 +2212,8 @@ class PositionManager:
         # --- Check TP limit order fill (before martingale, since position may already be closed) ---
         # 有挂单止盈且状态仍 open：只等限价成交，禁止「价已过止盈」市价兜底
         # （接针后价格常瞬间穿透又弹回，市价会在更差价位平掉，BICO/HEI 案例）
-        if strategy.take_profit_limit_order:
+        # trailing 接管时跳过：armed/active 由 wick_spike_runner 管限价单撤挂
+        if strategy.take_profit_limit_order and not trailing_taken_over:
             tp_filled = False
             for p in open_positions:
                 if p.tp_limit_order_id:
@@ -2204,17 +2247,20 @@ class PositionManager:
                 return
 
         # --- 补挂/补关联止盈限价单（重启丢单等）---
-        await self._ensure_tp_limit_orders(
-            session,
-            strategy,
-            symbol,
-            auth_binance,
-            open_positions,
-            eng,
-            avg_entry,
-            total_qty,
-            pos_side,
-        )
+        # trailing 接管时跳过：armed/active 由 wick_spike_runner 管限价单；
+        # expired 已回退原逻辑，正常补挂
+        if not trailing_taken_over:
+            await self._ensure_tp_limit_orders(
+                session,
+                strategy,
+                symbol,
+                auth_binance,
+                open_positions,
+                eng,
+                avg_entry,
+                total_qty,
+                pos_side,
+            )
 
         # --- Check martingale add ---
         last_entry = max(open_positions, key=lambda p: p.layer).entry_price
@@ -2730,6 +2776,30 @@ class PositionManager:
                 entry_price=new_avg, mark_price=current_price, layer=result.next_layer,
                 take_profit_price=tp_price, exchange_order_id=order.get("id", ""),
             )
+            # trailing_tp：加仓=超过5分钟，移动止盈只对首单有效；
+            # 加仓后整体持仓改用限价止盈，清理 trailing 状态（含内存，避免抢先平仓）
+            if getattr(strategy, "trailing_tp_enabled", False) and (
+                strategy.signal_source or ""
+            ) == "wick_spike":
+                for p in open_positions:
+                    if (p.trailing_tp_state or "") in ("armed", "active"):
+                        p.trailing_tp_state = "expired"
+                pos.trailing_tp_state = "expired"
+                try:
+                    from .wick_spike_runner import wick_spike_runner as _runner
+                    sym_key = _norm_sym(symbol)
+                    buckets = _runner._trailing_mems.get(strategy_id)
+                    if buckets is not None:
+                        buckets.pop(sym_key, None)
+                    inflight = _runner._trailing_close_inflight.get(strategy_id)
+                    if inflight is not None:
+                        inflight.discard(sym_key)
+                except Exception:
+                    pass
+                strategy_log_service.info(
+                    strategy_id,
+                    f"{symbol} 加仓后 trailing_tp 置 expired — 整体改用限价止盈",
+                )
             session.add(pos)
             await session.flush()
         except Exception as e:

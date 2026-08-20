@@ -91,6 +91,9 @@ export const api = {
     request(`/strategies/${id}/logs${limit ? `?limit=${limit}` : ''}`),
   getExchangePositions: (id: number): Promise<{ symbol: string; side: string; usdt: number; entry_price: number; mark_price: number; unrealized_pnl: number; pnl_pct: number }[]> =>
     request(`/strategies/${id}/exchange-positions`),
+  /** 时间移动止盈实时状态：{symbol: [TrailingState, ...]}；开关关闭或无持仓返回空数组 */
+  getTrailingStatus: (strategyId: number): Promise<Record<string, TrailingState[]>> =>
+    request(`/strategies/${strategyId}/trailing-status`),
   addStrategyBlacklistSymbol: (id: number, symbol: string): Promise<Strategy> =>
     request<Strategy>(`/strategies/${id}/blacklist`, {
       method: 'POST',
@@ -450,3 +453,16 @@ export type WickSymbolMonitor = {
   rows: WickSymbolMonitorRow[];
   note: string;
 };
+
+/** 时间移动止盈单个 position 的内存状态快照 */
+export type TrailingState = {
+  position_id: number;
+  side: string;
+  /** armed=开仓后窗口内等待激活；active=已激活毫秒级追踪；expired=窗口超时回退限价止盈 */
+  state: string | null;
+  peak_pct: number | null;
+  remaining_sec: number | null;
+  drawdown_limit_pct: number | null;
+  entry_price: number | null;
+};
+
