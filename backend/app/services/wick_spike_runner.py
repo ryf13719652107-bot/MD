@@ -1489,13 +1489,13 @@ class WickSpikeRunner:
                 pos_side = (open_positions[0].side or "").lower()
                 strategy_log_service.success(
                     strategy_id,
-                    f"{sym_key} trailing_tp 平仓 — 触发价 {trigger_price:.6g} "
+                    f"{sym_key} 移动止盈平仓 — 触发价 {trigger_price:.6g} "
                     f"峰值盈利 {mem.peak_pct:.2f}%",
                 )
                 await self._position_mgr._close_positions(
                     session, db_strategy, sym_key, auth,
                     open_positions, eng, avg_entry, pos_side,
-                    "trailing_tp", trigger_price,
+                    "移动止盈", trigger_price,
                 )
                 await session.commit()
         except Exception as e:

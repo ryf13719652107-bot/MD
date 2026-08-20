@@ -270,6 +270,7 @@ export default function TradesPage() {
                 <td className="p-3">
                   <span className={`px-2 py-0.5 rounded text-xs ${
                     t.close_reason === 'take_profit' ? 'bg-green-600/20 text-green-400' :
+                    t.close_reason === '移动止盈' ? 'bg-emerald-600/20 text-emerald-300' :
                     t.close_reason === 'stop_loss' ? 'bg-red-600/20 text-red-400' :
                     t.close_reason === 'panic_close' ? 'bg-yellow-600/20 text-yellow-400' :
                     t.close_reason === 'sync' ? 'bg-blue-600/20 text-blue-400' :
@@ -277,6 +278,7 @@ export default function TradesPage() {
                     'bg-gray-700 text-gray-400'
                   }`}>
                     {t.close_reason === 'take_profit' ? '止盈' :
+                     t.close_reason === '移动止盈' ? '移动止盈' :
                      t.close_reason === 'stop_loss' ? '止损' :
                      t.close_reason === 'panic_close' ? '紧急平仓' :
                      t.close_reason === 'sync' ? '同步平仓' :
