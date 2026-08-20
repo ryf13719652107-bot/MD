@@ -113,9 +113,9 @@ class StrategyCreate(BaseModel):
     )
     wick_arm_wait_sec: float = Field(
         default=12.0,
-        ge=0,
+        ge=-1,
         le=120,
-        description="刺破后等量窗口秒数；0=关闭武装",
+        description="刺破后等量窗口秒数；>0=本根内N秒超时；0=本根内不超时换根才超时；-1=关闭武装",
     )
     wick_arm_retrace_grace_sec: float = Field(
         default=5.0,
@@ -233,7 +233,7 @@ class StrategyUpdate(BaseModel):
     wick_vol_relax_mult: Optional[float] = Field(default=None, ge=0, le=100)
     wick_min_move_pct: Optional[float] = Field(default=None, ge=0, le=50)
     wick_max_retrace_pct: Optional[float] = Field(default=None, ge=0, le=100)
-    wick_arm_wait_sec: Optional[float] = Field(default=None, ge=0, le=120)
+    wick_arm_wait_sec: Optional[float] = Field(default=None, ge=-1, le=120)
     wick_arm_retrace_grace_sec: Optional[float] = Field(default=None, ge=0, le=60)
     wick_arm_grace_max_tip_gap_pct: Optional[float] = Field(default=None, ge=0, le=20)
     wick_rebound_enabled: Optional[bool] = Field(default=None)

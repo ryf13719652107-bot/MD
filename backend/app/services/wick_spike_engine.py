@@ -16,7 +16,7 @@ progress 量能放宽（可选，默认开）：
 
 min_move_pct（默认 3）：本根极值相对开盘的涨跌幅 % 须 ≥ 该值才允许武装；0=关闭。
 max_retrace_pct（默认 50）：现价相对「开盘→极值」已回撤的比例 %；超过则跳过；0=关闭。
-arm_wait_sec（默认 12）：刺破后最多等多久的量；0=关闭武装（恢复旧「同刻全条件」）。
+arm_wait_sec（默认 12）：刺破后最多等多久的量；>0=本根内 N 秒超时；0=本根内不超时换根才超时（跟反弹一致）；-1=关闭武装（恢复同刻全条件）。
 arm_retrace_grace_sec（默认 5）：武装时量不够，则确认时前 N 秒免回撤门禁。
 arm_grace_max_tip_gap_pct（默认 2）：grace 免回撤时，进场价相对极值的 tip_gap% 上限；0=不限制。
 超时作废后若同根仍刺破可再次武装（量滞后于价时给量能追上来的机会）。
@@ -73,7 +73,7 @@ class WickSpikeParams:
     min_move_pct: float = _MIN_MOVE_PCT
     # 开盘→极值方向上回撤占比上限 %（0=关闭）
     max_retrace_pct: float = _MAX_RETRACE_PCT
-    # 刺破后等量窗口（秒）；0=关闭武装，走同刻全条件
+    # 刺破后等量窗口（秒）；>0=本根内 N 秒超时；0=本根内不超时换根才超时；-1=关闭武装
     arm_wait_sec: float = _ARM_WAIT_SEC
     # 等量期间回撤宽限（秒）；仅 armed_awaiting_vol 时生效
     arm_retrace_grace_sec: float = _ARM_RETRACE_GRACE_SEC
@@ -693,12 +693,14 @@ def is_arm_active(
 
     # 原武装窗检查
     wait = float(params.arm_wait_sec or 0)
-    if wait <= 0:
-        return False
+    if wait < 0:
+        return False  # -1：关闭武装（恢复同刻全条件）
     if state.armed_bar_ts != bar_open_ts or state.armed_at_ms <= 0:
         return False
     if state.triggered_bar_ts == bar_open_ts:
         return False
+    if wait == 0:
+        return True  # 0：本根内不超时，换根才超时（跟反弹 rw<=0 一致）
     return (now_ms - state.armed_at_ms) <= int(wait * 1000) + 1
 
 
@@ -918,8 +920,8 @@ def on_tick(
             clear_arm(state)
         return None
 
-    # —— 关闭武装：同刻全条件；若开 rebound 仍进反弹窗（不绕过）——
-    if arm_wait <= 0:
+    # —— 关闭武装（-1）：同刻全条件；若开 rebound 仍进反弹窗（不绕过）——
+    if arm_wait < 0:
         progress = spike_progress(direction, snap.bar_open, extreme, n)
         need = effective_volume_mult(params, progress)
         if not _volume_hot(params, snap, volume_mult=need):
@@ -957,7 +959,7 @@ def on_tick(
 
     # 超时作废（记下 progress，供同根更深针再武装）
     if state.armed_bar_ts == snap.bar_open_ts and state.armed_at_ms > 0:
-        if (now_ms - state.armed_at_ms) > int(arm_wait * 1000):
+        if arm_wait > 0 and (now_ms - state.armed_at_ms) > int(arm_wait * 1000):
             ext_x = (
                 float(state.armed_extreme)
                 if state.armed_extreme is not None
