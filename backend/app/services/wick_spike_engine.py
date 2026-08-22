@@ -33,9 +33,9 @@ arm_grace_max_tip_gap_pct（默认 2）：grace 免回撤时，进场价相对�
   arm_wait=0 时若开启 rebound，同刻全条件达标后仍走反弹窗（不再绕过）。
   trigger_pct<=0：confirm 后立刻市价（不等反弹）。
 
-EMA25 趋势过滤（ema25_filter_enabled，产品默认开）：
-  用 1m 本根开盘价 vs 已收盘收盘价 EMA25（热路径内存算，无 REST）。
-  做空：开盘 < EMA25 → 不做空；做多：开盘 > EMA25 → 不做多。
+EMA30 趋势过滤（ema25_filter_enabled，产品默认开；字段名保留历史命名，实际算 EMA(ema25_period)，默认 30）：
+  用 1m 本根开盘价 vs 已收盘收盘价 EMA30（热路径内存算，无 REST）。
+  做空：开盘 < EMA30 → 不做空；做多：开盘 > EMA30 → 不做多。
   缓冲不足（算不出 EMA）时不过滤，避免重启空窗误杀。
 """
 
@@ -84,9 +84,9 @@ class WickSpikeParams:
     rebound_trigger_pct: float = 20.0  # 反弹占针深%触发市价
     rebound_abort_pct: float = 35.0    # 反弹占针深%放弃
     rebound_wait_sec: float = 0.0      # 针尖停住后再等反弹的超时秒数（破新尖重置）；0=本根内不超时（换根仍超时）
-    # 1m 开盘 vs EMA25 过滤；产品层默认开，此处默认关（单测不受趋势滤）
+    # 1m 开盘 vs EMA30 过滤；产品层默认开，此处默认关（单测不受趋势滤）
     ema25_filter_enabled: bool = False
-    ema25_period: int = 25
+    ema25_period: int = 30
 
 
 @dataclass
@@ -193,7 +193,7 @@ def build_bar_snapshot(
     try:
         bar_open = float(forming[1])
         closes = [float(r[4]) for r in closed]
-        ema25 = _ema_last(closes, int(ema_period or 25))
+        ema25 = _ema_last(closes, int(ema_period or 30))
         return WickBarSnapshot(
             bar_open_ts=int(forming[0]),
             bar_open=bar_open,
@@ -277,14 +277,14 @@ def apply_1m_ema_filter_fields(
         closed = klines_1m[:-1]
         ref_open = float(forming[1])
         closes = [float(r[4]) for r in closed]
-        e = _ema_last(closes, int(ema_period or 25))
+        e = _ema_last(closes, int(ema_period or 30))
     except (TypeError, ValueError, IndexError):
         return snap
     return replace(snap, ema25=e, ema_filter_open=ref_open)
 
 
 def ema25_filter_blocks(params: WickSpikeParams, snap: WickBarSnapshot) -> bool:
-    """True=被 EMA25 趋势过滤拦住（不应武装/确认）。"""
+    """True=被 EMA30 趋势过滤拦住（不应武装/确认）。"""
     if not params.ema25_filter_enabled:
         return False
     ema_v = float(snap.ema25)
@@ -314,13 +314,13 @@ def ema25_filter_reason(params: WickSpikeParams, snap: WickBarSnapshot) -> Optio
     d = (params.direction or "").lower()
     if d == "short":
         return (
-            f"EMA25过滤：1m开盘{open_v:.6g}<EMA25={ema_v:.6g}，偏弱不做空"
+            f"EMA30过滤：1m开盘{open_v:.6g}<EMA30={ema_v:.6g}，偏弱不做空"
         )
     if d == "long":
         return (
-            f"EMA25过滤：1m开盘{open_v:.6g}>EMA25={ema_v:.6g}，偏强不做多"
+            f"EMA30过滤：1m开盘{open_v:.6g}>EMA30={ema_v:.6g}，偏强不做多"
         )
-    return "EMA25过滤"
+    return "EMA30过滤"
 
 
 def _volume_hot(
@@ -914,7 +914,7 @@ def on_tick(
     ):
         return None
 
-    # 1m 开盘 vs EMA25：拦住则不武装/不确认（已在反弹窗内的不受影响）
+    # 1m 开盘 vs EMA30：拦住则不武装/不确认（已在反弹窗内的不受影响）
     if ema25_filter_blocks(params, snap):
         if state.armed_bar_ts == snap.bar_open_ts:
             clear_arm(state)

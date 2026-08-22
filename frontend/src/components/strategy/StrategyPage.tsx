@@ -166,7 +166,7 @@ export default function StrategyPage() {
               <div>交易对: <span className="text-gray-200">{s.symbol || '选币池自动'}</span></div>
               <div>K线周期: <span className="text-gray-200">{s.timeframe}</span></div>
               {s.signal_source === 'wick_spike' ? (
-                <div>接针: <span className="text-gray-200">量×{s.wick_volume_mult ?? 6} ATR×{s.wick_spike_atr_mult ?? 4} 涨跌≥{s.wick_min_move_pct ?? 3}% 回撤≤{s.wick_max_retrace_pct ?? 50}% 等量{s.wick_arm_wait_sec ?? 0}s/免撤{s.wick_arm_retrace_grace_sec ?? 5}s{(s.wick_amp_vol_relax_enabled ?? true) ? ` 放宽≥${s.wick_vol_relax_progress_start ?? 1}→${s.wick_vol_relax_progress_full ?? 1.5}@${s.wick_vol_relax_mult ?? 5}×` : ''}{(s.wick_rebound_enabled ?? true) ? ' 反弹开' : ''}{(s.wick_ema25_filter_enabled ?? true) ? ' EMA25滤' : ''}</span></div>
+                <div>接针: <span className="text-gray-200">量×{s.wick_volume_mult ?? 6} ATR×{s.wick_spike_atr_mult ?? 4} 涨跌≥{s.wick_min_move_pct ?? 3}% 回撤≤{s.wick_max_retrace_pct ?? 50}% 等量{s.wick_arm_wait_sec ?? 0}s/免撤{s.wick_arm_retrace_grace_sec ?? 5}s{(s.wick_amp_vol_relax_enabled ?? true) ? ` 放宽≥${s.wick_vol_relax_progress_start ?? 1}→${s.wick_vol_relax_progress_full ?? 1.5}@${s.wick_vol_relax_mult ?? 5}×` : ''}{(s.wick_rebound_enabled ?? true) ? ' 反弹开' : ''}{(s.wick_ema25_filter_enabled ?? true) ? ' EMA30滤' : ''}</span></div>
               ) : null}
               {s.signal_source === 'wavetrend' || s.signal_source === 'trend_wt' || s.signal_source === 'wick_spike' ? (
                 <div>WT参数: <span className="text-gray-200">通道{s.wt_channel_length} 均线{s.wt_average_length}{s.signal_source === 'trend_wt' ? ` · ST ${s.st_timeframe_1 ?? '15m'}+${s.st_timeframe_2 ?? '30m'}` : s.signal_source === 'wick_spike' ? ' · 加仓确认用' : ''}</span></div>

@@ -135,7 +135,7 @@ class StrategyCreate(BaseModel):
     )
     wick_ema25_filter_enabled: bool = Field(
         default=True,
-        description="1m开盘vsEMA25：空开盘<EMA不做空；多开盘>EMA不做多",
+        description="1m开盘vsEMA30：空开盘<EMA不做空；多开盘>EMA不做多",
     )
     wick_rebound_trigger_pct: float = Field(
         default=20.0, ge=0, le=100, description="反弹占针深%触发市价"
