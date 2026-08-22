@@ -886,10 +886,10 @@ def _near_miss_reason_zh(r: NearMissRow) -> str:
     if r.ema25_block is True:
         d = (r.direction or "").lower()
         if d == "short":
-            return "EMA30过滤：1m开盘低于EMA30，偏弱不做空"
+            return "EMA25过滤：1m开盘低于EMA25，偏弱不做空"
         if d == "long":
-            return "EMA30过滤：1m开盘高于EMA30，偏强不做多"
-        return "EMA30过滤：开盘相对EMA30不符方向"
+            return "EMA25过滤：1m开盘高于EMA25，偏强不做多"
+        return "EMA25过滤：开盘相对EMA25不符方向"
     if r.pierce and r.vol_x < r.need_x:
         return (
             f"已刺破但量能不足：vol×={r.vol_x:.2f} < need×={r.need_x:g}"

@@ -64,7 +64,7 @@ class Strategy(Base):
     wick_rebound_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="1"
     )
-    # 1m 开盘 vs EMA30：空开盘<EMA不做空；多开盘>EMA不做多
+    # 1m 开盘 vs EMA25：空开盘<EMA不做空；多开盘>EMA不做多
     wick_ema25_filter_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="1"
     )

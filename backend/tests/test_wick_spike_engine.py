@@ -805,7 +805,7 @@ def _snap_ema(*, open_, ema25, **kwargs) -> WickBarSnapshot:
 
 
 def test_ema25_filter_blocks_short_below_ema():
-    """做空：开盘 < EMA30 → 即使刺破+量够也不开。"""
+    """做空：开盘 < EMA25 → 即使刺破+量够也不开。"""
     from app.services.wick_spike_engine import ema25_filter_blocks
 
     state = WickSymbolState()

@@ -523,14 +523,14 @@ export default function StrategyForm({
             </div>
             <div>
               <label className={`${labelClass} flex items-center gap-2`}>
-                <span>1m 开盘 vs EMA30 过滤</span>
+                <span>1m 开盘 vs EMA25 过滤</span>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input type="checkbox" {...register('wick_ema25_filter_enabled')} className="sr-only peer" />
                   <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
                 </label>
               </label>
               <span className="text-xs text-gray-600">
-                默认开。做空：1m 开盘价低于 EMA30 不做空；做多：1m 开盘价高于 EMA30 不做多。用已收盘 K 内存计算，不影响下单速度。
+                默认开。做空：1m 开盘价低于 EMA25 不做空；做多：1m 开盘价高于 EMA25 不做多。用已收盘 K 内存计算，不影响下单速度。
               </span>
             </div>
             <div className="grid grid-cols-3 gap-3">
