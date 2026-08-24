@@ -156,9 +156,11 @@ async def get_equity_series(
 
     points_out: list[EquityPointOut] = []
     balances_for_dd: list[float] = []
+    # 收益率/盈亏按「所选窗口起点」计算（选7日=近7天收益，选30日=近30天收益）
+    window_base = float(adjusted[0][2]) if adjusted else 0.0
     for t, tot, adj in adjusted:
-        pnl = adj - baseline
-        ret = (pnl / baseline * 100.0) if baseline > 1e-12 else 0.0
+        pnl = adj - window_base
+        ret = (pnl / window_base * 100.0) if window_base > 1e-12 else 0.0
         points_out.append(
             EquityPointOut(
                 t_unix=_bj_naive_to_unix(t),
@@ -173,8 +175,8 @@ async def get_equity_series(
     if adjusted:
         cur_bal = float(adjusted[-1][1])
         cur_adj = float(adjusted[-1][2])
-        pnl = cur_adj - baseline
-        ret_pct = round((pnl / baseline * 100.0) if baseline > 1e-12 else 0.0, 2)
+        pnl = cur_adj - window_base
+        ret_pct = round((pnl / window_base * 100.0) if window_base > 1e-12 else 0.0, 2)
     else:
         # 重置后尚无快照：视为从基准起算，盈亏/回报归零（勿用 0−baseline 显示 -100%）
         cur_bal = round(baseline, 2) if baseline_row else 0.0
