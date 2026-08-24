@@ -189,6 +189,39 @@ def test_window_deposit_withdraw():
     assert wdr == 30.0
 
 
+def test_normalize_tiny_baseline_no_cashflow_still_heals():
+    """baseline 被错误写成 $2.67，首条快照 $240，但 set_at 前无划转 → 必须用首条快照修复。"""
+    t_set = datetime(2026, 8, 1, 10, 0, 0)
+    cfs: list = []
+    healed, did = normalize_baseline_to_gross(
+        2.67, set_at=t_set, cashflows=cfs, first_snap_total=240.26
+    )
+    assert did is True
+    assert abs(healed - 240.26) < 1e-6
+
+
+def test_normalize_tiny_baseline_with_small_cashflow_heals():
+    """baseline 异常小 + 很小的划转 → 也应该修复。"""
+    t_set = datetime(2026, 8, 1, 10, 0, 0)
+    cfs = [(datetime(2026, 8, 1, 9, 30, 0), 0.50)]
+    healed, did = normalize_baseline_to_gross(
+        2.67, set_at=t_set, cashflows=cfs, first_snap_total=240.26
+    )
+    assert did is True
+    assert abs(healed - 240.26) < 1e-6
+
+
+def test_normalize_legitimate_small_baseline_not_overridden():
+    """真实小账户 baseline=$3 首条快照=$3 不应被修复。"""
+    t_set = datetime(2026, 8, 1, 10, 0, 0)
+    cfs: list = []
+    healed, did = normalize_baseline_to_gross(
+        3.0, set_at=t_set, cashflows=cfs, first_snap_total=3.0
+    )
+    assert did is False
+    assert abs(healed - 3.0) < 1e-6
+
+
 def test_cashflow_external_id_prefers_tran_id():
     assert cashflow_external_id({"tranId": 99, "time": 1, "income": "1", "incomeType": "TRANSFER"}) == "tran:99"
     fb = cashflow_external_id(

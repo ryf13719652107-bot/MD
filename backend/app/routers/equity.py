@@ -114,7 +114,21 @@ async def get_equity_series(
     adjusted = build_adjusted_points(snaps_raw, cf_for_adj)
 
     if baseline_row:
-        first_tot = float(snaps_raw[0][1]) if snaps_raw else None
+        # 用「账户历史首条快照」作为修复参照（= baseline 建立时刻的毛余额），
+        # 避免用窗口内首条快照在长期盈利/充值后误判 baseline 异常、低估收益。
+        first_snap = (
+            await db.execute(
+                select(AccountBalanceSnapshot)
+                .where(AccountBalanceSnapshot.account_id == account_id)
+                .order_by(AccountBalanceSnapshot.snapshot_at.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        first_tot = (
+            float(first_snap.total_usdt)
+            if first_snap is not None
+            else (float(snaps_raw[0][1]) if snaps_raw else None)
+        )
         baseline, healed = normalize_baseline_to_gross(
             float(baseline_row.baseline_total_usdt),
             set_at=baseline_row.set_at,

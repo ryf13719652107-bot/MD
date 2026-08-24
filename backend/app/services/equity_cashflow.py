@@ -308,6 +308,12 @@ def normalize_baseline_to_gross(
     if set_at is None:
         return stored, False
     cf_before = cum_net_external((t, a) for t, a in cashflows if t <= set_at)
+    # 基准异常小（如历史BUG写成了扣充提后的小数）：用首条快照修复
+    # 当 cf_before 很小时无法走「加回划转」逻辑，需直接与首条快照对比
+    if first_snap_total is not None:
+        snap = float(first_snap_total)
+        if snap > 0 and stored < snap * 0.5:
+            return snap, True
     if abs(cf_before) < 1.0:
         return stored, False
     ref = float(first_snap_total) if first_snap_total is not None else stored + cf_before
