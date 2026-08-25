@@ -84,6 +84,14 @@ class Strategy(Base):
     wick_martingale_mode: Mapped[str] = mapped_column(
         String(32), default="price_and_wt", server_default="price_and_wt"
     )
+    # 成交量确认模式：original=瞬时量全程；instant_early=前段瞬时+后段真实；real_only=纯真实累计量
+    wick_volume_mode: Mapped[str] = mapped_column(
+        String(32), default="original", server_default="original"
+    )
+    # instant_early 模式：本根进度超过该比例(0~1)后切换为真实累计量
+    wick_instant_active_until_pct: Mapped[float] = mapped_column(
+        Float, default=0.5, server_default="0.5"
+    )
 
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     # 开仓后 window_sec 内达到 take_profit_pct → 激活毫秒级追踪；超时则回退限价止盈

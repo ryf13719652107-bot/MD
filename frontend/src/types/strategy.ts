@@ -46,6 +46,10 @@ export interface Strategy {
   wick_rebound_wait_sec: number;
   /** 接针加仓：默认 price_and_wt；price_drop=仅涨跌幅 */
   wick_martingale_mode: 'price_drop' | 'price_and_wt';
+  /** 成交量确认模式：original=瞬时量全程；instant_early=前段瞬时+后段真实；real_only=纯真实 */
+  wick_volume_mode: 'original' | 'instant_early' | 'real_only';
+  /** instant_early 模式下瞬时量生效的本根进度上限(0~1) */
+  wick_instant_active_until_pct: number;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */
@@ -142,6 +146,10 @@ export interface StrategyFormData {
   wick_rebound_wait_sec: number;
   /** 接针加仓：默认 price_and_wt；price_drop=仅涨跌幅 */
   wick_martingale_mode: 'price_drop' | 'price_and_wt';
+  /** 成交量确认模式：original=瞬时量全程；instant_early=前段瞬时+后段真实；real_only=纯真实 */
+  wick_volume_mode: 'original' | 'instant_early' | 'real_only';
+  /** instant_early 模式下瞬时量生效的本根进度上限(0~1) */
+  wick_instant_active_until_pct: number;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */

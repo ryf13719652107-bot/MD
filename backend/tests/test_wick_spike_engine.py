@@ -224,6 +224,80 @@ def test_enrich_ignores_stale_trade_bar():
     assert enriched.kline_high == 100.5
 
 
+def test_enrich_instant_vol_original_mode_always_uses_instant():
+    snap = _snap(vol_now=10.0, vol_sma=10.0)
+    enriched = enrich_snap_with_trades(
+        snap,
+        trade_instant_vol=80.0,
+        volume_mode="original",
+        bar_progress=0.8,
+        instant_active_until_pct=0.5,
+    )
+    assert enriched.vol_now == 80.0
+
+
+def test_enrich_instant_vol_instant_early_before_threshold():
+    snap = _snap(vol_now=10.0, vol_sma=10.0)
+    enriched = enrich_snap_with_trades(
+        snap,
+        trade_instant_vol=80.0,
+        volume_mode="instant_early",
+        bar_progress=0.2,
+        instant_active_until_pct=0.5,
+    )
+    assert enriched.vol_now == 80.0
+
+
+def test_enrich_instant_vol_instant_early_after_threshold():
+    snap = _snap(vol_now=10.0, vol_sma=10.0)
+    enriched = enrich_snap_with_trades(
+        snap,
+        trade_instant_vol=80.0,
+        volume_mode="instant_early",
+        bar_progress=0.8,
+        instant_active_until_pct=0.5,
+    )
+    assert enriched.vol_now == 10.0  # 后段不纳入瞬时量
+
+
+def test_enrich_instant_vol_instant_early_no_progress_ignores_instant():
+    snap = _snap(vol_now=10.0, vol_sma=10.0)
+    enriched = enrich_snap_with_trades(
+        snap,
+        trade_instant_vol=80.0,
+        volume_mode="instant_early",
+        bar_progress=None,
+        instant_active_until_pct=0.5,
+    )
+    assert enriched.vol_now == 10.0
+
+
+def test_enrich_instant_vol_real_only_ignores_instant():
+    snap = _snap(vol_now=10.0, vol_sma=10.0)
+    enriched = enrich_snap_with_trades(
+        snap,
+        trade_instant_vol=80.0,
+        volume_mode="real_only",
+        bar_progress=0.2,
+        instant_active_until_pct=0.5,
+    )
+    assert enriched.vol_now == 10.0
+
+
+def test_enrich_instant_early_after_threshold_still_uses_real_trade_vol():
+    snap = _snap(vol_now=10.0, vol_sma=10.0)
+    enriched = enrich_snap_with_trades(
+        snap,
+        trade_vol=50.0,
+        trade_instant_vol=80.0,
+        volume_mode="instant_early",
+        bar_progress=0.8,
+        instant_active_until_pct=0.5,
+        trade_bar_open_ts=snap.bar_open_ts,
+    )
+    assert enriched.vol_now == 50.0  # 真实累计量仍纳入，瞬时量不纳入
+
+
 def test_min_move_pct_blocks_shallow_atr_pierce():
     """ATR 已刺破但相对开盘涨幅不足最小门槛 → 不开仓。"""
     state = WickSymbolState()

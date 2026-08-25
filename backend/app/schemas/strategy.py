@@ -153,6 +153,16 @@ class StrategyCreate(BaseModel):
         default="price_and_wt",
         description="接针加仓：price_drop=仅涨跌幅；price_and_wt=涨跌幅+WT确认（默认）",
     )
+    wick_volume_mode: Literal["original", "instant_early", "real_only"] = Field(
+        default="original",
+        description="成交量确认模式：original=瞬时量全程；instant_early=前段瞬时+后段真实；real_only=纯真实累计量",
+    )
+    wick_instant_active_until_pct: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="instant_early模式下瞬时量生效的本根进度上限(0~1)",
+    )
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     trailing_tp_enabled: bool = Field(
         default=False,
@@ -242,6 +252,8 @@ class StrategyUpdate(BaseModel):
     wick_rebound_wait_sec: Optional[float] = Field(default=None, ge=0, le=60)
     wick_ema25_filter_enabled: Optional[bool] = None
     wick_martingale_mode: Optional[Literal["price_drop", "price_and_wt"]] = None
+    wick_volume_mode: Optional[Literal["original", "instant_early", "real_only"]] = None
+    wick_instant_active_until_pct: Optional[float] = Field(default=None, ge=0, le=1)
     trailing_tp_enabled: Optional[bool] = None
     trailing_tp_window_sec: Optional[float] = Field(default=None, gt=0, le=3600)
     trailing_tp_drawdown_base_pct: Optional[float] = Field(default=None, ge=0, le=100)
@@ -339,6 +351,8 @@ class StrategyResponse(BaseModel):
     wick_rebound_wait_sec: float = 0.0
     wick_ema25_filter_enabled: bool = True
     wick_martingale_mode: str = "price_and_wt"
+    wick_volume_mode: str = "original"
+    wick_instant_active_until_pct: float = 0.5
     trailing_tp_enabled: bool = False
     trailing_tp_window_sec: float = 300.0
     trailing_tp_drawdown_base_pct: float = 30.0

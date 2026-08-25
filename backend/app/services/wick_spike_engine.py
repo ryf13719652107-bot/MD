@@ -87,6 +87,10 @@ class WickSpikeParams:
     # 1m 开盘 vs EMA25 过滤；产品层默认开，此处默认关（单测不受趋势滤）
     ema25_filter_enabled: bool = False
     ema25_period: int = 25
+    # 成交量确认模式：original=瞬时量全程；instant_early=前段瞬时+后段真实；real_only=纯真实累计量
+    volume_mode: str = "original"
+    # instant_early 模式：本根进度超过该比例(0~1)后切换为真实累计量
+    instant_active_until_pct: float = 0.5
 
 
 @dataclass
@@ -622,6 +626,27 @@ def effective_volume_mult(params: WickSpikeParams, progress: float) -> float:
     return params.volume_mult + t * (floor - params.volume_mult)
 
 
+def _should_use_instant_vol(
+    volume_mode: str, bar_progress: float | None, instant_active_until_pct: float
+) -> bool:
+    """是否用瞬时外推量（最近 N 秒×12）参与 vol_now 补强。
+
+    original：全程纳入（旧行为）。
+    instant_early：仅本根进度 < instant_active_until_pct 时纳入，中后期用真实累计量。
+    real_only：不纳入（纯真实累计量）。
+    """
+    mode = (volume_mode or "original").lower()
+    if mode == "real_only":
+        return False
+    if mode == "instant_early":
+        if bar_progress is None:
+            return False
+        pct = float(instant_active_until_pct or 0.0)
+        return bar_progress < pct
+    # original（默认）或未知值：保持旧行为，全程纳入
+    return True
+
+
 def enrich_snap_with_trades(
     snap: WickBarSnapshot,
     *,
@@ -630,16 +655,21 @@ def enrich_snap_with_trades(
     trade_low: float = 0.0,
     trade_bar_open_ts: int | None = None,
     trade_instant_vol: float = 0.0,
+    volume_mode: str = "original",
+    bar_progress: float | None = None,
+    instant_active_until_pct: float = 0.5,
 ) -> WickBarSnapshot:
     """用成交流累计的量/高低补强 K 线快照（解决 K 线 WS 量能滞后）。
 
     trade_bar_open_ts 若与 snap.bar_open_ts 不一致（换根后尚未有新成交），
     忽略本根累计量/高低，避免上一根巨量/极值污染新根。
-    trade_instant_vol（最近 N 秒折算到分钟的瞬时量）不受 bar 对齐约束：
-    它反映"此刻"的放量程度，跨根也有效，专治开盘前几秒累计量滞后。
+    trade_instant_vol（最近 N 秒折算到分钟的瞬时量）是否纳入由 volume_mode 决定；
+    它反映"此刻"的放量程度，专治开盘前几秒累计量滞后，但脉冲集中时会高估整分钟量。
     """
-    # 瞬时折算量总是纳入（跨根有效）
-    vol = max(float(snap.vol_now or 0), float(trade_instant_vol or 0))
+    # 瞬时折算量：按 volume_mode 决定是否纳入
+    vol = float(snap.vol_now or 0)
+    if _should_use_instant_vol(volume_mode, bar_progress, instant_active_until_pct):
+        vol = max(vol, float(trade_instant_vol or 0))
     hi = float(snap.kline_high or 0)
     lo = float(snap.kline_low or 0)
     # bar 对齐时才纳入本根累计量/高低

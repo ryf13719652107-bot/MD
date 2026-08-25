@@ -175,6 +175,13 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             if getattr(strategy, "wick_ema25_filter_enabled", None) is None
             else bool(strategy.wick_ema25_filter_enabled)
         ),
+        # 成交量确认模式：original/instant_early/real_only
+        volume_mode=str(getattr(strategy, "wick_volume_mode", "original") or "original"),
+        instant_active_until_pct=float(
+            getattr(strategy, "wick_instant_active_until_pct", 0.5)
+            if getattr(strategy, "wick_instant_active_until_pct", None) is not None
+            else 0.5
+        ),
     )
     atr_period = int(getattr(strategy, "wick_atr_period", 14) or 14)
     vol_period = int(getattr(strategy, "wick_volume_sma_period", 20) or 20)
@@ -709,6 +716,12 @@ class WickSpikeRunner:
                         )
                     kline_vol_raw = float(snap.vol_now or 0)
                     trade_vol_raw = price_stream_manager.bar_volume(sym_key)
+                    # 本根进度(0~1)：instant_early 模式用于切换瞬时量/真实量
+                    bar_progress = None
+                    if tf_ms > 0:
+                        bar_progress = max(
+                            0.0, min(1.0, (now_ms - snap.bar_open_ts) / tf_ms)
+                        )
                     # 成交流量/高低补强；bar 未对齐则忽略（防换根串量）
                     snap = enrich_snap_with_trades(
                         snap,
@@ -717,6 +730,9 @@ class WickSpikeRunner:
                         trade_low=price_stream_manager.bar_low(sym_key),
                         trade_bar_open_ts=price_stream_manager.bar_open_ms(sym_key),
                         trade_instant_vol=price_stream_manager.instant_vol_annualized(sym_key),
+                        volume_mode=params.volume_mode,
+                        bar_progress=bar_progress,
+                        instant_active_until_pct=params.instant_active_until_pct,
                     )
 
                     prev_armed_at = st.armed_at_ms

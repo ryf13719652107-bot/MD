@@ -49,6 +49,8 @@ const schema = z.object({
   wick_rebound_abort_pct: z.number().min(0).max(100),
   wick_rebound_wait_sec: z.number().min(0).max(60),
   wick_martingale_mode: z.enum(['price_drop', 'price_and_wt']),
+  wick_volume_mode: z.enum(['original', 'instant_early', 'real_only']),
+  wick_instant_active_until_pct: z.number().min(0).max(1),
   trailing_tp_enabled: z.boolean(),
   trailing_tp_window_sec: z.number().min(1).max(3600),
   trailing_tp_drawdown_base_pct: z.number().min(0).max(100),
@@ -163,6 +165,12 @@ function toFormDefaults(
       wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 0,
       wick_martingale_mode:
         initialData.wick_martingale_mode === 'price_drop' ? 'price_drop' : 'price_and_wt',
+      wick_volume_mode:
+        initialData.wick_volume_mode === 'instant_early' ||
+        initialData.wick_volume_mode === 'real_only'
+          ? initialData.wick_volume_mode
+          : 'original',
+      wick_instant_active_until_pct: initialData.wick_instant_active_until_pct ?? 0.5,
       trailing_tp_enabled: initialData.trailing_tp_enabled ?? false,
       trailing_tp_window_sec: initialData.trailing_tp_window_sec ?? 300,
       trailing_tp_drawdown_base_pct: initialData.trailing_tp_drawdown_base_pct ?? 30,
@@ -249,6 +257,8 @@ function toFormDefaults(
     wick_rebound_abort_pct: 35,
     wick_rebound_wait_sec: 0,
     wick_martingale_mode: 'price_and_wt',
+    wick_volume_mode: 'original',
+    wick_instant_active_until_pct: 0.5,
     trailing_tp_enabled: false,
     trailing_tp_window_sec: 300,
     trailing_tp_drawdown_base_pct: 30,
@@ -332,6 +342,7 @@ export default function StrategyForm({
   const excludeFunding = watch('exclude_funding', false);
   const martingaleRsiEnabled = watch('martingale_rsi_enabled', true);
   const wickMartingaleMode = watch('wick_martingale_mode', 'price_and_wt');
+  const wickVolumeMode = watch('wick_volume_mode', 'original');
   const trailingTpEnabled = watch('trailing_tp_enabled', false);
 
   // Auto-adjust RSI threshold on mount and when direction changes
@@ -453,6 +464,22 @@ export default function StrategyForm({
                 <input type="number" {...register('wick_volume_sma_period', { valueAsNumber: true })} className={inputClass} />
                 <span className="text-xs text-gray-600">默认 20</span>
               </div>
+              <div>
+                <label className={labelClass}>成交量确认模式</label>
+                <select {...register('wick_volume_mode')} className={inputClass}>
+                  <option value="original">原方案（瞬时量全程）</option>
+                  <option value="instant_early">方案1（前段瞬时+后段真实）</option>
+                  <option value="real_only">方案3（纯真实累计量）</option>
+                </select>
+                <span className="text-xs text-gray-600">原方案=瞬时量全程；方案1=本根前段用瞬时量、后段用真实量；方案3=仅真实累计量</span>
+              </div>
+              {wickVolumeMode === 'instant_early' && (
+                <div>
+                  <label className={labelClass}>瞬时量生效进度上限（0~1）</label>
+                  <input type="number" step="0.05" {...register('wick_instant_active_until_pct', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">本根进度超过该值后切换真实量；默认 0.5（1m 即前 30 秒）</span>
+                </div>
+              )}
               <div>
                 <label className={labelClass}>ATR 周期</label>
                 <input type="number" {...register('wick_atr_period', { valueAsNumber: true })} className={inputClass} />
