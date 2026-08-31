@@ -1,180 +1,21 @@
 import type { StrategyFormData } from './strategy';
 
-/** 一键套用参数；不改名称 / 账户 / 方向 */
+/** 用户自建参数模板；套用时不改名称 / 账户 */
 export interface StrategyParamTemplate {
-  id: string;
-  label: string;
-  hint: string;
+  id: number;
+  name: string;
   patch: Partial<StrategyFormData>;
+  created_at: string;
+  updated_at: string;
 }
 
-const WICK_SHARED: Partial<StrategyFormData> = {
-  signal_source: 'wick_spike',
-  timeframe: '1m',
-  use_coin_pool: true,
-  coin_pool_source: 'both',
-  coin_pool_refresh_seconds: 3600,
-  coin_pool_fetch_mode: 'interval',
-  coin_pool_top_n: 20,
-  coin_pool_min_volume_24h: 0,
-  exclude_tradefi: true,
-  exclude_delisting: true,
-  exclude_mainstream: true,
-  exclude_funding: false,
-  skip_min_qty_exceeds: true,
-  take_profit_limit_order: true,
-  stop_loss_enabled: false,
-  stop_loss_pct: 5,
-  single_symbol_stop_loss_enabled: false,
-  single_symbol_stop_loss_pct: 10,
-  wick_volume_sma_period: 20,
-  wick_atr_period: 14,
-  wick_cooldown_sec: 0,
-  wick_amp_vol_relax_enabled: true,
-  wick_vol_relax_progress_start: 1,
-  wick_vol_relax_progress_full: 1.5,
-  wick_arm_wait_sec: 0,
-  wick_arm_retrace_grace_sec: 5,
-  wick_arm_grace_max_tip_gap_pct: 2,
-  wick_rebound_enabled: true,
-  wick_ema25_filter_enabled: true,
-  wick_rebound_wait_sec: 0,
-  wick_martingale_mode: 'price_and_wt',
-  wick_volume_mode: 'original',
-  wick_instant_active_until_pct: 0.5,
-  martingale_rsi_enabled: true,
-  martingale_st_filter_enabled: false,
-  price_drop_multiplier: 1,
-};
+const IDENTITY_KEYS = new Set(['account_id', 'name']);
 
-export const STRATEGY_PARAM_TEMPLATES: StrategyParamTemplate[] = [
-  {
-    id: 'wick_standard',
-    label: '接针标准',
-    hint: '量能 6× / ATR 4× / 反弹追踪 / 武装窗换根超时。适合日常接针。',
-    patch: {
-      ...WICK_SHARED,
-      wick_volume_mult: 6,
-      wick_spike_atr_mult: 4,
-      wick_min_move_pct: 3,
-      wick_max_retrace_pct: 50,
-      wick_vol_relax_mult: 5,
-      wick_rebound_trigger_pct: 20,
-      wick_rebound_abort_pct: 35,
-      take_profit_pct: 2,
-      price_drop_pct: 30,
-      martingale_mult: 1.5,
-      max_layers: 8,
-      leverage: 10,
-      base_qty_type: 'margin_pct',
-      base_qty_value: 6,
-      trailing_tp_enabled: false,
-    },
-  },
-  {
-    id: 'wick_conservative',
-    label: '接针保守',
-    hint: '更深针、更放量才开；层数少、止盈略高，减少浅针误开。',
-    patch: {
-      ...WICK_SHARED,
-      wick_volume_mult: 8,
-      wick_spike_atr_mult: 5,
-      wick_min_move_pct: 4,
-      wick_max_retrace_pct: 40,
-      wick_vol_relax_mult: 6,
-      wick_rebound_trigger_pct: 25,
-      wick_rebound_abort_pct: 40,
-      take_profit_pct: 2.5,
-      price_drop_pct: 35,
-      martingale_mult: 1.4,
-      max_layers: 6,
-      leverage: 8,
-      base_qty_type: 'margin_pct',
-      base_qty_value: 5,
-      trailing_tp_enabled: false,
-    },
-  },
-  {
-    id: 'wick_sensitive',
-    label: '接针灵敏',
-    hint: '更浅刺破即可武装，配时间移动止盈锁利。假针会更多。',
-    patch: {
-      ...WICK_SHARED,
-      wick_volume_mult: 5,
-      wick_spike_atr_mult: 3,
-      wick_min_move_pct: 2,
-      wick_max_retrace_pct: 60,
-      wick_vol_relax_mult: 4,
-      wick_rebound_trigger_pct: 15,
-      wick_rebound_abort_pct: 30,
-      take_profit_pct: 1.5,
-      price_drop_pct: 25,
-      martingale_mult: 1.5,
-      max_layers: 10,
-      leverage: 10,
-      base_qty_type: 'margin_pct',
-      base_qty_value: 6,
-      trailing_tp_enabled: true,
-      trailing_tp_window_sec: 300,
-      trailing_tp_drawdown_base_pct: 30,
-      trailing_tp_drawdown_tier1_pct: 20,
-      trailing_tp_drawdown_tier2_pct: 15,
-      trailing_tp_tier1_threshold: 2.5,
-      trailing_tp_tier2_threshold: 5,
-    },
-  },
-  {
-    id: 'wavetrend',
-    label: 'WaveTrend 马丁',
-    hint: '1m WT 收盘信号 + 马丁加仓，选币池涨跌榜。',
-    patch: {
-      signal_source: 'wavetrend',
-      timeframe: '1m',
-      wt_channel_length: 10,
-      wt_average_length: 21,
-      wt_ob_level: 60,
-      wt_os_level: -60,
-      use_coin_pool: true,
-      coin_pool_source: 'gainers',
-      coin_pool_refresh_seconds: 3600,
-      coin_pool_fetch_mode: 'interval',
-      coin_pool_top_n: 20,
-      take_profit_pct: 2,
-      take_profit_limit_order: true,
-      price_drop_pct: 30,
-      martingale_mult: 1.5,
-      max_layers: 8,
-      martingale_rsi_enabled: true,
-      leverage: 10,
-      base_qty_type: 'margin_pct',
-      base_qty_value: 6,
-      trailing_tp_enabled: false,
-      stop_loss_enabled: false,
-    },
-  },
-  {
-    id: 'martingale_base',
-    label: '基础马丁',
-    hint: '每根 K 开盘开首单，不做信号过滤，只靠马丁和止盈。',
-    patch: {
-      signal_source: 'martingale_base',
-      timeframe: '1m',
-      use_coin_pool: true,
-      coin_pool_source: 'gainers',
-      coin_pool_refresh_seconds: 3600,
-      coin_pool_fetch_mode: 'interval',
-      coin_pool_top_n: 20,
-      take_profit_pct: 2,
-      take_profit_limit_order: true,
-      price_drop_pct: 30,
-      martingale_mult: 1.5,
-      max_layers: 8,
-      martingale_rsi_enabled: false,
-      leverage: 10,
-      base_qty_type: 'margin_pct',
-      base_qty_value: 6,
-      trailing_tp_enabled: false,
-      stop_loss_enabled: false,
-    },
-  },
-];
+export function snapshotTemplatePatch(data: StrategyFormData): Partial<StrategyFormData> {
+  const out: Partial<StrategyFormData> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (IDENTITY_KEYS.has(key)) continue;
+    (out as Record<string, unknown>)[key] = value;
+  }
+  return out;
+}

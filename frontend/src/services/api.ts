@@ -1,5 +1,6 @@
 import type { Account, Position, Trade, DashboardData, CoinPoolEntry, KlineData, EquitySeriesData } from '../types';
 import type { Strategy, StrategyFormData } from '../types/strategy';
+import type { StrategyParamTemplate } from '../types/strategyTemplates';
 
 // Same-origin `/api`: Vite dev server proxies to backend; production is served by FastAPI with API on the same host (also works behind reverse proxy on 80/443).
 const BASE = '/api';
@@ -103,6 +104,18 @@ export const api = {
     request<Strategy>(`/strategies/${id}/blacklist/${encodeURIComponent(symbol)}`, {
       method: 'DELETE',
     }),
+  listStrategyTemplates: (): Promise<StrategyParamTemplate[]> =>
+    request('/strategy-templates'),
+  saveStrategyTemplate: (
+    name: string,
+    patch: Partial<StrategyFormData>,
+  ): Promise<StrategyParamTemplate> =>
+    request('/strategy-templates', {
+      method: 'POST',
+      body: JSON.stringify({ name, patch }),
+    }),
+  deleteStrategyTemplate: (id: number): Promise<void> =>
+    request(`/strategy-templates/${id}`, { method: 'DELETE' }),
 
   // Positions
   listPositions: (params?: { strategy_id?: number; symbol?: string; account_id?: number }): Promise<Position[]> => {

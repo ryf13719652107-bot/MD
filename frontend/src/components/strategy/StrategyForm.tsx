@@ -11,7 +11,8 @@ import {
   type StrategyApiPayload,
   type StrategyFormData,
 } from '../../types/strategy';
-import { STRATEGY_PARAM_TEMPLATES } from '../../types/strategyTemplates';
+import { snapshotTemplatePatch, type StrategyParamTemplate } from '../../types/strategyTemplates';
+import { api } from '../../services/api';
 import type { Account } from '../../types';
 
 const schema = z.object({
@@ -342,16 +343,66 @@ export default function StrategyForm({
     defaultValues: toFormDefaults(initialData, accountOptions, defaultAccountId),
   });
 
-  const [activeTemplateId, setActiveTemplateId] = useState<string | null>(null);
+  const [activeTemplateId, setActiveTemplateId] = useState<number | null>(null);
+  const [templates, setTemplates] = useState<StrategyParamTemplate[]>([]);
+  const [templateName, setTemplateName] = useState('');
+  const [templateBusy, setTemplateBusy] = useState(false);
 
-  const applyTemplate = (id: string) => {
-    const tpl = STRATEGY_PARAM_TEMPLATES.find((t) => t.id === id);
-    if (!tpl) return;
+  const loadTemplates = async () => {
+    try {
+      setTemplates(await api.listStrategyTemplates());
+    } catch {
+      /* 列表失败不挡填表 */
+    }
+  };
+
+  useEffect(() => {
+    loadTemplates();
+  }, []);
+
+  const applyTemplate = (tpl: StrategyParamTemplate) => {
     reset(
       { ...getValues(), ...tpl.patch },
       { keepDefaultValues: true },
     );
-    setActiveTemplateId(id);
+    setActiveTemplateId(tpl.id);
+    setTemplateName(tpl.name);
+  };
+
+  const saveCurrentAsTemplate = async () => {
+    const name = templateName.trim();
+    if (!name) {
+      window.alert('请输入模板名称');
+      return;
+    }
+    const exists = templates.find((t) => t.name === name);
+    if (exists && !window.confirm(`已有模板「${name}」，要用当前参数覆盖吗？`)) {
+      return;
+    }
+    try {
+      setTemplateBusy(true);
+      const saved = await api.saveStrategyTemplate(name, snapshotTemplatePatch(getValues()));
+      await loadTemplates();
+      setActiveTemplateId(saved.id);
+    } catch (e: any) {
+      window.alert(`保存模板失败：${e?.message || e}`);
+    } finally {
+      setTemplateBusy(false);
+    }
+  };
+
+  const deleteTemplate = async (tpl: StrategyParamTemplate) => {
+    if (!window.confirm(`删除模板「${tpl.name}」？`)) return;
+    try {
+      setTemplateBusy(true);
+      await api.deleteStrategyTemplate(tpl.id);
+      if (activeTemplateId === tpl.id) setActiveTemplateId(null);
+      await loadTemplates();
+    } catch (e: any) {
+      window.alert(`删除模板失败：${e?.message || e}`);
+    } finally {
+      setTemplateBusy(false);
+    }
   };
 
   const direction = watch('direction', 'long');
@@ -384,38 +435,77 @@ export default function StrategyForm({
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
       <h3 className="font-semibold mb-3">{initialData ? '编辑策略' : '新建策略'}</h3>
-      <form onSubmit={handleSubmit((data) => onSubmit(toApiPayload(data)))} className="space-y-3">
-        <div className="rounded-lg border border-blue-500/25 bg-blue-950/20 px-3 py-2.5">
-          <div className="flex items-baseline justify-between gap-3 mb-2">
-            <span className="text-xs font-medium text-blue-100">参数模板</span>
-            <span className="text-[11px] text-gray-500">一键套用，不改名称 / 账户 / 方向</span>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {STRATEGY_PARAM_TEMPLATES.map((tpl) => {
+      <div className="rounded-lg border border-blue-500/25 bg-blue-950/20 px-3 py-2.5 mb-3">
+        <div className="flex items-baseline justify-between gap-3 mb-2">
+          <span className="text-xs font-medium text-blue-100">参数模板</span>
+          <span className="text-[11px] text-gray-500">一键套用，不改名称 / 账户</span>
+        </div>
+        {templates.length === 0 ? (
+          <p className="text-[11px] text-gray-500 mb-2">还没有模板。调好下面参数后输入名称保存。</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {templates.map((tpl) => {
               const on = activeTemplateId === tpl.id;
               return (
-                <button
+                <span
                   key={tpl.id}
-                  type="button"
-                  onClick={() => applyTemplate(tpl.id)}
                   className={
                     on
-                      ? 'px-2.5 py-1 rounded-md text-xs font-medium bg-blue-600 text-white'
-                      : 'px-2.5 py-1 rounded-md text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700 hover:border-blue-500 hover:text-white'
+                      ? 'inline-flex items-center gap-1 pl-2.5 pr-1 py-0.5 rounded-md text-xs font-medium bg-blue-600 text-white'
+                      : 'inline-flex items-center gap-1 pl-2.5 pr-1 py-0.5 rounded-md text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700'
                   }
                 >
-                  {tpl.label}
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => applyTemplate(tpl)}
+                    className="hover:underline"
+                    disabled={templateBusy}
+                  >
+                    {tpl.name}
+                  </button>
+                  <button
+                    type="button"
+                    title="删除模板"
+                    disabled={templateBusy}
+                    onClick={() => deleteTemplate(tpl)}
+                    className={
+                      on
+                        ? 'px-1 rounded text-blue-100 hover:text-white hover:bg-blue-700'
+                        : 'px-1 rounded text-gray-500 hover:text-red-300 hover:bg-gray-700'
+                    }
+                  >
+                    ×
+                  </button>
+                </span>
               );
             })}
           </div>
-          {activeTemplateId && (
-            <p className="mt-2 text-[11px] text-gray-400 leading-relaxed">
-              {STRATEGY_PARAM_TEMPLATES.find((t) => t.id === activeTemplateId)?.hint}
-            </p>
-          )}
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            value={templateName}
+            onChange={(e) => setTemplateName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                saveCurrentAsTemplate();
+              }
+            }}
+            maxLength={40}
+            placeholder="模板名称"
+            className="h-8 w-40 px-2 rounded border border-gray-700 bg-gray-800 text-xs text-gray-200"
+          />
+          <button
+            type="button"
+            onClick={saveCurrentAsTemplate}
+            disabled={templateBusy || !templateName.trim()}
+            className="h-8 px-2.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs text-white"
+          >
+            保存当前参数
+          </button>
         </div>
-
+      </div>
+      <form onSubmit={handleSubmit((data) => onSubmit(toApiPayload(data)))} className="space-y-3">
         <div className="grid grid-cols-3 gap-3">
           {!initialData && (
             <div>

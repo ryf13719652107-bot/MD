@@ -49,6 +49,7 @@ async def get_db() -> AsyncSession:
 async def init_db():
     from .models.equity_curve import AccountBalanceSnapshot, AccountEquityBaseline, AccountCashflow  # noqa: F401
     from .models.strategy_blacklist import StrategySymbolBlacklist  # noqa: F401
+    from .models.strategy_template import StrategyParamTemplate  # noqa: F401
 
     # Create tables from current model (no-op if already exist)
     async with engine.begin() as conn:
