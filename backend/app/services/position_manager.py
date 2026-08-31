@@ -279,6 +279,24 @@ async def _resolve_market_close_exit(
     return fb, fill_order
 
 
+def _is_order_missing_error(exc: BaseException) -> bool:
+    """查单失败是否表示订单已不在（可清本地 id 后重挂），而非超时/网络不确定。"""
+    if isinstance(exc, asyncio.TimeoutError):
+        return False
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if "timeout" in name or "timeout" in msg:
+        return False
+    if "notfound" in name or "not found" in msg:
+        return True
+    if "does not exist" in msg or "unknown order" in msg:
+        return True
+    # 币安：-2013 Order does not exist；-2011 Unknown order sent
+    if "-2013" in msg or "-2011" in msg:
+        return True
+    return False
+
+
 def _tp_limit_reduce_only(client) -> bool:
     """止盈限价是否带 reduceOnly。
 
@@ -559,6 +577,19 @@ class PositionManager:
         rel = abs(amt - contracts) / max(contracts, 1e-12)
         return rel <= 0.02 or abs(amt - contracts) <= 1e-5
 
+    @staticmethod
+    def _tp_price_ok(order: dict, expected: float, rel: float = 0.005) -> bool:
+        """挂单价是否接近策略止盈价（0.5% 或极小绝对值，覆盖 tick 舍入）。"""
+        if expected <= 0:
+            return False
+        try:
+            px = float(order.get("price", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        if px <= 0:
+            return False
+        return abs(px - expected) / expected <= rel or abs(px - expected) <= 1e-8
+
     async def _cancel_tp_order_confirmed(
         self, auth_binance: BinanceService, order_id: str, symbol: str
     ) -> bool:
@@ -659,17 +690,63 @@ class PositionManager:
         auth_binance: BinanceService,
         symbol: str,
         position_side: str,
-        pos: Position,
+        positions: list,
         contracts: float,
         *,
         strategy_id: int | None = None,
-        cancel_duplicates: bool = False,
-    ) -> None:
-        """不再认领交易所上的陌生限价单（避免把手动止盈绑给机器人）。
+        expected_price: float = 0.0,
+        local_id: str = "",
+    ) -> bool:
+        """本地无单号（或查单失败）时，用交易所未完成挂单对账写回。
 
-        机器人止盈只使用本地 tp_limit_order_id 或自行新挂。
+        只绑「平本腿 + 数量接近 + 价格接近策略止盈价」的限价，避免把手动止盈认成机器人单。
+        local_id 若仍出现在未完成列表中，直接保留（不要求再比对价格）。
         """
-        return
+        orders = await self._fetch_open_orders_raw(auth_binance, symbol)
+        if not orders:
+            return False
+        want = str(local_id or "").strip()
+        if want:
+            for o in orders:
+                if not isinstance(o, dict):
+                    continue
+                if str(o.get("id") or "").strip() != want:
+                    continue
+                st = (o.get("status") or "open").lower()
+                if st in ("open", "new", "partially_filled", "partial", ""):
+                    px = float(o.get("price", 0) or 0)
+                    for p in positions:
+                        p.tp_limit_order_id = want
+                        if px > 0:
+                            p.take_profit_price = px
+                    return True
+        matches = self._list_matching_tp_close_limits(
+            orders,
+            position_side=position_side,
+            contracts=contracts,
+            auth_binance=auth_binance,
+            require_qty_match=True,
+        )
+        if expected_price > 0:
+            matches = [o for o in matches if self._tp_price_ok(o, expected_price)]
+        best = self._pick_best_tp_match(matches, contracts)
+        if not best:
+            return False
+        oid = str(best.get("id") or "").strip()
+        if not oid:
+            return False
+        px = float(best.get("price", 0) or 0)
+        for p in positions:
+            p.tp_limit_order_id = oid
+            if px > 0:
+                p.take_profit_price = px
+        if strategy_id:
+            strategy_log_service.info(
+                strategy_id,
+                f"{symbol} 核对交易所已有止盈挂单，已写回本地 id={oid}"
+                + (f" @{px:.6f}" if px > 0 else ""),
+            )
+        return True
 
     async def _ensure_tp_limit_orders(
         self,
@@ -683,9 +760,9 @@ class PositionManager:
         total_qty: float,
         pos_side: str,
     ) -> None:
-        """限价止盈：只管理机器人自己的 tp_limit_order_id，按策略数量挂单。
+        """限价止盈：先对账交易所未完成挂单，再决定保留/写回/新挂。
 
-        不认领/不撤销手动限价；无 exchange_order_id 的仓不挂止盈。
+        不认领价格明显不同的手动限价；无 exchange_order_id 的仓不挂止盈。
         """
         if not getattr(strategy, "take_profit_limit_order", False):
             return
@@ -703,16 +780,36 @@ class PositionManager:
             for p in bot_positions
             if (p.tp_limit_order_id or "").strip()
         }
+        tp_price = eng.get_take_profit_price(avg_entry, pos_side)
+        if tp_price <= 0:
+            return
+
+        async def _try_bind(*, local_id: str = "") -> bool:
+            return await self._bind_tp_limit_from_open_orders(
+                auth_binance,
+                symbol,
+                pos_side,
+                bot_positions,
+                qty,
+                strategy_id=strategy_id,
+                expected_price=tp_price,
+                local_id=local_id,
+            )
 
         if existing_ids:
             keep = sorted(existing_ids)[0]
             keep_order = None
+            fetch_failed = False
             try:
                 keep_order = await asyncio.wait_for(
                     _fetch_order(auth_binance, keep, symbol), timeout=3.0
                 )
-            except (Exception, asyncio.TimeoutError):
+            except asyncio.TimeoutError:
                 keep_order = None
+                fetch_failed = True
+            except Exception as e:
+                keep_order = None
+                fetch_failed = not _is_order_missing_error(e)
             st = ((keep_order or {}).get("status") or "").lower()
             if keep_order and st in ("open", "new", "partially_filled", "partial"):
                 if self._tp_qty_ok(keep_order, qty):
@@ -738,7 +835,16 @@ class PositionManager:
                 # 已成交：交给 TP 成交检测，这里不重挂
                 return
             else:
-                # 查不到/已取消：清本地 id 后重挂
+                # 查单失败/已取消：先对账未完成挂单，避免交易所其实还在却本地当未挂
+                if await _try_bind(local_id=keep):
+                    await session.flush()
+                    return
+                if fetch_failed:
+                    strategy_log_service.warning(
+                        strategy_id,
+                        f"{symbol} 查止盈单超时且未在未完成列表对上 — 暂不重挂以防重复",
+                    )
+                    return
                 await self._cancel_bot_tp_order_ids(
                     auth_binance, symbol, existing_ids, strategy_id, keep_id=""
                 )
@@ -746,11 +852,13 @@ class PositionManager:
                     p.tp_limit_order_id = None
                 await session.flush()
 
-        tp_price = eng.get_take_profit_price(avg_entry, pos_side)
-        if tp_price <= 0:
+        if await _try_bind():
+            await session.flush()
             return
+
         close_side = "sell" if pos_side == "long" else "buy"
         ps = "LONG" if pos_side == "long" else "SHORT"
+        last_err: Exception | None = None
         for attempt in range(2):
             try:
                 tp_order = await auth_binance.create_limit_order(
@@ -777,6 +885,7 @@ class PositionManager:
                     strategy_id, f"{symbol} 补挂止盈单异常 — 返回无id: {tp_order}"
                 )
             except Exception as tp_err:
+                last_err = tp_err
                 logger.error(
                     "Strategy %d: TP re-place failed for %s (attempt %d): %s",
                     strategy_id,
@@ -784,10 +893,14 @@ class PositionManager:
                     attempt + 1,
                     tp_err,
                 )
+                if await _try_bind():
+                    await session.flush()
+                    return
                 if attempt == 0:
                     await asyncio.sleep(0.5)
+        extra = f"：{last_err}" if last_err else ""
         strategy_log_service.warning(
-            strategy_id, f"{symbol} 补挂止盈失败(已重试) — 仍可用市价止盈兜底"
+            strategy_id, f"{symbol} 补挂止盈失败(已重试){extra} — 仍可用市价止盈兜底"
         )
 
     async def _reconcile_orphan_from_exchange(

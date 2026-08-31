@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncio
 import pytest
 
 from app.services.martingale_engine import MartingaleEngine
@@ -246,3 +247,179 @@ async def test_recover_bot_open_after_db_fail_uses_fill_order_id():
     pos = session.add.call_args.args[0]
     assert pos.exchange_order_id == "fill-1"
     assert pos.quantity == pytest.approx(2.0)
+
+
+def _open_tp(oid: str, amount: float, price: float, side: str = "sell", ps: str = "LONG"):
+    return {
+        "id": oid,
+        "side": side,
+        "type": "limit",
+        "amount": amount,
+        "price": price,
+        "positionSide": ps,
+        "status": "open",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ensure_tp_binds_exchange_order_when_local_id_missing():
+    """交易所已有同价同量止盈，本地未记 → 写回 id，不重复挂。"""
+    pm = PositionManager()
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    strategy = SimpleNamespace(take_profit_limit_order=True, id=1)
+    eng = MartingaleEngine(base_quantity=1, take_profit_pct=2)
+    auth = MagicMock()
+    auth.exchange_id = "binance"
+    auth.hedge_mode = True
+    auth.create_limit_order = AsyncMock()
+    pos = SimpleNamespace(
+        tp_limit_order_id=None,
+        take_profit_price=None,
+        layer=0,
+        exchange_order_id="open-1",
+        quantity=10.0,
+    )
+    expected = eng.get_take_profit_price(100.0, "long")
+    pm._fetch_open_orders_raw = AsyncMock(
+        return_value=[_open_tp("ex-tp-1", 10.0, expected)]
+    )
+    await pm._ensure_tp_limit_orders(
+        session, strategy, "1000RATSUSDT", auth, [pos], eng, 100.0, 10.0, "long"
+    )
+    auth.create_limit_order.assert_not_called()
+    assert pos.tp_limit_order_id == "ex-tp-1"
+    assert pos.take_profit_price == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+async def test_ensure_tp_does_not_bind_manual_different_price():
+    """价格差太多的手动限价不认领，仍走新挂。"""
+    pm = PositionManager()
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    strategy = SimpleNamespace(take_profit_limit_order=True, id=1)
+    eng = MartingaleEngine(base_quantity=1, take_profit_pct=2)
+    auth = MagicMock()
+    auth.exchange_id = "binance"
+    auth.hedge_mode = True
+    auth.create_limit_order = AsyncMock(return_value={"id": "new-tp"})
+    pos = SimpleNamespace(
+        tp_limit_order_id=None,
+        take_profit_price=None,
+        layer=0,
+        exchange_order_id="open-1",
+        quantity=10.0,
+    )
+    pm._fetch_open_orders_raw = AsyncMock(
+        return_value=[_open_tp("manual-tp", 10.0, 130.0)]
+    )
+    await pm._ensure_tp_limit_orders(
+        session, strategy, "BTCUSDT", auth, [pos], eng, 100.0, 10.0, "long"
+    )
+    auth.create_limit_order.assert_called_once()
+    assert pos.tp_limit_order_id == "new-tp"
+
+
+@pytest.mark.asyncio
+async def test_ensure_tp_keeps_local_id_on_fetch_timeout_if_still_open():
+    """查单超时但未完成列表里还有该 id → 保留，不重挂。"""
+    pm = PositionManager()
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    strategy = SimpleNamespace(take_profit_limit_order=True, id=1)
+    eng = MartingaleEngine(base_quantity=1, take_profit_pct=2)
+    auth = MagicMock()
+    auth.exchange_id = "binance"
+    auth.hedge_mode = True
+    auth.create_limit_order = AsyncMock()
+    pos = SimpleNamespace(
+        tp_limit_order_id="oid-1",
+        take_profit_price=102.0,
+        layer=0,
+        exchange_order_id="x",
+        quantity=1.5,
+    )
+    expected = eng.get_take_profit_price(100.0, "long")
+    pm._fetch_open_orders_raw = AsyncMock(
+        return_value=[_open_tp("oid-1", 1.5, expected)]
+    )
+    with patch(
+        "app.services.position_manager._fetch_order",
+        new=AsyncMock(side_effect=asyncio.TimeoutError()),
+    ):
+        await pm._ensure_tp_limit_orders(
+            session, strategy, "BTCUSDT", auth, [pos], eng, 100.0, 1.5, "long"
+        )
+    auth.create_limit_order.assert_not_called()
+    assert pos.tp_limit_order_id == "oid-1"
+
+
+@pytest.mark.asyncio
+async def test_ensure_tp_binds_after_place_rejected():
+    """补挂被拒后，再扫到交易所已有同价单则写回，不再报失败。"""
+    pm = PositionManager()
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    strategy = SimpleNamespace(take_profit_limit_order=True, id=1)
+    eng = MartingaleEngine(base_quantity=1, take_profit_pct=2)
+    auth = MagicMock()
+    auth.exchange_id = "binance"
+    auth.hedge_mode = True
+    auth.create_limit_order = AsyncMock(side_effect=RuntimeError("ReduceOnly Order is rejected."))
+    pos = SimpleNamespace(
+        tp_limit_order_id=None,
+        take_profit_price=None,
+        layer=0,
+        exchange_order_id="open-1",
+        quantity=10.0,
+    )
+    expected = eng.get_take_profit_price(100.0, "long")
+    existing = _open_tp("ex-tp-9", 10.0, expected)
+    pm._fetch_open_orders_raw = AsyncMock(side_effect=[[], [existing], [existing]])
+    with patch("app.services.position_manager.asyncio.sleep", new=AsyncMock()):
+        await pm._ensure_tp_limit_orders(
+            session, strategy, "1000RATSUSDT", auth, [pos], eng, 100.0, 10.0, "long"
+        )
+    assert pos.tp_limit_order_id == "ex-tp-9"
+
+
+@pytest.mark.asyncio
+async def test_ensure_tp_replaces_when_exchange_says_order_not_found():
+    """本地有 id 但交易所明确不存在 → 应清掉并重挂，不能当成超时卡住。"""
+    pm = PositionManager()
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    strategy = SimpleNamespace(take_profit_limit_order=True, id=1)
+    eng = MartingaleEngine(base_quantity=1, take_profit_pct=2)
+    auth = MagicMock()
+    auth.exchange_id = "binance"
+    auth.hedge_mode = True
+    auth.create_limit_order = AsyncMock(return_value={"id": "new-tp"})
+    pos = SimpleNamespace(
+        tp_limit_order_id="gone-1",
+        take_profit_price=102.0,
+        layer=0,
+        exchange_order_id="x",
+        quantity=1.5,
+    )
+    pm._fetch_open_orders_raw = AsyncMock(return_value=[])
+    with patch(
+        "app.services.position_manager._fetch_order",
+        new=AsyncMock(side_effect=Exception('binance {"code":-2013,"msg":"Order does not exist."}')),
+    ):
+        await pm._ensure_tp_limit_orders(
+            session, strategy, "BTCUSDT", auth, [pos], eng, 100.0, 1.5, "long"
+        )
+    auth.create_limit_order.assert_called_once()
+    assert pos.tp_limit_order_id == "new-tp"
+
+
+def test_is_order_missing_error_distinguishes_timeout():
+    from app.services.position_manager import _is_order_missing_error
+
+    assert _is_order_missing_error(asyncio.TimeoutError()) is False
+    assert _is_order_missing_error(Exception("binance Order does not exist.")) is True
+    assert _is_order_missing_error(Exception('{"code":-2013}')) is True
+    assert _is_order_missing_error(Exception("network timeout reading")) is False
+
