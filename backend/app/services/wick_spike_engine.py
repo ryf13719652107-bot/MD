@@ -267,6 +267,19 @@ def merge_synthetic_forming_bar(
     return list(closed) + [forming]
 
 
+def last_trade_on_bar(trade_ts_ms: int, bar_open_ts: int, tf_ms: int) -> bool:
+    """成交流时间戳是否落在当前 forming 根；否则 last_price 可能是上一根针尖。
+
+    无成交时间戳时返回 True（视为无法判定跨根，沿用调用方已有价格）。
+    """
+    ts = int(trade_ts_ms or 0)
+    bar = int(bar_open_ts or 0)
+    tf = int(tf_ms or 0)
+    if ts <= 0 or bar <= 0 or tf <= 0:
+        return True
+    return (ts // tf) * tf == bar
+
+
 def apply_1m_ema_filter_fields(
     snap: WickBarSnapshot,
     klines_1m: list | None,

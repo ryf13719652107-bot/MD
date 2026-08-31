@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -11,6 +11,7 @@ import {
   type StrategyApiPayload,
   type StrategyFormData,
 } from '../../types/strategy';
+import { STRATEGY_PARAM_TEMPLATES } from '../../types/strategyTemplates';
 import type { Account } from '../../types';
 
 const schema = z.object({
@@ -79,6 +80,7 @@ const schema = z.object({
   stop_loss_pct: z.number().min(0.1).max(100),
   single_symbol_stop_loss_enabled: z.coerce.boolean(),
   single_symbol_stop_loss_pct: z.number().min(0.1).max(100),
+  slippage_pct: z.number().min(0).max(10),
   leverage: z.number().min(1).max(125),
   use_coin_pool: z.coerce.boolean(),
   coin_pool_source: z.enum(['gainers', 'losers', 'both']),
@@ -303,13 +305,21 @@ function toFormDefaults(
 function toApiPayload(data: StrategyFormData): StrategyApiPayload {
   const { coin_pool_anchor_time, ...rest } = data;
   const { hour, minute } = parseAnchorTime(coin_pool_anchor_time);
-  return {
+  const payload = {
     ...rest,
     coin_pool_refresh_seconds: nearestCoinPoolRefreshSeconds(data.coin_pool_refresh_seconds),
     coin_pool_anchor_hour: hour,
     coin_pool_anchor_minute: minute,
     coin_pool_min_volume_24h: (data.coin_pool_min_volume_24h || 0) * WAN,
-  };
+  } as StrategyApiPayload;
+  const cleaned = { ...payload } as Record<string, unknown>;
+  for (const key of Object.keys(cleaned)) {
+    const val = cleaned[key];
+    if (typeof val === 'number' && !Number.isFinite(val)) {
+      delete cleaned[key];
+    }
+  }
+  return cleaned as StrategyApiPayload;
 }
 
 export default function StrategyForm({
@@ -326,11 +336,23 @@ export default function StrategyForm({
       : accounts;
 
   const {
-    register, handleSubmit, watch, setValue, getValues, formState: { errors },
+    register, handleSubmit, watch, setValue, getValues, reset, formState: { errors },
   } = useForm<StrategyFormData>({
     resolver: zodResolver(schema),
     defaultValues: toFormDefaults(initialData, accountOptions, defaultAccountId),
   });
+
+  const [activeTemplateId, setActiveTemplateId] = useState<string | null>(null);
+
+  const applyTemplate = (id: string) => {
+    const tpl = STRATEGY_PARAM_TEMPLATES.find((t) => t.id === id);
+    if (!tpl) return;
+    reset(
+      { ...getValues(), ...tpl.patch },
+      { keepDefaultValues: true },
+    );
+    setActiveTemplateId(id);
+  };
 
   const direction = watch('direction', 'long');
   const signalSource = watch('signal_source', 'rsi');
@@ -361,8 +383,39 @@ export default function StrategyForm({
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-      <h3 className="font-semibold mb-4">{initialData ? '编辑策略' : '新建策略'}</h3>
+      <h3 className="font-semibold mb-3">{initialData ? '编辑策略' : '新建策略'}</h3>
       <form onSubmit={handleSubmit((data) => onSubmit(toApiPayload(data)))} className="space-y-3">
+        <div className="rounded-lg border border-blue-500/25 bg-blue-950/20 px-3 py-2.5">
+          <div className="flex items-baseline justify-between gap-3 mb-2">
+            <span className="text-xs font-medium text-blue-100">参数模板</span>
+            <span className="text-[11px] text-gray-500">一键套用，不改名称 / 账户 / 方向</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {STRATEGY_PARAM_TEMPLATES.map((tpl) => {
+              const on = activeTemplateId === tpl.id;
+              return (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  onClick={() => applyTemplate(tpl.id)}
+                  className={
+                    on
+                      ? 'px-2.5 py-1 rounded-md text-xs font-medium bg-blue-600 text-white'
+                      : 'px-2.5 py-1 rounded-md text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700 hover:border-blue-500 hover:text-white'
+                  }
+                >
+                  {tpl.label}
+                </button>
+              );
+            })}
+          </div>
+          {activeTemplateId && (
+            <p className="mt-2 text-[11px] text-gray-400 leading-relaxed">
+              {STRATEGY_PARAM_TEMPLATES.find((t) => t.id === activeTemplateId)?.hint}
+            </p>
+          )}
+        </div>
+
         <div className="grid grid-cols-3 gap-3">
           {!initialData && (
             <div>

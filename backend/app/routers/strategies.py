@@ -1,3 +1,4 @@
+import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Body
@@ -22,6 +23,11 @@ from ..services.strategy_flags import (
 )
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
+logger = logging.getLogger(__name__)
+
+
+# 币安 USDT-M 合约代码：英文数字或中文名（如 币安人生USDT）
+_USDT_M_SYMBOL_RE = re.compile(r"^[A-Z0-9\u4e00-\u9fff]{1,40}USDT$")
 
 
 def _panic_symbol_key(sym: str) -> str:
@@ -62,11 +68,14 @@ async def _to_strategy_response_list(db: AsyncSession, strategies: list[Strategy
 
 
 def _normalize_symbol_input(symbol: str) -> str:
-    normalized = _panic_symbol_key(symbol.strip())
-    if not re.fullmatch(r"[A-Z0-9]{2,30}USDT", normalized):
+    compact = re.sub(r"\s+", "", (symbol or "").strip())
+    normalized = _panic_symbol_key(compact)
+    if normalized and not normalized.endswith("USDT"):
+        normalized = f"{normalized}USDT"
+    if normalized == "USDT" or not _USDT_M_SYMBOL_RE.fullmatch(normalized):
         raise HTTPException(
             status_code=400,
-            detail="请输入完整的币安 USDT-M 合约代码，例如 BTCUSDT 或 1000PEPEUSDT",
+            detail="请输入合约代码，例如 BTCUSDT、1000PEPEUSDT 或 币安人生USDT",
         )
     return normalized
 
@@ -260,6 +269,12 @@ async def update_strategy(
         "use_coin_pool",
     }
     for key, val in patch.items():
+        if key in ("id", "account_id", "status", "created_at", "updated_at"):
+            continue
+        if not hasattr(strategy, key):
+            continue
+        if val is None:
+            continue
         setattr(strategy, key, val)
     if (
         strategy.use_coin_pool
@@ -270,24 +285,36 @@ async def update_strategy(
     await db.commit()
     await db.refresh(strategy)
 
-    if was_running:
-        from ..services.coin_pool_service import coin_pool_service
+    try:
+        if was_running:
+            from ..services.coin_pool_service import coin_pool_service
 
-        await coin_pool_service.sync_config_from_running_strategies()
-        coin_pool_service.wake_refresh_loop()
-        strategy_scheduler.start()
-        await strategy_scheduler.add_strategy(strategy_id, session=db)
-    elif (
-        strategy.use_coin_pool
-        and strategy.coin_pool_fetch_mode == "scheduled"
-        and schedule_keys.intersection(patch.keys())
-    ):
-        from ..services.coin_pool_service import coin_pool_service
+            await coin_pool_service.sync_config_from_running_strategies()
+            coin_pool_service.wake_refresh_loop()
+            strategy_scheduler.start()
+            await strategy_scheduler.add_strategy(strategy_id, session=db)
+        elif (
+            strategy.use_coin_pool
+            and strategy.coin_pool_fetch_mode == "scheduled"
+            and schedule_keys.intersection(patch.keys())
+        ):
+            from ..services.coin_pool_service import coin_pool_service
 
-        await coin_pool_service.sync_config_from_running_strategies()
-        coin_pool_service.wake_refresh_loop()
+            await coin_pool_service.sync_config_from_running_strategies()
+            coin_pool_service.wake_refresh_loop()
+    except Exception:
+        logger.exception(
+            "Strategy %d 参数已保存，但重启/同步选币池失败",
+            strategy_id,
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
-    return await _to_strategy_response(db, strategy)
+    # add_strategy 会再 commit，原 ORM 实例可能过期；重载后再组装响应
+    fresh = await db.get(Strategy, strategy_id)
+    return await _to_strategy_response(db, fresh or strategy)
 
 
 @router.delete("/{strategy_id}", status_code=204)

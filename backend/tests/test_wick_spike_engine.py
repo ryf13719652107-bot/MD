@@ -1048,3 +1048,17 @@ def test_merge_synthetic_uses_trade_open():
     )
     assert out is not None
     assert out[-1][1] == 102.5  # trade_open as open, not prev_close
+
+
+def test_last_trade_on_bar_rejects_previous_bar_print():
+    """换分钟后成交流仍是上一根最后一笔 → 不得当成本根 last_price。"""
+    from app.services.wick_spike_engine import last_trade_on_bar
+
+    tf_ms = 60_000
+    bar_open = 180_000  # 03:00
+    prev_last_trade = 179_999  # 仍落在 02:00 根
+    assert last_trade_on_bar(prev_last_trade, bar_open, tf_ms) is False
+    assert last_trade_on_bar(180_000, bar_open, tf_ms) is True
+    assert last_trade_on_bar(180_500, bar_open, tf_ms) is True
+    assert last_trade_on_bar(0, bar_open, tf_ms) is True  # 无成交时间，交给 forming close
+    assert last_trade_on_bar(180_000, 0, tf_ms) is True

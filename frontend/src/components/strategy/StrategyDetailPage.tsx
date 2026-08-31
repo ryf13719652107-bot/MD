@@ -120,10 +120,16 @@ export default function StrategyDetailPage() {
 
   const addBlacklistSymbol = async () => {
     if (!id || !strategy) return;
-    const symbol = blacklistInput.trim().toUpperCase();
-    if (!symbol) return;
-    if (!/^[A-Z0-9]{2,30}USDT$/.test(symbol)) {
-      window.alert('请输入完整的币安 USDT-M 合约代码，例如 BTCUSDT 或 1000PEPEUSDT');
+    const compact = blacklistInput.replace(/\s+/g, '').trim();
+    if (!compact) return;
+    let symbol = compact
+      .toUpperCase()
+      .replace(/\//g, '')
+      .replace(/:USDT/g, '')
+      .replace(/_/g, '');
+    if (symbol && !symbol.endsWith('USDT')) symbol = `${symbol}USDT`;
+    if (!/^[A-Z0-9\u4e00-\u9fff]{1,40}USDT$/.test(symbol)) {
+      window.alert('请输入合约代码，例如 BTCUSDT、1000PEPEUSDT 或 币安人生USDT');
       return;
     }
     try {
@@ -294,7 +300,7 @@ export default function StrategyDetailPage() {
               <input
                 value={blacklistInput}
                 onChange={(e) => setBlacklistInput(e.target.value)}
-                placeholder="完整合约代码，如 BTCUSDT"
+                placeholder="BTCUSDT 或 币安人生"
                 className="h-8 px-2 rounded border border-gray-700 bg-gray-800 text-xs text-gray-200"
               />
               <button
@@ -307,7 +313,7 @@ export default function StrategyDetailPage() {
               </button>
             </div>
             <div className="mt-1 text-xs text-gray-500">
-              请按币安实际合约填写（如 1000PEPEUSDT）；仅禁止首次开仓，不影响已有仓位的马丁加仓、止盈、止损和平仓。
+              支持中文合约名（如 币安人生）。仅禁止首次开仓，不影响已有仓位的马丁加仓、止盈、止损和平仓。
             </div>
             <div className={`${valClass} mt-1 flex flex-wrap gap-2`}>
               {(strategy.blacklisted_symbols?.length ?? 0) > 0 ? (

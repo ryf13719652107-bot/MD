@@ -100,31 +100,51 @@ API Key 使用 Fernet 加密存储。密钥解析顺序：`settings.encryption_k
 - **`scheduler.py`**：保证金阈值止损比较 `extract_margin_balance`；变量名 `public_binance`/`auth_binance` 可能实际是 Gate 客户端
 - **`coin_pool_service.py`**：按 **`exchange`** 隔离刷新/查询/配置/状态。`config_for(ex)`、`status_for(ex)`；`refresh_pool` 校验 `client.exchange_id` 与参数一致。自动循环对运行中账户涉及的每个所分别 `get_public_exchange` + 刷新
 - **`equity_snapshot_job.py`**：整点快照写入 **保证金余额**（非钱包余额）；币安另同步划转流水
-- **`equity` 路由**：重置收益清空快照 → 写入当前基准 → **立即写入一条当前余额快照**（避免无点位时显示 -100%）；无快照时 summary 盈亏/回报归零
-- **`kline_stream.py`**：key 含 `exchange_id`；`peek` 热路径零 await；`refresh_forming` 武装后轻量 REST 补本根（high/low/volume **只增不减**，防 REST 旧值盖掉 WS 新高）
-- **`price_stream.py`**：币安 `watch_trades`；本根 `bar_volume`/`bar_high`/`bar_low`；成交唤醒 Event
-- **`account_position_stream.py`**：User Data Stream 腿缓存；热路径优先于 REST `fetch_positions`
-- **`wick_spike_engine.py`**：Arm–Confirm 纯逻辑；**`wick_spike_runner.py`**：每策略价流循环
+- **`equity` 路由**：重置收益清空快照 → 写入当前基准 → **立即写入一条当前余额快照**（避免无点位时显示 -100%）；无快照时 summary 盈亏/回报归零。曲线盈亏/收益率按**所选窗口起点**算，不是相对全局 baseline。`normalize_baseline_to_gross` 自动修复异常偏小/负数基准（持久化回库）
+- **`kline_stream.py`**：key 含 `exchange_id`；`peek` 热路径零 await；`refresh_forming` 武装/反弹窗轻量 REST 补本根（本根 H/L/V **只增不减**）；**已收盘 K 全量采用 REST**（可降可升，勿把盘中毛刺锁进 ATR）
+- **`price_stream.py`**：币安 `watch_trades`；本根 `bar_volume`/`bar_high`/`bar_low`；成交唤醒 Event；断连重连后 `take_resync_needed(本策略池)` 强制补 forming
+- **`account_position_stream.py`**：User Data Stream 腿缓存；热路径优先于 REST `fetch_positions`；平仓 `apply_local_close(qty)` 按量扣减；空心跳只续期不清全表
+- **`wick_spike_engine.py`**：Arm–Confirm 纯逻辑；**`wick_spike_runner.py`**：每策略价流循环（市价开仓后台化，不堵扫描）
+- **`trailing_tp_engine.py`**：时间移动止盈纯逻辑；runner 毫秒追踪；持仓页 `/api/strategies/{id}/trailing-status`
 - 其余：`sync_service`、`strategy_engine`、`martingale_engine`、`websocket_manager`、`backup_service` 等
 
 ### 毫秒接针（`wick_spike`，仅币安）
 
 **状态机（Arm–Confirm）**（`wick_spike_engine.on_tick`）：
 1. 刺破（极值相对开盘 ≥ ATR×`atr_mult`）+ 最小涨跌幅 `min_move_pct` → **武装**
-2. 武装窗 `arm_wait_sec`（默认 12s）内等量能达标 → 确认开仓
+2. 武装窗内等量能达标 → 确认开仓
 3. 武装时量不够则 `awaiting_vol`：grace 秒内免回撤，但受 `arm_grace_max_tip_gap_pct`（默认 2%）上限
-4. 超时作废后：**同根仍刺破即可再武装**（不要求 progress 创新高）——量滞后于价时给量能追上的机会
+4. 超时作废后：**同根仍刺破即可再武装**（不要求 progress 创新高）
 5. `progress` 量能放宽：progress≥1.5 时 need 降到 `vol_relax_mult`（默认 5×）
+
+**武装窗 `arm_wait_sec`（产品默认 0，方案 B）**：
+- `>0`：本根内 N 秒超时
+- `0`：本根内不超时，**换根才超时**（与反弹一致）
+- `-1`：关闭武装，恢复同刻全条件
+
+**反弹追踪**（产品新建默认开）：confirm 后进窗等反弹达 `trigger%` 再市价；`abort%` 放弃。`rebound_wait=0`：本根内不按秒超时；**换根时若仍在反弹窗 → timeout 并锁住新根**（禁止同一次插针跨分钟立刻再开火，AIO 案例）。
+
+**成交量确认 `wick_volume_mode`**：
+- `original`：瞬时折算量全程纳入（旧行为）
+- `instant_early`：本根前段用瞬时量，进度超过 `instant_active_until_pct`（默认 50%）后改用真实累计量
+- `real_only`：只用 K 线/成交累计真实量
 
 **数据与热路径**：
 - ATR / 量均只用**已收盘 K**；`atrN = ATR × atr_mult`
-- `enrich_snap_with_trades`：`vol_now = max(kline_vol, trade_vol)`，高低同理；bar 未对齐则忽略成交流（防换根串量）
-- 武装且 `awaiting_vol`：每 1s 后台 `refresh_forming`（最近 2 根）+ per-symbol in-flight 保护
-- forming 停滞（`forming_ts < 当前根`）→ 后台 REST 纠偏并跳过本轮
-- 开仓：`execute_wick_open_market` → 锁外挂止盈/写库；写库失败重试 + 孤儿仓对账
+- `enrich_snap_with_trades`：高低/累计 vol 对齐本根才并入；瞬时量是否纳入看 `volume_mode`
+- 武装等量 **或** 反弹窗内：约 2s 后台 `refresh_forming`（最近 2 根）
+- forming 停滞：后台 REST 纠偏；成交流已在新根则 `merge_synthetic_forming_bar`（开盘优先用本根第一笔成交价）继续 `on_tick`，勿整币跳过
+- 市价 `_try_open` **后台化**（`open_inflight` 防双开），不阻塞同策略其它币扫描；TP/DB 仍 fire-and-forget
+- 开仓门禁：新鲜账户流优先；流空/缺失须 REST 复核（勿用过期 `tick_ctx` 假 `has_pos` 锁根）
 - **热路径禁止 await REST**；参数/选币池后台槽消费
 
-**多账户 ATR**：同进程内 `kline_stream` 按 `(exchange, symbol, tf)` 共享缓冲，同参数策略 `atrN` 应几乎一致。若两账户同秒 `atrN` 差很大 → 查是否不同机/刚重启缓冲未对齐，或 `wick_atr_period` / `wick_spike_atr_mult` / `timeframe` 实际不一致。`atrN` 偏大 → progress 偏小 → need× 放宽不够 → 易近失。
+**多账户 ATR**：同进程内 `kline_stream` 按 `(exchange, symbol, tf)` 共享缓冲。`atrN` 偏大 → progress 偏小 → need× 放宽不够 → 易近失。
+
+**策略只管理机器人仓**：默认不领养孤儿；止盈/平仓按机器人数量 `close_position_qty`；同向已有交易所腿则跳过新开（不叠手动仓）。账户删除仍全腿平仓。
+
+### 时间移动止盈（`trailing_tp`，仅 `wick_spike`）
+
+开关 `trailing_tp_enabled`（默认关）。开仓后 `armed`：窗口内（默认 300s）盈利达 `take_profit_pct` → `active` 毫秒追踪峰值回撤（阶梯：默认 <2.5% 用 30%、≥2.5% 用 20%、≥5% 用 15%）；窗口超时 → `expired` 回退限价止盈。马丁加仓后 trailing 置 `expired`，整腿改限价。`manage_symbol` 在 armed/active 时不挂限价、不市价兜底止盈。开仓后立即写入 runner 内存态（勿等 15s refresh）。持仓页轮询 `GET /api/strategies/{id}/trailing-status`。
 
 ### 限价止盈与市价兜底（易踩坑）
 
@@ -149,7 +169,7 @@ API Key 使用 Fernet 加密存储。密钥解析顺序：`settings.encryption_k
 | 路由模块 | 前缀 | 关键端点 |
 |---|---|---|
 | `routers/account.py` | `/api/accounts` | CRUD（含 `exchange`），删除三阶段清理 |
-| `routers/strategies.py` | `/api/strategies` | CRUD + start/stop/panic-close + 有效选币池（按账户交易所） |
+| `routers/strategies.py` | `/api/strategies` | CRUD + start/stop/panic-close + 有效选币池 + `trailing-status` |
 | `routers/positions.py` | `/api/positions` | 列表/手动平仓/撤销止盈单 |
 | `routers/trades.py` | `/api/trades` | 列表/删除/备份统计/恢复/CSV导出 |
 | `routers/dashboard.py` | `/api/dashboard` | 返回 `wallet_balance` + `margin_balance`（`total_balance`=保证金，兼容旧字段） |
@@ -199,7 +219,7 @@ API Key 使用 Fernet 加密存储。密钥解析顺序：`settings.encryption_k
 - 仅改后端服务逻辑时**不必**为前端单独发版（`deploy.sh` 仍会 build，产物可不变）
 
 ### 测试
-含选币池交易所隔离、余额提取、接针引擎/日志/监控、Gate、调度、止盈取价等。运行：`cd backend && python -m pytest tests/ -v`。接针相关：`tests/test_wick_spike_*.py`、`test_wick_symbol_monitor.py`。
+含选币池交易所隔离、余额提取、接针引擎/日志/监控、Gate、调度、止盈取价、移动止盈、账户流清腿等。运行：`cd backend && python -m pytest tests/ -v`。接针相关：`tests/test_wick_spike_*.py`、`test_wick_symbol_monitor.py`、`test_trailing_tp_engine.py`。
 
 ### 重启影响
 - 资金/持仓/限价单在交易所；`resume_running_strategies` 从 DB 恢复
@@ -213,7 +233,9 @@ API Key 使用 Fernet 加密存储。密钥解析顺序：`settings.encryption_k
 - **余额口径**：App 钱包=`totalWalletBalance`；App 保证金/`totalMarginBalance` 用于曲线、保证金止损、单币止损、顶栏
 - **双向持仓**：`positionSide` + 平仓 `reduceOnly`（单向账户不发）
 - **限价止盈**：有挂单 open → **只等限价**；市价兜底仅无限价/已取消；触发与写库均禁止用滞后 K 线价或挂单价冒充成交价（见上文「限价止盈与市价兜底」）
-- **接针**：热路径不 await REST；`_try_open` 异常不得打崩整条 runner；触发日志勿引用循环局部变量
+- **接针**：热路径不 await REST；市价开仓后台化，`_try_open` 异常不得打崩整条 runner；触发日志勿引用循环局部变量；反弹/武装 `wait=0` 换根才超时并锁新根；多策略 resync 用 `take_resync_needed(本池)` 勿全局 consume
+- **仓位隔离**：策略只平/管机器人仓；平仓立刻 `apply_local_close`；UDS 空包不清全表，但平仓后不得残留腿永久屏蔽该币
+- **移动止盈**：仅接针；armed/active 禁止限价穿越市价兜底；加仓后 expired 改限价
 - **符号标准化**：去 `/`、`:USDT`、大写
 - **TradFi / 下架 / 主流 / 费率**：策略级开关；已有持仓不因过滤抛弃
 - **新增 DB 列**：model + schema + 前端 types + `init_db` 迁移 + NULL 兜底

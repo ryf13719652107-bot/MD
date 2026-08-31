@@ -63,23 +63,28 @@ async def create_account(data: AccountCreate, request: Request, db: AsyncSession
     await db.commit()
     await db.refresh(account)
 
+    # 返回前缓存所需字段，避免下方 rollback 使对象属性过期后触发异步懒加载（MissingGreenlet）
+    account_id = account.id
+    created_at = account.created_at
+    updated_at = account.updated_at
+
     # 立刻打快照+基准=当前余额；不拉充提（建账前资金算本金）。游标拨到下一整点，从下小时起再同步划转。
     try:
         await _seed_account_equity_snapshot(db, account)
         await db.commit()
     except Exception as e:
-        logger.warning("seed equity after create account %s failed: %s", account.id, e)
+        logger.warning("seed equity after create account %s failed: %s", account_id, e)
         await db.rollback()
 
     return AccountResponse(
-        id=account.id,
-        name=account.name,
-        exchange=account.exchange or "binance",
+        id=account_id,
+        name=data.name,
+        exchange=exchange or "binance",
         masked_key=mask_key(data.api_key),
-        testnet=account.testnet,
-        hedge_mode=account.hedge_mode,
-        created_at=account.created_at,
-        updated_at=account.updated_at,
+        testnet=testnet,
+        hedge_mode=hedge_mode,
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 

@@ -57,6 +57,7 @@ from .wick_spike_engine import (
     enrich_snap_with_trades,
     effective_volume_mult,
     is_arm_active,
+    last_trade_on_bar,
     merge_synthetic_forming_bar,
     near_miss_diag,
     on_tick,
@@ -102,6 +103,8 @@ _ARM_REST_SEC = 2.0
 _FORMING_REST_SEC = 1.5
 # 同策略同币同向腿锁等待；不再抢 :30/:40 任务锁
 _SYMBOL_LOCK_WAIT_SEC = 0.5
+# 移动止盈平仓须等 manage/check_tp 放锁，超时则本轮放弃并保留 mem 下次重试
+_TRAILING_LOCK_WAIT_SEC = 8.0
 # 成交后写库重试
 _DB_WRITE_RETRIES = 3
 _DB_WRITE_RETRY_DELAY_SEC = 0.35
@@ -704,6 +707,15 @@ class WickSpikeRunner:
                     )
                     if snap is None:
                         continue
+                    # K 线已换根、成交流仍是上一根：禁止用旧针尖当 last_price 开火
+                    # （改用 forming close 只做换根/超时，避免跨分钟误开）
+                    if not last_trade_on_bar(trade_ts_ms, snap.bar_open_ts, tf_ms):
+                        try:
+                            price = float(last[4])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        if price <= 0:
+                            continue
                     # EMA25 过滤固定看 1m：非 1m 策略时同步 peek 1m 缓冲（无 REST）
                     if params.ema25_filter_enabled and str(timeframe or "").lower() not in (
                         "1m",
@@ -1343,44 +1355,64 @@ class WickSpikeRunner:
     ) -> None:
         """armed→active：撤旧 tp_limit_order_id（如有），让移动追踪接管。
 
+        持腿锁，避免与 check_tp_fills 同时撤/改同一张止盈单。
         异常只 log 不抛；mem.state 已由热路径切 active，DB state 由下次 refresh 同步。
         """
+        pos_side = (mem.side or "").lower()
         try:
-            async with async_session() as session:
-                rows = list(
-                    (
-                        await session.execute(
-                            select(Position).where(
-                                Position.strategy_id == strategy_id,
-                                Position.closed_at.is_(None),
-                                Position.symbol == sym_key,
+            async with hold_strategy_symbol(
+                strategy_id, sym_key, pos_side, timeout=_TRAILING_LOCK_WAIT_SEC
+            ):
+                async with async_session() as session:
+                    rows = list(
+                        (
+                            await session.execute(
+                                select(Position).where(
+                                    Position.strategy_id == strategy_id,
+                                    Position.closed_at.is_(None),
+                                    Position.symbol == sym_key,
+                                )
                             )
-                        )
-                    ).scalars().all()
-                )
-                oids = [
-                    (p.tp_limit_order_id or "").strip()
-                    for p in rows
-                    if (p.tp_limit_order_id or "").strip()
-                ]
-                if not oids:
-                    return
-                auth = self._trailing_auth.get(strategy_id)
-                if auth is None:
-                    return
-                # 复用 position_mgr 的撤单逻辑（_cancel_bot_tp_order_ids）
-                await self._position_mgr._cancel_bot_tp_order_ids(
-                    auth, sym_key, set(oids), strategy_id, keep_id=""
-                )
-                for p in rows:
-                    p.tp_limit_order_id = None
-                    p.trailing_tp_state = STATE_ACTIVE
-                await session.commit()
-                strategy_log_service.info(
-                    strategy_id,
-                    f"{sym_key} trailing_tp 激活 — 撤旧限价单 {len(oids)} 张，"
-                    f"开始毫秒级移动追踪",
-                )
+                        ).scalars().all()
+                    )
+                    if not rows:
+                        return
+                    oids = [
+                        (p.tp_limit_order_id or "").strip()
+                        for p in rows
+                        if (p.tp_limit_order_id or "").strip()
+                    ]
+                    if not oids:
+                        for p in rows:
+                            p.trailing_tp_state = STATE_ACTIVE
+                        await session.commit()
+                        return
+                    auth = self._trailing_auth.get(strategy_id)
+                    if auth is None:
+                        return
+                    await self._position_mgr._cancel_bot_tp_order_ids(
+                        auth, sym_key, set(oids), strategy_id, keep_id=""
+                    )
+                    for p in rows:
+                        p.tp_limit_order_id = None
+                        p.trailing_tp_state = STATE_ACTIVE
+                    await session.commit()
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{sym_key} trailing_tp 激活 — 撤旧限价单 {len(oids)} 张，"
+                        f"开始毫秒级移动追踪",
+                    )
+        except asyncio.TimeoutError:
+            # 热路径已把 mem 切成 active，不会再发 activated；必须自行重试，
+            # 否则限价单可能一直留在交易所，与移动止盈双通道并存。
+            logger.warning(
+                "wick_spike trailing_tp activate lock timeout strategy=%d %s — 稍后重试",
+                strategy_id,
+                sym_key,
+            )
+            self._fire_bg(
+                self._post_trailing_activate_async(strategy_id, sym_key, mem)
+            )
         except Exception as e:
             logger.error(
                 "wick_spike trailing_tp activate strategy=%d %s: %s",
@@ -1395,60 +1427,77 @@ class WickSpikeRunner:
     ) -> None:
         """armed→expired：窗口超时，回退到原限价止盈逻辑。
 
+        持腿锁再挂限价，避免与 check_tp_fills 同时改同一张止盈单。
         更新 DB state='expired'，并调用 _ensure_tp_limit_orders 挂限价单。
         之后 scheduler 的 _manage_positions 会正常接管（trailing_taken_over=False）。
         """
+        pos_side = (mem.side or "").lower()
         try:
-            async with async_session() as session:
-                db_strategy = await session.get(Strategy, strategy_id)
-                if db_strategy is None or db_strategy.status != "running":
-                    return
-                open_positions = list(
-                    (
-                        await session.execute(
-                            select(Position).where(
-                                Position.strategy_id == strategy_id,
-                                Position.closed_at.is_(None),
-                                Position.symbol == sym_key,
+            async with hold_strategy_symbol(
+                strategy_id, sym_key, pos_side, timeout=_TRAILING_LOCK_WAIT_SEC
+            ):
+                async with async_session() as session:
+                    db_strategy = await session.get(Strategy, strategy_id)
+                    if db_strategy is None or db_strategy.status != "running":
+                        return
+                    open_positions = list(
+                        (
+                            await session.execute(
+                                select(Position).where(
+                                    Position.strategy_id == strategy_id,
+                                    Position.closed_at.is_(None),
+                                    Position.symbol == sym_key,
+                                )
                             )
-                        )
-                    ).scalars().all()
-                )
-                if not open_positions:
-                    return
-                for p in open_positions:
-                    p.trailing_tp_state = STATE_EXPIRED
-                await session.flush()
+                        ).scalars().all()
+                    )
+                    if not open_positions:
+                        return
+                    for p in open_positions:
+                        p.trailing_tp_state = STATE_EXPIRED
+                    await session.flush()
 
-                auth = self._trailing_auth.get(strategy_id)
-                if auth is None:
+                    auth = self._trailing_auth.get(strategy_id)
+                    if auth is None:
+                        await session.commit()
+                        return
+                    from .martingale_engine import MartingaleEngine
+                    positions_data = [
+                        {"quantity": p.quantity, "entry_price": p.entry_price}
+                        for p in open_positions
+                    ]
+                    eng = MartingaleEngine(
+                        base_quantity=0,
+                        multiplier=db_strategy.martingale_mult,
+                        max_layers=db_strategy.max_layers,
+                        price_drop_pct=db_strategy.price_drop_pct,
+                        price_drop_multiplier=float(
+                            db_strategy.price_drop_multiplier or 1.0
+                        ),
+                        take_profit_pct=db_strategy.take_profit_pct,
+                    )
+                    avg_entry, total_qty = eng.get_avg_entry_price(positions_data)
+                    pos_side = (open_positions[0].side or "").lower()
+                    await self._position_mgr._ensure_tp_limit_orders(
+                        session, db_strategy, sym_key, auth,
+                        open_positions, eng, avg_entry, total_qty, pos_side,
+                    )
                     await session.commit()
-                    return
-                # 复用马丁引擎算 avg_entry / 止盈价
-                from .martingale_engine import MartingaleEngine
-                positions_data = [
-                    {"quantity": p.quantity, "entry_price": p.entry_price}
-                    for p in open_positions
-                ]
-                eng = MartingaleEngine(
-                    base_quantity=0,
-                    multiplier=db_strategy.martingale_mult,
-                    max_layers=db_strategy.max_layers,
-                    price_drop_pct=db_strategy.price_drop_pct,
-                    price_drop_multiplier=float(db_strategy.price_drop_multiplier or 1.0),
-                    take_profit_pct=db_strategy.take_profit_pct,
-                )
-                avg_entry, total_qty = eng.get_avg_entry_price(positions_data)
-                pos_side = (open_positions[0].side or "").lower()
-                await self._position_mgr._ensure_tp_limit_orders(
-                    session, db_strategy, sym_key, auth,
-                    open_positions, eng, avg_entry, total_qty, pos_side,
-                )
-                await session.commit()
-                strategy_log_service.info(
-                    strategy_id,
-                    f"{sym_key} trailing_tp 窗口超时 — 回退限价止盈逻辑",
-                )
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{sym_key} trailing_tp 窗口超时 — 回退限价止盈逻辑",
+                    )
+        except asyncio.TimeoutError:
+            # 热路径已把 mem 切成 expired，不会再发 window_expired；必须自行重试，
+            # 否则 DB 仍 armed + trailing_taken_over，限价止盈永远挂不上。
+            logger.warning(
+                "wick_spike trailing_tp expire lock timeout strategy=%d %s — 稍后重试",
+                strategy_id,
+                sym_key,
+            )
+            self._fire_bg(
+                self._post_trailing_expire_async(strategy_id, sym_key, mem)
+            )
         except Exception as e:
             logger.error(
                 "wick_spike trailing_tp expire strategy=%d %s: %s",
@@ -1464,56 +1513,73 @@ class WickSpikeRunner:
     ) -> None:
         """active 触发回撤平仓：市价平仓 + 清 inflight + 清 mem。
 
-        复用 _close_positions；平仓后 Position.closed_at 写入，下次 refresh
-        自然从 mems 字典消失。inflight 在 finally 清除（无论成功失败）。
+        必须持策略×币×方向腿锁，避免与 :00/:30/:40 manage/check_tp 双重市价平仓
+        误伤同向手动仓。拿不到锁则保留 mem，下次 tick 重试。
         """
+        closed_ok = False
+        pos_side = (mem.side or "").lower()
         try:
-            async with async_session() as session:
-                db_strategy = await session.get(Strategy, strategy_id)
-                if db_strategy is None or db_strategy.status != "running":
-                    return
-                open_positions = list(
-                    (
-                        await session.execute(
-                            select(Position).where(
-                                Position.strategy_id == strategy_id,
-                                Position.closed_at.is_(None),
-                                Position.symbol == sym_key,
+            async with hold_strategy_symbol(
+                strategy_id, sym_key, pos_side, timeout=_TRAILING_LOCK_WAIT_SEC
+            ):
+                async with async_session() as session:
+                    db_strategy = await session.get(Strategy, strategy_id)
+                    if db_strategy is None or db_strategy.status != "running":
+                        closed_ok = True
+                        return
+                    open_positions = list(
+                        (
+                            await session.execute(
+                                select(Position).where(
+                                    Position.strategy_id == strategy_id,
+                                    Position.closed_at.is_(None),
+                                    Position.symbol == sym_key,
+                                )
                             )
-                        )
-                    ).scalars().all()
-                )
-                if not open_positions:
-                    return
-                auth = self._trailing_auth.get(strategy_id)
-                if auth is None:
-                    return
-                from .martingale_engine import MartingaleEngine
-                positions_data = [
-                    {"quantity": p.quantity, "entry_price": p.entry_price}
-                    for p in open_positions
-                ]
-                eng = MartingaleEngine(
-                    base_quantity=0,
-                    multiplier=db_strategy.martingale_mult,
-                    max_layers=db_strategy.max_layers,
-                    price_drop_pct=db_strategy.price_drop_pct,
-                    price_drop_multiplier=float(db_strategy.price_drop_multiplier or 1.0),
-                    take_profit_pct=db_strategy.take_profit_pct,
-                )
-                avg_entry, total_qty = eng.get_avg_entry_price(positions_data)
-                pos_side = (open_positions[0].side or "").lower()
-                strategy_log_service.success(
-                    strategy_id,
-                    f"{sym_key} 移动止盈平仓 — 触发价 {trigger_price:.6g} "
-                    f"峰值盈利 {mem.peak_pct:.2f}%",
-                )
-                await self._position_mgr._close_positions(
-                    session, db_strategy, sym_key, auth,
-                    open_positions, eng, avg_entry, pos_side,
-                    "移动止盈", trigger_price,
-                )
-                await session.commit()
+                        ).scalars().all()
+                    )
+                    if not open_positions:
+                        closed_ok = True
+                        return
+                    auth = self._trailing_auth.get(strategy_id)
+                    if auth is None:
+                        return
+                    from .martingale_engine import MartingaleEngine
+                    positions_data = [
+                        {"quantity": p.quantity, "entry_price": p.entry_price}
+                        for p in open_positions
+                    ]
+                    eng = MartingaleEngine(
+                        base_quantity=0,
+                        multiplier=db_strategy.martingale_mult,
+                        max_layers=db_strategy.max_layers,
+                        price_drop_pct=db_strategy.price_drop_pct,
+                        price_drop_multiplier=float(
+                            db_strategy.price_drop_multiplier or 1.0
+                        ),
+                        take_profit_pct=db_strategy.take_profit_pct,
+                    )
+                    avg_entry, _total_qty = eng.get_avg_entry_price(positions_data)
+                    pos_side = (open_positions[0].side or "").lower()
+                    strategy_log_service.success(
+                        strategy_id,
+                        f"{sym_key} 移动止盈平仓 — 触发价 {trigger_price:.6g} "
+                        f"峰值盈利 {mem.peak_pct:.2f}%",
+                    )
+                    await self._position_mgr._close_positions(
+                        session, db_strategy, sym_key, auth,
+                        open_positions, eng, avg_entry, pos_side,
+                        "移动止盈", trigger_price,
+                    )
+                    # 交易所侧已走完才标成功：避免 commit 失败后立刻再发一笔市价平
+                    closed_ok = True
+                    await session.commit()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "wick_spike trailing_tp close lock timeout strategy=%d %s — 稍后重试",
+                strategy_id,
+                sym_key,
+            )
         except Exception as e:
             logger.error(
                 "wick_spike trailing_tp close strategy=%d %s: %s",
@@ -1523,10 +1589,10 @@ class WickSpikeRunner:
             inflight = self._trailing_close_inflight.get(strategy_id)
             if inflight is not None:
                 inflight.discard(sym_key)
-            # 从内存字典移除（避免下次 tick 重复触发；refresh 会重建）
-            buckets = self._trailing_mems.get(strategy_id)
-            if buckets is not None:
-                buckets.pop(sym_key, None)
+            if closed_ok:
+                buckets = self._trailing_mems.get(strategy_id)
+                if buckets is not None:
+                    buckets.pop(sym_key, None)
 
     async def _try_open(
         self,
