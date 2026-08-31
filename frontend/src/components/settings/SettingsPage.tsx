@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 import type { Account, ExchangeId } from '../../types';
 import { Key, Trash2, Plus, Shield, AlertCircle } from 'lucide-react';
+import { useDashboardStore } from '../../store/dashboardStore';
 
 export default function SettingsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -24,6 +25,14 @@ export default function SettingsPage() {
     try {
       const result = await api.listAccounts();
       setAccounts(result);
+      const store = useDashboardStore.getState();
+      store.setAccounts(result);
+      if (store.selectedAccountId != null && !result.some((a) => a.id === store.selectedAccountId)) {
+        const next = result[0]?.id ?? null;
+        store.setSelectedAccountId(next);
+        if (next != null) localStorage.setItem('selected_account_id', String(next));
+        else localStorage.removeItem('selected_account_id');
+      }
     } catch (e: any) {
       setError(`加载账户失败: ${e.message}`);
       setAccounts([]);

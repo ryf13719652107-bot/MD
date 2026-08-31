@@ -15,15 +15,23 @@ function PanelRow({ label, value, valueClass }: { label: string; value: string; 
 }
 
 export default function DashboardPage() {
-  const { data, selectedAccountId } = useDashboardStore();
+  const { data, selectedAccountId, dashboardLoading } = useDashboardStore();
   const [trades, setTrades] = useState<Trade[]>([]);
 
   useEffect(() => {
     const accountId = selectedAccountId ?? undefined;
-    const load = () => api.listTrades({ limit: 5, account_id: accountId }).then((d) => setTrades(d.trades)).catch(() => {});
+    let cancelled = false;
+    setTrades([]);
+    const load = () =>
+      api.listTrades({ limit: 5, account_id: accountId }).then((d) => {
+        if (!cancelled) setTrades(d.trades);
+      }).catch(() => {});
     load();
     const timer = setInterval(load, 60000);
-    return () => clearInterval(timer);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [selectedAccountId]);
 
   const positions = data.exchange_positions || [];
@@ -58,8 +66,11 @@ export default function DashboardPage() {
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-bold">仪表盘</h2>
+      {dashboardLoading && (
+        <p className="text-xs text-gray-500 -mt-2">正在加载该账户数据…</p>
+      )}
 
-      <div className="flex flex-col xl:flex-row gap-4 items-start">
+      <div className={`flex flex-col xl:flex-row gap-4 items-start ${dashboardLoading ? 'opacity-50 pointer-events-none' : ''}`}>
         <div className="flex-1 min-w-0 space-y-4 w-full">
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             {mainStats.map(({ label, value, icon: Icon, color }) => (

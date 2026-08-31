@@ -223,19 +223,26 @@ export default function PositionsPage() {
   const loadRef = useRef<() => void>(() => {});
   const trailingRef = useRef<() => void>(() => {});
 
+  const reqToken = useRef(selectedAccountId);
+  reqToken.current = selectedAccountId;
+
   const load = async () => {
     const acc = selectedAccountId ?? undefined;
+    const token = reqToken.current;
     try {
       const [positions, dash] = await Promise.all([
         api.listPositions({ account_id: acc }),
         api.getDashboard(acc),
       ]);
+      if (reqToken.current !== token) return;
       setDbPositions(positions);
       setExchangePositions(dash.exchange_positions || []);
-      useDashboardStore.getState().setData(dash);
+      useDashboardStore.getState().replaceData(dash);
     } catch {
+      if (reqToken.current !== token) return;
       try {
         const positions = await api.listPositions({ account_id: acc });
+        if (reqToken.current !== token) return;
         setDbPositions(positions);
       } catch {
         setDbPositions([]);
@@ -274,6 +281,9 @@ export default function PositionsPage() {
   trailingRef.current = loadTrailing;
 
   useEffect(() => {
+    setDbPositions([]);
+    setExchangePositions([]);
+    setTrailingMap({});
     load();
   }, [selectedAccountId]);
 

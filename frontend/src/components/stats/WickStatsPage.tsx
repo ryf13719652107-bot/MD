@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { BarChart3, Play, RefreshCw, Search, Trash2 } from 'lucide-react';
 import {
   api,
@@ -70,6 +70,13 @@ export default function WickStatsPage() {
   const [symLoading, setSymLoading] = useState(false);
   const [symMon, setSymMon] = useState<WickSymbolMonitor | null>(null);
   const [symError, setSymError] = useState('');
+
+  useEffect(() => {
+    setData(null);
+    setError('');
+    setSymMon(null);
+    setSymError('');
+  }, [selectedAccountId]);
 
   const run = useCallback(async () => {
     if (selectedAccountId == null) {

@@ -23,6 +23,7 @@ export default function TradesPage() {
   const hasFilter = appliedSymbol !== '' || sideFilter !== 'all';
 
   const load = useCallback(async () => {
+    const token = selectedAccountId;
     try {
       const data = await api.listTrades({
         limit,
@@ -31,9 +32,11 @@ export default function TradesPage() {
         symbol: appliedSymbol || undefined,
         side: sideFilter === 'all' ? undefined : sideFilter,
       });
+      if (useDashboardStore.getState().selectedAccountId !== token) return;
       setTrades(data.trades);
       setTotal(data.total);
     } catch {
+      if (useDashboardStore.getState().selectedAccountId !== token) return;
       setTrades([]);
       setTotal(0);
     }
@@ -46,6 +49,8 @@ export default function TradesPage() {
     setSymbolInput('');
     setAppliedSymbol('');
     setSideFilter('all');
+    setTrades([]);
+    setTotal(0);
   }, [selectedAccountId]);
 
   useEffect(() => {

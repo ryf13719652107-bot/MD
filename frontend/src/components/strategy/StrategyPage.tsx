@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
@@ -12,64 +12,97 @@ import {
 } from '../../types/strategy';
 import type { Account } from '../../types';
 import StrategyForm from './StrategyForm';
+import InlineNotice from '../ui/InlineNotice';
+import ConfirmDialog from '../ui/ConfirmDialog';
 import { Play, Square, AlertTriangle, Edit, Trash2, Plus, Eye } from 'lucide-react';
+
+type ConfirmKind = { type: 'delete' | 'panic'; id: number } | null;
 
 export default function StrategyPage() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Strategy | null>(null);
+  const [notice, setNotice] = useState<{ kind: 'error' | 'success' | 'info'; text: string } | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmKind>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [listLoading, setListLoading] = useState(false);
   const selectedAccountId = useDashboardStore((s) => s.selectedAccountId);
+  const listToken = useRef(selectedAccountId);
+  listToken.current = selectedAccountId;
 
   const load = async () => {
-    const [s, a] = await Promise.all([
-      api.listStrategies(undefined, selectedAccountId ?? undefined),
-      api.listAccounts()
-    ]);
-    setStrategies(s);
-    setAccounts(a);
+    const token = listToken.current;
+    setListLoading(true);
+    try {
+      const [s, a] = await Promise.all([
+        api.listStrategies(undefined, selectedAccountId ?? undefined),
+        api.listAccounts(),
+      ]);
+      if (listToken.current !== token) return;
+      setStrategies(s);
+      setAccounts(a);
+    } catch (e: any) {
+      if (listToken.current !== token) return;
+      setNotice({ kind: 'error', text: e?.message || '加载策略失败' });
+    } finally {
+      if (listToken.current === token) setListLoading(false);
+    }
   };
 
-  useEffect(() => { load(); }, [selectedAccountId]);
+  useEffect(() => {
+    setStrategies([]);
+    setShowForm(false);
+    setEditing(null);
+    load();
+  }, [selectedAccountId]);
 
   const handleStart = async (id: number) => {
     try {
       await api.startStrategy(id);
+      setNotice({ kind: 'success', text: '策略已启动' });
       load();
     } catch (e: any) {
-      alert('启动失败: ' + (e.message || '未知错误'));
+      setNotice({ kind: 'error', text: `启动失败: ${e.message || '未知错误'}` });
     }
   };
 
   const handleStop = async (id: number) => {
-    await api.stopStrategy(id);
-    load();
-  };
-
-  const handlePanicClose = async (id: number) => {
-    if (!confirm('⚠️ 确认紧急平仓？\n\n将以市价单平掉该策略对应账户的所有交易所持仓，此操作不可撤销。')) return;
     try {
-      const result = await api.panicCloseStrategy(id);
-      const msgs: string[] = [];
-      if (result.results?.length) {
-        for (const r of result.results) {
-          msgs.push(`${r.symbol} ${r.side} — ${r.status === 'ok' ? '已平仓 ✓' : '失败: ' + r.error}`);
-        }
-      }
-      alert(`平仓完成: ${result.closed} 成功, ${result.failed || 0} 失败\n\n${msgs.join('\n')}`);
-    } catch (e: any) {
-      alert('平仓失败: ' + (e.message || e));
-    }
-    load();
-  };
-
-  const handleDelete = async (id: number) => {
-    if (!confirm('确定要删除该策略吗？')) return;
-    try {
-      await api.deleteStrategy(id);
+      await api.stopStrategy(id);
+      setNotice({ kind: 'success', text: '策略已停止' });
       load();
     } catch (e: any) {
-      alert(e.message);
+      setNotice({ kind: 'error', text: `停止失败: ${e.message || '未知错误'}` });
+    }
+  };
+
+  const runConfirm = async () => {
+    if (!confirm) return;
+    setConfirmBusy(true);
+    try {
+      if (confirm.type === 'panic') {
+        const result = await api.panicCloseStrategy(confirm.id);
+        const msgs: string[] = [];
+        if (result.results?.length) {
+          for (const r of result.results) {
+            msgs.push(`${r.symbol} ${r.side} — ${r.status === 'ok' ? '已平仓' : '失败: ' + r.error}`);
+          }
+        }
+        setNotice({
+          kind: result.failed ? 'error' : 'success',
+          text: `平仓完成: ${result.closed} 成功, ${result.failed || 0} 失败${msgs.length ? `\n${msgs.join('\n')}` : ''}`,
+        });
+      } else {
+        await api.deleteStrategy(confirm.id);
+        setNotice({ kind: 'success', text: '策略已删除' });
+      }
+      setConfirm(null);
+      load();
+    } catch (e: any) {
+      setNotice({ kind: 'error', text: e.message || '操作失败' });
+    } finally {
+      setConfirmBusy(false);
     }
   };
 
@@ -77,15 +110,31 @@ export default function StrategyPage() {
     try {
       if (editing) {
         await api.updateStrategy(editing.id, data);
+        setNotice({ kind: 'success', text: '参数已保存' });
       } else {
         await api.createStrategy(data);
+        setNotice({ kind: 'success', text: '策略已创建' });
       }
       setShowForm(false);
       setEditing(null);
       load();
     } catch (e: any) {
-      alert(editing ? `保存失败: ${e.message || e}` : `创建失败: ${e.message || e}`);
+      setNotice({
+        kind: 'error',
+        text: editing ? `保存失败: ${e.message || e}` : `创建失败: ${e.message || e}`,
+      });
+      throw e;
     }
+  };
+
+  const openCreate = () => {
+    if (selectedAccountId == null) {
+      setNotice({ kind: 'info', text: '请先在顶栏选择账户' });
+      return;
+    }
+    setNotice(null);
+    setEditing(null);
+    setShowForm(true);
   };
 
   return (
@@ -93,20 +142,19 @@ export default function StrategyPage() {
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">策略管理</h2>
         <button
-          onClick={() => {
-            if (selectedAccountId == null) {
-              alert('请先在顶栏选择账户');
-              return;
-            }
-            setEditing(null);
-            setShowForm(true);
-          }}
+          onClick={openCreate}
           className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
         >
           <Plus size={16} />
           新建策略
         </button>
       </div>
+
+      {notice && (
+        <InlineNotice kind={notice.kind} onClose={() => setNotice(null)}>
+          {notice.text}
+        </InlineNotice>
+      )}
 
       {showForm && (
         <StrategyForm
@@ -150,13 +198,13 @@ export default function StrategyPage() {
                     <Square size={16} />
                   </button>
                 )}
-                <button onClick={() => handlePanicClose(s.id)} className="p-1.5 text-red-400 hover:bg-red-600/20 rounded" title="紧急平仓">
+                <button onClick={() => setConfirm({ type: 'panic', id: s.id })} className="p-1.5 text-red-400 hover:bg-red-600/20 rounded" title="紧急平仓">
                   <AlertTriangle size={16} />
                 </button>
-                <button onClick={() => { setEditing(s); setShowForm(true); }} className="p-1.5 text-gray-400 hover:bg-gray-700 rounded" title="编辑">
+                <button onClick={() => { setEditing(s); setShowForm(true); setNotice(null); }} className="p-1.5 text-gray-400 hover:bg-gray-700 rounded" title="编辑">
                   <Edit size={16} />
                 </button>
-                <button onClick={() => handleDelete(s.id)} className="p-1.5 text-gray-400 hover:bg-red-600/20 rounded" title="删除">
+                <button onClick={() => setConfirm({ type: 'delete', id: s.id })} className="p-1.5 text-gray-400 hover:bg-red-600/20 rounded" title="删除">
                   <Trash2 size={16} />
                 </button>
               </div>
@@ -216,9 +264,32 @@ export default function StrategyPage() {
           </div>
         ))}
         {strategies.length === 0 && (
-          <div className="col-span-2 text-center text-gray-600 py-8">暂无策略，点击"新建策略"开始</div>
+          <div className="col-span-2 text-center text-gray-600 py-8">
+            {listLoading ? '加载中…' : '暂无策略，点击"新建策略"开始'}
+          </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirm?.type === 'panic'}
+        title="确认紧急平仓？"
+        detail="将以市价单平掉该策略对应账户的所有交易所持仓，此操作不可撤销。"
+        confirmLabel="确认平仓"
+        danger
+        busy={confirmBusy}
+        onConfirm={runConfirm}
+        onCancel={() => setConfirm(null)}
+      />
+      <ConfirmDialog
+        open={confirm?.type === 'delete'}
+        title="确定删除该策略？"
+        detail="删除后无法从本页恢复。"
+        confirmLabel="删除"
+        danger
+        busy={confirmBusy}
+        onConfirm={runConfirm}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

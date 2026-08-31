@@ -3,27 +3,52 @@ import { api } from '../../services/api';
 import type { CoinPoolEntry } from '../../types';
 import { RefreshCw, TrendingUp, TrendingDown, FlaskConical } from 'lucide-react';
 import { formatUsdtVolume, formatFundingRatePct, fundingRateColorClass } from '../../utils/format';
-import { poolSourceBadgeClass, poolSourceLabel, poolSourceTextClass } from '../../utils/poolSource';
+import { poolSourceLabel, poolSourceTextClass } from '../../utils/poolSource';
 import { COIN_POOL_REFRESH_OPTIONS, nearestCoinPoolRefreshSeconds } from '../../types/strategy';
+import { selectSelectedAccount, selectSelectedExchange, useDashboardStore } from '../../store/dashboardStore';
 
 export default function CoinPoolPage() {
+  const selectedAccount = useDashboardStore(selectSelectedAccount);
+  const accountExchange = useDashboardStore(selectSelectedExchange);
   const [coins, setCoins] = useState<CoinPoolEntry[]>([]);
   const [source, setSource] = useState<string>('');
-  const [exchange, setExchange] = useState<'binance' | 'gate'>('binance');
+  const [exchange, setExchange] = useState<'binance' | 'gate'>(accountExchange ?? 'binance');
   const [config, setConfig] = useState({ refresh_interval_seconds: 3600, pool_source: 'both', max_symbols: 20 });
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; data: any[] } | null>(null);
   const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    setTestResult(null);
+    if (!accountExchange) return;
+    if (accountExchange !== exchange) {
+      setCoins([]);
+      setExchange(accountExchange);
+    }
+  }, [accountExchange, selectedAccount?.id]);
 
   const load = useCallback(async () => {
     const [c, cfg] = await Promise.all([
       api.getCoinPool(source || undefined, undefined, exchange),
       api.getCoinPoolConfig(exchange),
     ]);
-    setCoins(c);
-    setConfig(cfg);
+    return { c, cfg };
   }, [source, exchange]);
 
-  useEffect(() => { load(); }, [load]);
+  const applyLoaded = (c: CoinPoolEntry[], cfg: typeof config) => {
+    setCoins(c);
+    setConfig(cfg);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    load().then(({ c, cfg }) => {
+      if (cancelled) return;
+      applyLoaded(c, cfg);
+    }).catch(() => {
+      if (!cancelled) setCoins([]);
+    });
+    return () => { cancelled = true; };
+  }, [load]);
 
   const handleRefresh = async () => {
     try {
@@ -36,12 +61,25 @@ export default function CoinPoolPage() {
     } catch (e: any) {
       setTestResult({ success: false, message: `请求异常: ${e.message}`, data: [] });
     }
-    load();
+    try {
+      const { c, cfg } = await load();
+      applyLoaded(c, cfg);
+    } catch {
+      setCoins([]);
+    }
   };
 
+  const viewingOther = Boolean(accountExchange && accountExchange !== exchange);
+
   const handleConfigUpdate = async () => {
+    if (viewingOther) return;
     await api.updateCoinPoolConfig(config, exchange);
-    load();
+    try {
+      const { c, cfg } = await load();
+      applyLoaded(c, cfg);
+    } catch {
+      setCoins([]);
+    }
   };
 
   const handleTestFetch = async () => {
@@ -64,6 +102,12 @@ export default function CoinPoolPage() {
           <span className={`ml-2 text-sm font-medium ${exchange === 'gate' ? 'text-teal-400' : 'text-amber-400'}`}>
             {exchange === 'gate' ? 'GATE' : '币安'}
           </span>
+          {selectedAccount && (
+            <span className="ml-2 text-xs font-normal text-gray-500">
+              跟随顶栏 · {selectedAccount.name}
+              {accountExchange && accountExchange !== exchange ? '（临时查看另一所，保存配置已禁用）' : ''}
+            </span>
+          )}
         </h2>
         <div className="flex items-center gap-2">
           <div className="flex rounded-lg overflow-hidden border border-gray-700">
@@ -185,7 +229,14 @@ export default function CoinPoolPage() {
                 : `仅单侧前 ${config.max_symbols}`}
             </p>
           </div>
-          <button onClick={handleConfigUpdate} className="mt-4 px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded text-sm">保存配置</button>
+          <button
+            onClick={handleConfigUpdate}
+            disabled={viewingOther}
+            title={viewingOther ? '临时查看另一所时不能保存配置，请先切回顶栏账户对应交易所' : undefined}
+            className="mt-4 px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed rounded text-sm"
+          >
+            保存配置
+          </button>
         </div>
 
         <p className="text-xs text-gray-600 mb-3">

@@ -12,6 +12,7 @@ import {
 } from '../../types/strategy';
 import type { CoinPoolEntry, Trade } from '../../types';
 import { ArrowLeft, Terminal } from 'lucide-react';
+import InlineNotice from '../ui/InlineNotice';
 
 interface LogEntry { time: string; level: string; message: string; }
 
@@ -46,6 +47,7 @@ export default function StrategyDetailPage() {
   const [loading, setLoading] = useState(true);
   const [blacklistInput, setBlacklistInput] = useState('');
   const [blacklistBusy, setBlacklistBusy] = useState(false);
+  const [notice, setNotice] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
 
   const loadRef = useRef<() => void>(() => {});
 
@@ -129,7 +131,7 @@ export default function StrategyDetailPage() {
       .replace(/_/g, '');
     if (symbol && !symbol.endsWith('USDT')) symbol = `${symbol}USDT`;
     if (!/^[A-Z0-9\u4e00-\u9fff]{1,40}USDT$/.test(symbol)) {
-      window.alert('请输入合约代码，例如 BTCUSDT、1000PEPEUSDT 或 币安人生USDT');
+      setNotice({ kind: 'error', text: '请输入合约代码，例如 BTCUSDT、1000PEPEUSDT 或 币安人生USDT' });
       return;
     }
     try {
@@ -137,8 +139,9 @@ export default function StrategyDetailPage() {
       const updated = await api.addStrategyBlacklistSymbol(Number(id), symbol);
       setStrategy(updated);
       setBlacklistInput('');
+      setNotice({ kind: 'success', text: `已加入黑名单：${symbol}` });
     } catch (e: any) {
-      window.alert(`加入黑名单失败：${e?.message || e}`);
+      setNotice({ kind: 'error', text: `加入黑名单失败：${e?.message || e}` });
     } finally {
       setBlacklistBusy(false);
     }
@@ -151,7 +154,7 @@ export default function StrategyDetailPage() {
       const updated = await api.removeStrategyBlacklistSymbol(Number(id), symbol);
       setStrategy(updated);
     } catch (e: any) {
-      window.alert(`移除黑名单失败：${e?.message || e}`);
+      setNotice({ kind: 'error', text: `移除黑名单失败：${e?.message || e}` });
     } finally {
       setBlacklistBusy(false);
     }
@@ -177,6 +180,12 @@ export default function StrategyDetailPage() {
           {strategy.status === 'running' ? '运行中' : strategy.status === 'error' ? '异常' : '已停止'}
         </span>
       </div>
+
+      {notice && (
+        <InlineNotice kind={notice.kind} onClose={() => setNotice(null)}>
+          {notice.text}
+        </InlineNotice>
+      )}
 
       {/* 区块1: 策略信息 */}
       <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">

@@ -1,20 +1,22 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { api } from '../../services/api';
-import { useDashboardStore } from '../../store/dashboardStore';
+import { defaultDashboardData, useDashboardStore } from '../../store/dashboardStore';
 import { useAuthStore } from '../../store/authStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { Power, Circle, ChevronDown } from 'lucide-react';
-import type { DashboardData, Account } from '../../types';
+import type { DashboardData } from '../../types';
 
 export default function StatusBar() {
-  const { data } = useDashboardStore();
+  const data = useDashboardStore((s) => s.data);
+  const accounts = useDashboardStore((s) => s.accounts);
+  const selectedAccountId = useDashboardStore((s) => s.selectedAccountId);
+  const dashboardLoading = useDashboardStore((s) => s.dashboardLoading);
   const role = useAuthStore((s) => s.role);
   const guest = role === 'guest';
   const [connected, setConnected] = useState(false);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const fetchRef = useRef<() => void>(() => {});
+  const fetchGen = useRef(0);
 
   // Connect dashboard WS to trigger re-fetch on snapshot
   useWebSocket('dashboard', useCallback((msg: any) => {
@@ -25,40 +27,58 @@ export default function StatusBar() {
 
   useEffect(() => {
     api.listAccounts().then((accs) => {
-      setAccounts(accs);
+      useDashboardStore.getState().setAccounts(accs);
       const saved = localStorage.getItem('selected_account_id');
-      const initialId = (saved && accs.find(a => a.id === Number(saved)))
+      const initialId = (saved && accs.find((a) => a.id === Number(saved)))
         ? Number(saved)
         : (accs.length > 0 ? accs[0].id : null);
-      setSelectedAccountId(initialId);
       useDashboardStore.getState().setSelectedAccountId(initialId);
     });
   }, []);
 
   useEffect(() => {
-    if (selectedAccountId == null) return;
+    if (selectedAccountId == null) {
+      useDashboardStore.getState().setDashboardLoading(false);
+      return;
+    }
 
-    const fetchDashboard = () => {
-      api.getDashboard(selectedAccountId).then((d: DashboardData) => {
-        useDashboardStore.getState().setData(d);
+    const gen = ++fetchGen.current;
+    const fetchDashboard = (showLoading: boolean) => {
+      if (showLoading) useDashboardStore.getState().setDashboardLoading(true);
+      const accId = selectedAccountId;
+      api.getDashboard(accId).then((d: DashboardData) => {
+        if (gen !== fetchGen.current) return;
+        if (useDashboardStore.getState().selectedAccountId !== accId) return;
+        useDashboardStore.getState().replaceData(d);
         setConnected(true);
       }).catch(() => {
+        if (gen !== fetchGen.current) return;
+        if (useDashboardStore.getState().selectedAccountId !== accId) return;
         setConnected(false);
-        useDashboardStore.getState().setData({ exchange_positions: [] });
+        const prevSwitch = useDashboardStore.getState().data.master_switch;
+        useDashboardStore.getState().replaceData({
+          ...defaultDashboardData,
+          exchange_positions: [],
+          balance_status: 'error',
+          master_switch: prevSwitch,
+        });
       });
     };
-    fetchRef.current = fetchDashboard;
+    fetchRef.current = () => fetchDashboard(false);
 
-    fetchDashboard();
-    const interval = setInterval(fetchDashboard, 60000);
+    fetchDashboard(true);
+    const interval = setInterval(() => fetchDashboard(false), 60000);
     return () => clearInterval(interval);
   }, [selectedAccountId]);
 
   const handleAccountSelect = (accountId: number) => {
-    setSelectedAccountId(accountId);
-    localStorage.setItem('selected_account_id', String(accountId));
-    useDashboardStore.getState().setSelectedAccountId(accountId);
     setShowAccountMenu(false);
+    if (accountId === selectedAccountId) return;
+    fetchGen.current += 1;
+    localStorage.setItem('selected_account_id', String(accountId));
+    const store = useDashboardStore.getState();
+    store.resetData();
+    store.setSelectedAccountId(accountId);
   };
 
   const handleToggle = async () => {
@@ -69,6 +89,7 @@ export default function StatusBar() {
   };
 
   const balanceLabel = () => {
+    if (dashboardLoading) return '加载中…';
     if (data.balance_status === 'no_account') return '未配置账户';
     if (data.balance_status === 'error') return '余额获取失败';
     return `${data.total_balance.toFixed(2)} USDT`;
@@ -157,16 +178,20 @@ export default function StatusBar() {
 
         <span className="text-gray-500">|</span>
         <span className="text-gray-300">
-          余额: <strong className={balanceColor()}>{balanceLabel()}</strong>
+          余额: <strong className={dashboardLoading ? 'text-gray-400' : balanceColor()}>{balanceLabel()}</strong>
         </span>
         <span className="text-gray-500">|</span>
         <span className="text-gray-300">
-          策略: <strong>{data.active_strategies}</strong>
+          策略: <strong>{dashboardLoading ? '—' : data.active_strategies}</strong>
         </span>
         <span className="text-gray-300">
-          持仓: <strong>{data.open_positions}</strong>
+          持仓: <strong>{dashboardLoading ? '—' : data.open_positions}</strong>
         </span>
         <span className="text-gray-300 hidden lg:inline">
+          {dashboardLoading ? (
+            <span className="text-gray-500">切换账户中…</span>
+          ) : (
+            <>
           当日
           <strong className={data.daily_pnl >= 0 ? 'text-green-400 ml-1' : 'text-red-400 ml-1'}>
             {data.daily_pnl.toFixed(2)}
@@ -186,6 +211,8 @@ export default function StatusBar() {
           <strong className={data.total_pnl_short >= 0 ? 'text-green-400' : 'text-red-400'}>
             {data.total_pnl_short.toFixed(2)}
           </strong>
+            </>
+          )}
         </span>
       </div>
 
@@ -198,8 +225,8 @@ export default function StatusBar() {
 
       <button
         type="button"
-        onClick={guest ? undefined : handleToggle}
-        disabled={guest}
+        onClick={guest || dashboardLoading ? undefined : handleToggle}
+        disabled={guest || dashboardLoading}
         title={guest ? '访客模式无法切换总开关' : undefined}
         className={`flex items-center gap-1.5 px-3 py-1 rounded text-sm font-medium transition-colors ${
           guest ? 'opacity-50 cursor-not-allowed' : ''

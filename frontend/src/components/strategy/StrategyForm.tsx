@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { ChevronDown } from 'lucide-react';
+import InlineNotice from '../ui/InlineNotice';
+import ConfirmDialog from '../ui/ConfirmDialog';
 import {
   COIN_POOL_REFRESH_OPTIONS,
   formatAnchorTime,
@@ -121,8 +124,38 @@ interface Props {
   /** 新建时默认账户（顶栏当前账户）；编辑时忽略 */
   defaultAccountId?: number | null;
   initialData: Strategy | null;
-  onSubmit: (data: StrategyApiPayload) => void;
+  onSubmit: (data: StrategyApiPayload) => void | Promise<void>;
   onCancel: () => void;
+}
+
+function FormSection({
+  title,
+  defaultOpen = true,
+  hint,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  hint?: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className="border border-gray-800 rounded-lg overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left hover:bg-gray-800/50"
+      >
+        <span className="text-sm font-semibold text-gray-200">{title}</span>
+        <span className="flex items-center gap-2">
+          {hint && <span className="text-[11px] text-gray-500 font-normal">{hint}</span>}
+          <ChevronDown size={16} className={`text-gray-500 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </span>
+      </button>
+      <div className={open ? 'px-3 pb-3 space-y-3' : 'hidden'}>{children}</div>
+    </section>
+  );
 }
 
 function toFormDefaults(
@@ -347,6 +380,14 @@ export default function StrategyForm({
   const [templates, setTemplates] = useState<StrategyParamTemplate[]>([]);
   const [templateName, setTemplateName] = useState('');
   const [templateBusy, setTemplateBusy] = useState(false);
+  const [tplNotice, setTplNotice] = useState<string | null>(null);
+  const [pendingOverwrite, setPendingOverwrite] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<StrategyParamTemplate | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    document.getElementById('strategy-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
 
   const loadTemplates = async () => {
     try {
@@ -369,37 +410,44 @@ export default function StrategyForm({
     setTemplateName(tpl.name);
   };
 
-  const saveCurrentAsTemplate = async () => {
+  const saveCurrentAsTemplate = async (overwrite = false) => {
     const name = templateName.trim();
     if (!name) {
-      window.alert('请输入模板名称');
+      setTplNotice('请输入模板名称');
       return;
     }
     const exists = templates.find((t) => t.name === name);
-    if (exists && !window.confirm(`已有模板「${name}」，要用当前参数覆盖吗？`)) {
+    if (exists && !overwrite) {
+      setPendingOverwrite(true);
       return;
     }
     try {
       setTemplateBusy(true);
+      setTplNotice(null);
       const saved = await api.saveStrategyTemplate(name, snapshotTemplatePatch(getValues()));
       await loadTemplates();
       setActiveTemplateId(saved.id);
+      setPendingOverwrite(false);
+      setTplNotice(overwrite ? `已覆盖模板「${name}」` : `已保存模板「${name}」`);
     } catch (e: any) {
-      window.alert(`保存模板失败：${e?.message || e}`);
+      setTplNotice(`保存模板失败：${e?.message || e}`);
     } finally {
       setTemplateBusy(false);
     }
   };
 
-  const deleteTemplate = async (tpl: StrategyParamTemplate) => {
-    if (!window.confirm(`删除模板「${tpl.name}」？`)) return;
+  const deleteTemplate = async () => {
+    const tpl = pendingDelete;
+    if (!tpl) return;
     try {
       setTemplateBusy(true);
       await api.deleteStrategyTemplate(tpl.id);
       if (activeTemplateId === tpl.id) setActiveTemplateId(null);
       await loadTemplates();
+      setPendingDelete(null);
+      setTplNotice(`已删除模板「${tpl.name}」`);
     } catch (e: any) {
-      window.alert(`删除模板失败：${e?.message || e}`);
+      setTplNotice(`删除模板失败：${e?.message || e}`);
     } finally {
       setTemplateBusy(false);
     }
@@ -433,7 +481,7 @@ export default function StrategyForm({
   const errorClass = 'text-red-400 text-xs';
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+    <div id="strategy-form" className="bg-gray-900 border border-gray-800 rounded-lg p-4">
       <h3 className="font-semibold mb-3">{initialData ? '编辑策略' : '新建策略'}</h3>
       <div className="rounded-lg border border-blue-500/25 bg-blue-950/20 px-3 py-2.5 mb-3">
         <div className="flex items-baseline justify-between gap-3 mb-2">
@@ -467,7 +515,7 @@ export default function StrategyForm({
                     type="button"
                     title="删除模板"
                     disabled={templateBusy}
-                    onClick={() => deleteTemplate(tpl)}
+                    onClick={() => setPendingDelete(tpl)}
                     className={
                       on
                         ? 'px-1 rounded text-blue-100 hover:text-white hover:bg-blue-700'
@@ -484,7 +532,7 @@ export default function StrategyForm({
         <div className="flex flex-wrap items-center gap-2">
           <input
             value={templateName}
-            onChange={(e) => setTemplateName(e.target.value)}
+            onChange={(e) => { setTemplateName(e.target.value); setTplNotice(null); }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
@@ -497,15 +545,38 @@ export default function StrategyForm({
           />
           <button
             type="button"
-            onClick={saveCurrentAsTemplate}
+            onClick={() => saveCurrentAsTemplate()}
             disabled={templateBusy || !templateName.trim()}
             className="h-8 px-2.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs text-white"
           >
             保存当前参数
           </button>
         </div>
+        {tplNotice && (
+          <div className="mt-2">
+            <InlineNotice
+              kind={tplNotice.includes('失败') || tplNotice.startsWith('请') ? 'error' : 'success'}
+              onClose={() => setTplNotice(null)}
+            >
+              {tplNotice}
+            </InlineNotice>
+          </div>
+        )}
       </div>
-      <form onSubmit={handleSubmit((data) => onSubmit(toApiPayload(data)))} className="space-y-3">
+      <form
+        onSubmit={handleSubmit(async (data) => {
+          setSubmitting(true);
+          try {
+            await onSubmit(toApiPayload(data));
+          } finally {
+            setSubmitting(false);
+          }
+        })}
+        className="space-y-3"
+      >
+        {Object.keys(errors).length > 0 && (
+          <InlineNotice kind="error">请检查标红的参数后再保存</InlineNotice>
+        )}
         <div className="grid grid-cols-3 gap-3">
           {!initialData && (
             <div>
@@ -580,22 +651,9 @@ export default function StrategyForm({
 
         {signalSource === 'wick_spike' && (
           <div className="space-y-3">
-            <div className="rounded-md border border-cyan-700/50 bg-cyan-900/20 px-3 py-2 text-xs text-cyan-200 space-y-1">
-              <p>毫秒接针：仅币安。先放量（当前量 ≥ Vol SMA × 倍数），再用本根极值追认「开盘价 ± 上根 ATR × 倍数」。默认开启「市价反弹追踪」：confirm 后等针尖反弹再开仓。</p>
-              <p>调度错峰：持仓管理在每根 K 第 40 秒，止盈检测第 30 秒；:00 附近不占锁，留给价流开仓。止盈/层数下方手填；加仓模式在马丁区选择「仅涨跌幅」或「涨跌幅+WT」。</p>
-            </div>
-            <div>
-              <label className={`${labelClass} flex items-center gap-2`}>
-                <span>progress 量能放宽</span>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" {...register('wick_amp_vol_relax_enabled')} className="sr-only peer" />
-                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
-                </label>
-              </label>
-              <span className="text-xs text-gray-600">
-                默认开：progress = |极值-开盘|/N；刺破后按进度把放量倍数线性降到下方「放宽后量能」
-              </span>
-            </div>
+            <p className="text-xs text-cyan-200/90">
+              毫秒接针仅币安：刺破 + 放量确认后市价开仓。默认开反弹追踪（confirm 后等针尖反弹再下单）。
+            </p>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={labelClass}>放量倍数（相对 Vol SMA）</label>
@@ -607,22 +665,6 @@ export default function StrategyForm({
                 <input type="number" {...register('wick_volume_sma_period', { valueAsNumber: true })} className={inputClass} />
                 <span className="text-xs text-gray-600">默认 20</span>
               </div>
-              <div>
-                <label className={labelClass}>成交量确认模式</label>
-                <select {...register('wick_volume_mode')} className={inputClass}>
-                  <option value="original">原方案（瞬时量全程）</option>
-                  <option value="instant_early">方案1（前段瞬时+后段真实）</option>
-                  <option value="real_only">方案3（纯真实累计量）</option>
-                </select>
-                <span className="text-xs text-gray-600">原方案=瞬时量全程；方案1=本根前段用瞬时量、后段用真实量；方案3=仅真实累计量</span>
-              </div>
-              {wickVolumeMode === 'instant_early' && (
-                <div>
-                  <label className={labelClass}>瞬时量生效进度上限（0~1）</label>
-                  <input type="number" step="0.05" {...register('wick_instant_active_until_pct', { valueAsNumber: true })} className={inputClass} />
-                  <span className="text-xs text-gray-600">本根进度超过该值后切换真实量；默认 0.5（1m 即前 30 秒）</span>
-                </div>
-              )}
               <div>
                 <label className={labelClass}>ATR 周期</label>
                 <input type="number" {...register('wick_atr_period', { valueAsNumber: true })} className={inputClass} />
@@ -641,55 +683,35 @@ export default function StrategyForm({
               <div>
                 <label className={labelClass}>最大回撤 %</label>
                 <input type="number" step="1" {...register('wick_max_retrace_pct', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">相对开盘→极值；默认 50（收回一半跳过）；填 0 关闭</span>
-              </div>
-              <div>
-                <label className={labelClass}>刺破等量窗口(秒)</label>
-                <input type="number" step="1" {...register('wick_arm_wait_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">刺破后等量窗口；&gt;0=本根内N秒超时；0=本根内不超时换根才超时(跟反弹一致)；-1=关闭武装</span>
-              </div>
-              <div>
-                <label className={labelClass}>等量免回撤(秒)</label>
-                <input type="number" step="0.5" {...register('wick_arm_retrace_grace_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">武装时量不够，确认前 N 秒免回撤；默认 5</span>
-              </div>
-              <div>
-                <label className={labelClass}>免回撤 tip_gap% 上限</label>
-                <input type="number" step="0.1" {...register('wick_arm_grace_max_tip_gap_pct', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">grace 生效时离针尖过远不开；默认 2，填 0 不限制</span>
-              </div>
-              <div>
-                <label className={labelClass}>开始放宽 progress</label>
-                <input type="number" step="0.1" {...register('wick_vol_relax_progress_start', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">默认 1.0（刚刺破）</span>
-              </div>
-              <div>
-                <label className={labelClass}>完全放宽 progress</label>
-                <input type="number" step="0.1" {...register('wick_vol_relax_progress_full', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">默认 1.5</span>
-              </div>
-              <div>
-                <label className={labelClass}>放宽后量能倍数</label>
-                <input type="number" step="0.1" {...register('wick_vol_relax_mult', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">默认 5；不会高于上方放量倍数</span>
-              </div>
-              <div>
-                <label className={labelClass}>同币额外冷却（秒）</label>
-                <input type="number" {...register('wick_cooldown_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">默认 0（仅同币同根 K 去重）</span>
+                <span className="text-xs text-gray-600">相对开盘→极值；默认 50；填 0 关闭</span>
               </div>
             </div>
             <div>
               <label className={`${labelClass} flex items-center gap-2`}>
-                <span>市价反弹追踪（方案J）</span>
+                <span>市价反弹追踪</span>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input type="checkbox" {...register('wick_rebound_enabled')} className="sr-only peer" />
                   <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
                 </label>
               </label>
-              <span className="text-xs text-gray-600">
-                默认开。confirm 达标不立刻下单，等价格从针尖反弹到「触发%」再市价；针尖可加深。confirm 回撤上限会与「放弃%」取较小，避免进窗即放弃。
-              </span>
+              <span className="text-xs text-gray-600">confirm 后等针尖反弹到触发%再市价</span>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className={labelClass}>反弹触发 %</label>
+                <input type="number" step="1" {...register('wick_rebound_trigger_pct', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">占针深；默认 20；0=立刻市价</span>
+              </div>
+              <div>
+                <label className={labelClass}>反弹放弃 %</label>
+                <input type="number" step="1" {...register('wick_rebound_abort_pct', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">须大于触发%；0=关闭放弃</span>
+              </div>
+              <div>
+                <label className={labelClass}>等反弹超时(秒)</label>
+                <input type="number" step="0.5" {...register('wick_rebound_wait_sec', { valueAsNumber: true })} className={inputClass} />
+                <span className="text-xs text-gray-600">0=本根内不超时，换根仍超时</span>
+              </div>
             </div>
             <div>
               <label className={`${labelClass} flex items-center gap-2`}>
@@ -699,27 +721,69 @@ export default function StrategyForm({
                   <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
                 </label>
               </label>
-              <span className="text-xs text-gray-600">
-                默认开。做空：1m 开盘价低于 EMA25 不做空；做多：1m 开盘价高于 EMA25 不做多。用已收盘 K 内存计算，不影响下单速度。
-              </span>
+              <span className="text-xs text-gray-600">做空：开盘低于 EMA25 不做空；做多相反</span>
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <FormSection title="接针进阶" defaultOpen={false} hint="量能模式 / 武装窗 / 放宽">
               <div>
-                <label className={labelClass}>反弹触发 %</label>
-                <input type="number" step="1" {...register('wick_rebound_trigger_pct', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">占针深；默认 20；填 0=confirm 后立刻市价</span>
+                <label className={`${labelClass} flex items-center gap-2`}>
+                  <span>progress 量能放宽</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" {...register('wick_amp_vol_relax_enabled')} className="sr-only peer" />
+                    <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                  </label>
+                </label>
+                <span className="text-xs text-gray-600">刺破后按进度把放量倍数线性降到「放宽后量能」</span>
               </div>
-              <div>
-                <label className={labelClass}>反弹放弃 %</label>
-                <input type="number" step="1" {...register('wick_rebound_abort_pct', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">须大于触发%；默认 35；0=关闭放弃（仅超时）</span>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass}>成交量确认模式</label>
+                  <select {...register('wick_volume_mode')} className={inputClass}>
+                    <option value="original">原方案（瞬时量全程）</option>
+                    <option value="instant_early">方案1（前段瞬时+后段真实）</option>
+                    <option value="real_only">方案3（纯真实累计量）</option>
+                  </select>
+                </div>
+                {wickVolumeMode === 'instant_early' && (
+                  <div>
+                    <label className={labelClass}>瞬时量生效进度上限（0~1）</label>
+                    <input type="number" step="0.05" {...register('wick_instant_active_until_pct', { valueAsNumber: true })} className={inputClass} />
+                    <span className="text-xs text-gray-600">默认 0.5（1m 即前 30 秒）</span>
+                  </div>
+                )}
+                <div>
+                  <label className={labelClass}>刺破等量窗口(秒)</label>
+                  <input type="number" step="1" {...register('wick_arm_wait_sec', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">&gt;0 本根内超时；0 换根才超时；-1 关闭武装</span>
+                </div>
+                <div>
+                  <label className={labelClass}>等量免回撤(秒)</label>
+                  <input type="number" step="0.5" {...register('wick_arm_retrace_grace_sec', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">武装时量不够，确认前 N 秒免回撤；默认 5</span>
+                </div>
+                <div>
+                  <label className={labelClass}>免回撤 tip_gap% 上限</label>
+                  <input type="number" step="0.1" {...register('wick_arm_grace_max_tip_gap_pct', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">grace 时离针尖过远不开；默认 2</span>
+                </div>
+                <div>
+                  <label className={labelClass}>开始放宽 progress</label>
+                  <input type="number" step="0.1" {...register('wick_vol_relax_progress_start', { valueAsNumber: true })} className={inputClass} />
+                </div>
+                <div>
+                  <label className={labelClass}>完全放宽 progress</label>
+                  <input type="number" step="0.1" {...register('wick_vol_relax_progress_full', { valueAsNumber: true })} className={inputClass} />
+                </div>
+                <div>
+                  <label className={labelClass}>放宽后量能倍数</label>
+                  <input type="number" step="0.1" {...register('wick_vol_relax_mult', { valueAsNumber: true })} className={inputClass} />
+                </div>
+                <div>
+                  <label className={labelClass}>同币额外冷却（秒）</label>
+                  <input type="number" {...register('wick_cooldown_sec', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">默认 0（仅同币同根 K 去重）</span>
+                </div>
               </div>
-              <div>
-                <label className={labelClass}>等反弹超时(秒)</label>
-                <input type="number" step="0.5" {...register('wick_rebound_wait_sec', { valueAsNumber: true })} className={inputClass} />
-                <span className="text-xs text-gray-600">针尖停住后再等反弹最久秒数（破新尖会重置计时）；默认 0=本根内不超时，换根未反弹仍超时</span>
-              </div>
-            </div>
+            </FormSection>
           </div>
         )}
 
@@ -834,6 +898,7 @@ export default function StrategyForm({
           </div>
         </div>
 
+        <FormSection title="过滤" defaultOpen={false} hint="TradFi / 下架 / 主流 / 费率">
         <div className="rounded-lg border border-amber-500/40 bg-amber-950/25 px-3 py-2.5 flex items-start gap-3">
           <label className="relative inline-flex items-center cursor-pointer mt-0.5 shrink-0">
             <input type="checkbox" {...register('exclude_tradefi')} className="sr-only peer" />
@@ -910,6 +975,8 @@ export default function StrategyForm({
           </div>
         )}
 
+        </FormSection>
+
         {!useCoinPool && (
           <div className="grid grid-cols-3 gap-3">
             <div>
@@ -985,9 +1052,7 @@ export default function StrategyForm({
           </div>
         )}
 
-        <div className="border-t border-gray-800 my-3" />
-
-        <h4 className="text-sm font-semibold text-gray-300">马丁格尔加仓设置</h4>
+        <FormSection title="马丁格尔加仓" hint="跌幅 / 倍数 / 层数">
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className={labelClass}>价格跌幅 (%)</label>
@@ -1085,10 +1150,9 @@ export default function StrategyForm({
             <span className="text-xs text-gray-600">默认关闭：加仓只看 WT；开启后加仓也需 15m+30m（可改）超级趋势同向</span>
           </div>
         )}
+        </FormSection>
 
-        <div className="border-t border-gray-800 my-3" />
-
-        <h4 className="text-sm font-semibold text-gray-300">出场设置</h4>
+        <FormSection title="出场与风控" hint="止盈 / 止损 / 杠杆">
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className={labelClass}>止盈 (%)</label>
@@ -1203,14 +1267,33 @@ export default function StrategyForm({
             <span className="text-xs text-gray-600">默认10x；首单开仓前自动调用币安 set_leverage</span>
           </div>
         </div>
+        </FormSection>
 
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="sticky bottom-0 -mx-4 -mb-4 px-4 py-3 bg-gray-900/95 border-t border-gray-800 flex justify-end gap-2 backdrop-blur-sm">
           <button type="button" onClick={onCancel} className="px-4 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded-lg">取消</button>
-          <button type="submit" className="px-4 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
-            {initialData ? '保存修改' : '创建策略'}
+          <button type="submit" disabled={submitting} className="px-4 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg font-medium">
+            {submitting ? '保存中…' : initialData ? '保存修改' : '创建策略'}
           </button>
         </div>
       </form>
+      <ConfirmDialog
+        open={pendingOverwrite}
+        title={`已有模板「${templateName.trim()}」`}
+        detail="要用当前表单参数覆盖吗？"
+        confirmLabel="覆盖"
+        busy={templateBusy}
+        onConfirm={() => saveCurrentAsTemplate(true)}
+        onCancel={() => setPendingOverwrite(false)}
+      />
+      <ConfirmDialog
+        open={pendingDelete != null}
+        title={`删除模板「${pendingDelete?.name ?? ''}」？`}
+        confirmLabel="删除"
+        danger
+        busy={templateBusy}
+        onConfirm={deleteTemplate}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
