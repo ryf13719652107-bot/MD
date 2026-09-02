@@ -166,7 +166,7 @@ class StrategyCreate(BaseModel):
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     trailing_tp_enabled: bool = Field(
         default=False,
-        description="开仓后窗口内达到止盈阈值则激活毫秒级移动追踪；超时回退限价止盈",
+        description="窗口内达止盈阈值则一直按移动止盈追踪；超时未触发立即回退限价",
     )
     trailing_tp_window_sec: float = Field(default=300.0, gt=0, le=3600)
     trailing_tp_drawdown_base_pct: float = Field(default=30.0, ge=0, le=100)

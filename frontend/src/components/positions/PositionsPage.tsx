@@ -182,12 +182,19 @@ function renderTrailingMode(
   }
   if (pick.state === 'armed') {
     const rem = pick.remaining_sec;
+    const overdue = rem != null && rem <= 0;
     return (
       <span
         className="text-amber-300 text-xs"
-        title="开仓窗口内等待激活，超时回退限价止盈"
+        title={
+          overdue
+            ? '窗口已过且未激活，即将回退限价止盈'
+            : '窗口内等待达阈值；触发后一直按移动止盈追踪'
+        }
       >
-        移动止盈{rem != null ? `(剩余${rem.toFixed(0)}s)` : ''}
+        {overdue
+          ? '移动止盈(窗口已过)'
+          : `移动止盈${rem != null ? `(剩余${rem.toFixed(0)}s)` : ''}`}
       </span>
     );
   }
@@ -205,9 +212,9 @@ function renderTrailingMode(
       </span>
     );
   }
-  // expired 或未知状态：回退限价止盈
+  // expired 或未知：超时未触发，已回退限价
   return (
-    <span className="text-gray-500 text-xs" title="窗口超时，回退限价止盈">
+    <span className="text-gray-500 text-xs" title="窗口内未触发，已回退限价止盈">
       限价止盈
     </span>
   );

@@ -1,8 +1,18 @@
 """交易记录去重：符号规范化与同腿合并。"""
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
-from app.services.position_manager import _collapse_phantom_l0_duplicates, _norm_sym
+import pytest
+
+from app.services.position_manager import (
+    _collapse_phantom_l0_duplicates,
+    _leg_close_trade_matches,
+    _norm_sym,
+    claim_open_position_close,
+    find_existing_leg_close_trade,
+)
 from app.services.sync_service import _norm_leg_symbol
 
 
@@ -59,3 +69,101 @@ def test_collapse_keeps_martingale_layers():
     kept = _collapse_phantom_l0_duplicates([l0, l1])
     assert len(kept) == 2
     assert l1.closed_at is None
+
+
+def test_leg_close_trade_matches_same_fill():
+    ts = datetime(2026, 9, 1, 17, 21, 16)
+    existing = SimpleNamespace(
+        symbol="HEMI/USDT:USDT",
+        side="short",
+        layer=0,
+        entry_time=ts,
+        entry_price=0.015754,
+        quantity=3536.0,
+    )
+    assert _leg_close_trade_matches(
+        existing,
+        symbol="HEMIUSDT",
+        side="short",
+        layer=0,
+        entry_time=ts,
+        entry_price=0.015754,
+    )
+    assert not _leg_close_trade_matches(
+        existing,
+        symbol="HEMIUSDT",
+        side="long",
+        layer=0,
+        entry_time=ts,
+        entry_price=0.015754,
+    )
+    later = ts + timedelta(seconds=20)
+    assert not _leg_close_trade_matches(
+        existing,
+        symbol="HEMIUSDT",
+        side="short",
+        layer=0,
+        entry_time=later,
+        entry_price=0.015754,
+    )
+    assert not _leg_close_trade_matches(
+        existing,
+        symbol="HEMIUSDT",
+        side="short",
+        layer=0,
+        entry_time=ts,
+        entry_price=0.015754,
+        quantity=10.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_open_position_close_uses_rowcount():
+    session = AsyncMock()
+    result = MagicMock()
+    result.rowcount = 1
+    session.execute = AsyncMock(return_value=result)
+    ts = datetime(2026, 9, 1, 17, 21, 39)
+    assert await claim_open_position_close(
+        session, 12, ts, symbol_norm="HEMIUSDT"
+    )
+    result.rowcount = 0
+    assert not await claim_open_position_close(session, 12, ts)
+    assert await claim_open_position_close(session, None, ts) is False
+
+
+@pytest.mark.asyncio
+async def test_find_existing_leg_close_trade_sees_session_new():
+    ts = datetime(2026, 9, 1, 16, 25, 11)
+    from app.models.trade import Trade
+
+    pending = Trade(
+        strategy_id=1,
+        account_id=10,
+        symbol="0GUSDT",
+        side="long",
+        quantity=197.0,
+        entry_price=0.2251,
+        exit_price=0.2278,
+        realized_pnl=0.5319,
+        pnl_pct=1.2,
+        entry_time=ts,
+        exit_time=ts + timedelta(seconds=81),
+        layer=0,
+        close_reason="take_profit",
+    )
+    session = AsyncMock()
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    session.execute = AsyncMock(return_value=empty)
+    session.new = [pending]
+    found = await find_existing_leg_close_trade(
+        session,
+        strategy_id=1,
+        symbol="0G/USDT:USDT",
+        side="long",
+        layer=0,
+        entry_time=ts,
+        entry_price=0.2251,
+    )
+    assert found is pending

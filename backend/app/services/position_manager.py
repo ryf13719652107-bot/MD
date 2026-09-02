@@ -2,10 +2,11 @@
 import asyncio
 import logging
 import math
-from datetime import datetime
+from contextlib import nullcontext
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Optional, Any
-from sqlalchemy import select, func, inspect as sa_inspect
+from sqlalchemy import select, func, inspect as sa_inspect, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.strategy import Strategy
 from ..models.position import Position
@@ -27,6 +28,7 @@ from .risk_manager import RiskManager
 from .log_service import strategy_log_service
 from .kline_stream import kline_stream_manager, _timeframe_ms
 from .backup_service import backup_trade
+from .account_concurrency import hold_account_sync
 from .order_times import exit_time_from_order, naive_beijing_from_ms_or_s
 from .tick_context import TickContext, SignalCandidate, OpenApiResult, exchange_legs_from_positions
 
@@ -96,6 +98,122 @@ def _collapse_phantom_l0_duplicates(
             keep.append(p)
     keep.extend(higher)
     return keep
+
+
+async def claim_open_position_close(
+    session: AsyncSession,
+    position_id: int | None,
+    closed_at: datetime,
+    *,
+    symbol_norm: str | None = None,
+) -> bool:
+    """原子占住未平仓行。返回 False 表示已被其它会话关闭，调用方不得再写 Trade。"""
+    if position_id is None:
+        return False
+    values: dict[str, Any] = {"closed_at": closed_at}
+    if symbol_norm:
+        values["symbol"] = symbol_norm
+    result = await session.execute(
+        update(Position)
+        .where(Position.id == int(position_id), Position.closed_at.is_(None))
+        .values(**values)
+    )
+    return int(getattr(result, "rowcount", 0) or 0) == 1
+
+
+def _leg_close_trade_matches(
+    trade,
+    *,
+    symbol: str,
+    side: str,
+    layer: int,
+    entry_time: datetime | None,
+    entry_price: float,
+    window_sec: float = 5.0,
+    price_tol: float = 0.002,
+    quantity: float | None = None,
+    qty_tol: float = 0.02,
+) -> bool:
+    """同策略同腿已有平仓记录（幽灵 L0 被分两次关掉时挡第二笔 Trade）。
+
+    窗口只取 5 秒：幽灵行 opened_at 几乎相同；接针 20 秒后再开再平不应被误判。
+    """
+    if trade is None or entry_time is None:
+        return False
+    if _norm_sym(getattr(trade, "symbol", "")) != _norm_sym(symbol):
+        return False
+    if (getattr(trade, "side", None) or "").lower() != (side or "").lower():
+        return False
+    if int(getattr(trade, "layer", 0) or 0) != int(layer or 0):
+        return False
+    other_ts = getattr(trade, "entry_time", None)
+    if other_ts is None:
+        return False
+    if abs((other_ts - entry_time).total_seconds()) > float(window_sec):
+        return False
+    ep = float(getattr(trade, "entry_price", 0) or 0)
+    px = float(entry_price or 0)
+    if px > 0 and ep > 0 and abs(ep - px) / px > float(price_tol):
+        return False
+    if quantity is not None:
+        q0 = float(getattr(trade, "quantity", 0) or 0)
+        q1 = float(quantity or 0)
+        if q0 > 0 and q1 > 0 and abs(q0 - q1) / max(q0, q1) > float(qty_tol):
+            return False
+    return True
+
+
+async def find_existing_leg_close_trade(
+    session: AsyncSession,
+    *,
+    strategy_id: int,
+    symbol: str,
+    side: str,
+    layer: int,
+    entry_time: datetime | None,
+    entry_price: float,
+    window_sec: float = 5.0,
+    price_tol: float = 0.002,
+    quantity: float | None = None,
+    qty_tol: float = 0.02,
+) -> Trade | None:
+    if not strategy_id or entry_time is None:
+        return None
+    side_l = (side or "").lower()
+    layer_i = int(layer or 0)
+    lo = entry_time - timedelta(seconds=window_sec)
+    hi = entry_time + timedelta(seconds=window_sec)
+    rows = list(
+        (
+            await session.execute(
+                select(Trade).where(
+                    Trade.strategy_id == int(strategy_id),
+                    Trade.side == side_l,
+                    Trade.layer == layer_i,
+                    Trade.entry_time >= lo,
+                    Trade.entry_time <= hi,
+                )
+            )
+        ).scalars().all()
+    )
+    for obj in list(getattr(session, "new", ()) or ()):
+        if isinstance(obj, Trade):
+            rows.append(obj)
+    for t in rows:
+        if _leg_close_trade_matches(
+            t,
+            symbol=symbol,
+            side=side_l,
+            layer=layer_i,
+            entry_time=entry_time,
+            entry_price=entry_price,
+            window_sec=window_sec,
+            price_tol=price_tol,
+            quantity=quantity,
+            qty_tol=qty_tol,
+        ):
+            return t
+    return None
 
 
 def _open_signal_log_suffix(signal_label: str, rsi: float) -> str:
@@ -204,13 +322,14 @@ def _vwap_from_my_trades(trades: list) -> float:
     return (num / den) if den > 0 else 0.0
 
 
-async def _resolve_market_close_exit(
-    client, symbol: str, order: dict, fallback: float = 0.0
+async def _resolve_market_fill_avg(
+    client, symbol: str, order: dict, fallback: float = 0.0, *, purpose: str = "fill"
 ) -> tuple[float, dict]:
-    """市价平仓出场价：必须尽量拿到真实市价成交均价再写库。
+    """市价成交均价：必须尽量拿到真实成交均价再写库。
 
     顺序：回报 average/avgPrice/cumQuote → 重查订单 → fetch_my_trades(orderId) VWAP
-    → ticker last。禁止用滞后 K 线 close（HEI：记 0.2041 vs 币安 0.221）。
+    → ticker last。禁止用滞后 K 线 close。
+    加仓缺 average 时若退回 K 线价，会把入场记高/记低，实盘亏、机器人显示盈（AKE）。
     """
     fill_order = order if isinstance(order, dict) else {}
     px = _order_fill_avg_price(fill_order, 0.0, allow_order_price=False)
@@ -248,7 +367,8 @@ async def _resolve_market_close_exit(
                             if isinstance(t, dict)
                         )
                         logger.info(
-                            "market close %s: exit avg %.8f from my_trades orderId=%s",
+                            "market %s %s: fill avg %.8f from my_trades orderId=%s",
+                            purpose,
                             symbol,
                             px,
                             oid,
@@ -256,7 +376,8 @@ async def _resolve_market_close_exit(
                         return px, merged
                 except Exception as e:
                     logger.debug(
-                        "market close %s fetch_my_trades orderId=%s: %s",
+                        "market %s %s fetch_my_trades orderId=%s: %s",
+                        purpose,
                         symbol,
                         oid,
                         e,
@@ -265,8 +386,9 @@ async def _resolve_market_close_exit(
     live = await _live_last_price(client, symbol, 0.0)
     if live > 0:
         logger.warning(
-            "market close %s: no fill avg on order %s, using live ticker %.8f "
+            "market %s %s: no fill avg on order %s, using live ticker %.8f "
             "(not kline fallback)",
+            purpose,
             symbol,
             oid or "?",
             live,
@@ -277,6 +399,15 @@ async def _resolve_market_close_exit(
     except (TypeError, ValueError):
         fb = 0.0
     return fb, fill_order
+
+
+async def _resolve_market_close_exit(
+    client, symbol: str, order: dict, fallback: float = 0.0
+) -> tuple[float, dict]:
+    """市价平仓出场价，复用成交均价解析。"""
+    return await _resolve_market_fill_avg(
+        client, symbol, order, fallback, purpose="close"
+    )
 
 
 def _is_order_missing_error(exc: BaseException) -> bool:
@@ -1571,7 +1702,7 @@ class PositionManager:
         """市价成交后挂止盈限价（不计入接针 open_api_ms）。
 
         trailing_tp_enabled=True 时跳过挂限价单：改由 wick_spike_runner 实时循环
-        在窗口内激活移动追踪；超时则由 _ensure_tp_limit_orders 回退挂单。
+        窗口内达阈值后一直按移动止盈追踪；超时未触发立即回退挂限价。
         开关关闭时此函数行为不变（原限价止盈逻辑零影响）。
         """
         if not strategy.take_profit_limit_order or result.tp_price <= 0:
@@ -1664,19 +1795,11 @@ class PositionManager:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
             )
-            # 先不回退信号价；缺均价时再查一次订单
-            avg_price = _order_fill_avg_price(order, 0.0)
-            if avg_price <= 0:
-                oid = str(order.get("id") or "")
-                if oid:
-                    try:
-                        order = await _fetch_order(auth_binance, oid, symbol)
-                        avg_price = _order_fill_avg_price(order, 0.0)
-                    except Exception as e:
-                        logger.warning(
-                            "Strategy %d: %s fetch_order for fill avg failed: %s",
-                            strategy_id, symbol, e,
-                        )
+            avg_price, fill_order = await _resolve_market_fill_avg(
+                auth_binance, symbol, order, 0.0, purpose="open"
+            )
+            if isinstance(fill_order, dict) and fill_order:
+                order = fill_order
             if avg_price <= 0:
                 avg_price = current_price
                 logger.warning(
@@ -1786,7 +1909,11 @@ class PositionManager:
             order = await auth_binance.create_market_order(
                 symbol, side, base_qty, position_side=ps,
             )
-            avg_price = _order_fill_avg_price(order, current_price)
+            avg_price, fill_order = await _resolve_market_fill_avg(
+                auth_binance, symbol, order, 0.0, purpose="open"
+            )
+            if isinstance(fill_order, dict) and fill_order:
+                order = fill_order
             if avg_price <= 0:
                 avg_price = current_price
                 logger.warning(
@@ -1858,6 +1985,35 @@ class PositionManager:
                 ).scalars().all()
             )
             same_side = [p for p in existing if (p.side or "").lower() == side]
+            if not same_side:
+                # 同账户另一策略已占同向腿：禁止再插全量仓（双向持仓下反向腿不冲突）
+                acc_id = int(getattr(strategy, "account_id", 0) or 0)
+                if acc_id > 0:
+                    peer_rows = list(
+                        (
+                            await session.execute(
+                                select(Position).where(
+                                    Position.account_id == acc_id,
+                                    Position.closed_at.is_(None),
+                                )
+                            )
+                        ).scalars().all()
+                    )
+                    if any(
+                        _norm_sym(p.symbol) == symbol
+                        and (p.side or "").lower() == side
+                        and int(p.strategy_id or 0) != int(strategy_id)
+                        for p in peer_rows
+                    ):
+                        logger.warning(
+                            "Strategy %d: execute_open_db skipped — %s %s "
+                            "already held by another strategy on account %d",
+                            strategy_id,
+                            symbol,
+                            side,
+                            acc_id,
+                        )
+                        return
             if same_side:
                 # 首仓写库不应碰到马丁高层；若已有 layer>0 说明状态异常，禁止再插/覆盖
                 if any(int(p.layer or 0) > 0 for p in same_side):
@@ -1886,12 +2042,14 @@ class PositionManager:
                     primary.exchange_order_id = str(oid)
                 if result.tp_limit_order_id:
                     primary.tp_limit_order_id = result.tp_limit_order_id
-                # trailing_tp：merge 路径也设置 armed（仅 wick_spike）
+                # trailing_tp：merge 只补未接管的仓；已 armed/active 禁止打回 armed
                 if getattr(strategy, "trailing_tp_enabled", False) and (
                     strategy.signal_source or ""
                 ) == "wick_spike":
-                    primary.trailing_tp_state = "armed"
-                    primary.trailing_tp_peak_pct = 0.0
+                    cur = (primary.trailing_tp_state or "").strip()
+                    if cur not in ("armed", "active"):
+                        primary.trailing_tp_state = "armed"
+                        primary.trailing_tp_peak_pct = 0.0
                 await session.flush()
                 logger.warning(
                     "Strategy %d: open DB merge into existing %s %s "
@@ -1931,6 +2089,18 @@ class PositionManager:
                 pos.trailing_tp_peak_pct = 0.0
             session.add(pos)
             await session.flush()
+            siblings = [
+                p
+                for p in (
+                    await session.execute(
+                        self._open_positions_stmt(strategy_id, symbol)
+                    )
+                ).scalars().all()
+                if (p.side or "").lower() == side and int(p.layer or 0) == 0
+            ]
+            if len(siblings) > 1:
+                _collapse_phantom_l0_duplicates(siblings)
+                await session.flush()
         except Exception as e:
             logger.critical(
                 "Strategy %d: %s order filled on exchange but DB record failed: %s",
@@ -2671,20 +2841,89 @@ class PositionManager:
         logger.info("Strategy %d: closed %s due to %s", strategy_id, sym_norm, close_reason)
         detected_at = now_beijing()
         exit_time = exit_time_from_order(fill_order, fallback=detected_at)
+        original_rows = list(open_positions)
         # 写 Trade 前再折叠一次，兜住 manage/TP/止损等所有平仓入口
         open_positions = _collapse_phantom_l0_duplicates(
-            list(open_positions), now=exit_time
+            original_rows, now=exit_time
         )
-        # 只扣本策略实际入账平仓量，保留同向手动仓残余
-        bot_close_qty = sum(
-            float(p.quantity or 0)
-            for p in open_positions
-            if getattr(p, "closed_at", None) is None
+        acc_id = int(getattr(strategy, "account_id", 0) or 0)
+        kept_ids = {
+            int(p.id) for p in open_positions if getattr(p, "id", None) is not None
+        }
+        trades_to_backup: list[Trade] = []
+        # 移动止盈：市价已在上方发出，写库不再等账户锁，避免拖住毫秒追踪
+        _acc_lock = (
+            nullcontext()
+            if close_reason == "移动止盈"
+            else hold_account_sync(acc_id)
         )
+        async with _acc_lock:
+            for p in original_rows:
+                pid = getattr(p, "id", None)
+                if pid is None:
+                    continue
+                if int(pid) in kept_ids and getattr(p, "closed_at", None) is None:
+                    continue
+                # 幽灵 L0：只占行、不写 Trade
+                if getattr(p, "closed_at", None) is not None:
+                    await claim_open_position_close(
+                        session, int(pid), exit_time, symbol_norm=sym_norm
+                    )
+            for p in open_positions:
+                if p.closed_at is not None:
+                    continue
+                pid = getattr(p, "id", None)
+                if pid is not None:
+                    won = await claim_open_position_close(
+                        session, int(pid), exit_time, symbol_norm=sym_norm
+                    )
+                    if not won:
+                        logger.warning(
+                            "Strategy %d: skip Trade for %s pos=%s — already claimed",
+                            strategy_id,
+                            sym_norm,
+                            pid,
+                        )
+                        continue
+                p.closed_at = exit_time
+                p.symbol = sym_norm
+                entry_ts = p.opened_at or exit_time
+                dup = await find_existing_leg_close_trade(
+                    session,
+                    strategy_id=strategy_id,
+                    symbol=sym_norm,
+                    side=p.side,
+                    layer=int(p.layer or 0),
+                    entry_time=entry_ts,
+                    entry_price=float(p.entry_price or 0),
+                    quantity=float(p.quantity or 0),
+                )
+                if dup is not None:
+                    logger.warning(
+                        "Strategy %d: skip duplicate Trade for %s %s layer=%s "
+                        "(existing trade id=%s)",
+                        strategy_id,
+                        sym_norm,
+                        p.side,
+                        p.layer,
+                        getattr(dup, "id", None),
+                    )
+                    continue
+                exit_pnl = (exit_price - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - exit_price) * p.quantity
+                exit_pnl_pct = (exit_price - p.entry_price) / p.entry_price * 100 if p.side == "long" else (p.entry_price - exit_price) / p.entry_price * 100
+                trade = Trade(
+                    strategy_id=strategy_id, account_id=strategy.account_id, symbol=sym_norm,
+                    side=p.side, quantity=p.quantity, entry_price=p.entry_price, exit_price=exit_price,
+                    realized_pnl=exit_pnl, pnl_pct=exit_pnl_pct,
+                    entry_time=entry_ts, exit_time=exit_time, layer=p.layer, close_reason=close_reason,
+                )
+                session.add(trade)
+                trades_to_backup.append(trade)
+        # 只按实际写入的 Trade 扣账户流，避免占行失败/去重时重复扣腿
         try:
             from .account_position_stream import account_position_stream
 
-            acc_id = int(getattr(strategy, "account_id", 0) or 0)
+            bot_close_qty = sum(float(t.quantity or 0) for t in trades_to_backup)
             if acc_id > 0 and bot_close_qty > 0:
                 account_position_stream.apply_local_close(
                     acc_id, symbol, pos_side, bot_close_qty
@@ -2695,22 +2934,6 @@ class PositionManager:
                 strategy_id,
                 exc_info=True,
             )
-        trades_to_backup: list[Trade] = []
-        for p in open_positions:
-            if p.closed_at is not None:
-                continue
-            p.closed_at = exit_time
-            p.symbol = sym_norm
-            exit_pnl = (exit_price - p.entry_price) * p.quantity if p.side == "long" else (p.entry_price - exit_price) * p.quantity
-            exit_pnl_pct = (exit_price - p.entry_price) / p.entry_price * 100 if p.side == "long" else (p.entry_price - exit_price) / p.entry_price * 100
-            trade = Trade(
-                strategy_id=strategy_id, account_id=strategy.account_id, symbol=sym_norm,
-                side=p.side, quantity=p.quantity, entry_price=p.entry_price, exit_price=exit_price,
-                realized_pnl=exit_pnl, pnl_pct=exit_pnl_pct,
-                entry_time=p.opened_at or exit_time, exit_time=exit_time, layer=p.layer, close_reason=close_reason,
-            )
-            session.add(trade)
-            trades_to_backup.append(trade)
         if close_reason == "single_symbol_stop_loss":
             sym_norm = _norm_sym(symbol)
             exists = (
@@ -2860,10 +3083,25 @@ class PositionManager:
             order = await auth_binance.create_market_order(
                 symbol, side, result.next_quantity, position_side=ps,
             )
-            new_avg = _order_fill_avg_price(order, 0.0, allow_order_price=False)
+            # 与平仓同一套：重查订单 / 成交明细 VWAP / ticker。
+            # 禁止用 K 线 close：插针时 close 常停在高位，加仓市价已更差，
+            # 会把入场记高（空）/记低（多），机器人盈、实盘亏。
+            new_avg, fill_order = await _resolve_market_fill_avg(
+                auth_binance, symbol, order, 0.0, purpose="add"
+            )
+            if isinstance(fill_order, dict) and fill_order:
+                order = fill_order
             if new_avg <= 0:
-                new_avg = current_price
-                logger.warning("Strategy %d: %s martingale order filled but no average/price in response, using kline close", strategy_id, symbol)
+                new_avg = float(current_price or 0)
+                logger.error(
+                    "Strategy %d: %s martingale fill avg missing after refetch — "
+                    "last resort kline/signal px=%.8f",
+                    strategy_id, symbol, new_avg,
+                )
+                strategy_log_service.error(
+                    strategy_id,
+                    f"{symbol} 马丁加仓已成交但未解析到成交均价 — 请核对交易所",
+                )
             filled_qty = float(order.get("filled") or order.get("amount") or result.next_quantity)
         except Exception as e:
             from ..services.strategy_flags import skip_min_qty_exceeds_enabled
@@ -2878,6 +3116,7 @@ class PositionManager:
             return
 
         # Step 2: record in DB
+        inherit_trail = None
         try:
             new_total = total_qty + filled_qty
             new_avg_entry = (avg_entry * total_qty + new_avg * filled_qty) / new_total
@@ -2889,30 +3128,40 @@ class PositionManager:
                 entry_price=new_avg, mark_price=current_price, layer=result.next_layer,
                 take_profit_price=tp_price, exchange_order_id=order.get("id", ""),
             )
-            # trailing_tp：加仓=超过5分钟，移动止盈只对首单有效；
-            # 加仓后整体持仓改用限价止盈，清理 trailing 状态（含内存，避免抢先平仓）
+            # trailing_tp：窗口内已激活则加仓后继续追踪，不改回限价。
+            # 新层继承当前态；内存入场价改成加仓后均价，峰值按峰值价重算。
             if getattr(strategy, "trailing_tp_enabled", False) and (
                 strategy.signal_source or ""
             ) == "wick_spike":
-                for p in open_positions:
-                    if (p.trailing_tp_state or "") in ("armed", "active"):
-                        p.trailing_tp_state = "expired"
-                pos.trailing_tp_state = "expired"
-                try:
-                    from .wick_spike_runner import wick_spike_runner as _runner
-                    sym_key = _norm_sym(symbol)
-                    buckets = _runner._trailing_mems.get(strategy_id)
-                    if buckets is not None:
-                        buckets.pop(sym_key, None)
-                    inflight = _runner._trailing_close_inflight.get(strategy_id)
-                    if inflight is not None:
-                        inflight.discard(sym_key)
-                except Exception:
-                    pass
-                strategy_log_service.info(
-                    strategy_id,
-                    f"{symbol} 加仓后 trailing_tp 置 expired — 整体改用限价止盈",
-                )
+                states = [(p.trailing_tp_state or "") for p in open_positions]
+                if "active" in states:
+                    inherit_trail = "active"
+                elif "armed" in states:
+                    inherit_trail = "armed"
+                if inherit_trail:
+                    pos.trailing_tp_state = inherit_trail
+                    try:
+                        from .trailing_tp_engine import profit_pct as _trail_pnl
+                        from .wick_spike_runner import wick_spike_runner as _runner
+                        sym_key = _norm_sym(symbol)
+                        mems = (
+                            (_runner._trailing_mems.get(strategy_id) or {})
+                            .get(sym_key)
+                            or []
+                        )
+                        for m in mems:
+                            m.entry_price = float(new_avg_entry)
+                            if m.peak_price > 0:
+                                m.peak_pct = _trail_pnl(
+                                    m.side, m.entry_price, m.peak_price
+                                )
+                    except Exception:
+                        pass
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{symbol} 加仓后继续移动止盈 — 均价 {new_avg_entry:.6g} "
+                        f"状态 {inherit_trail}",
+                    )
             session.add(pos)
             await session.flush()
         except Exception as e:
@@ -2921,7 +3170,9 @@ class PositionManager:
             return
 
         # Step 3: 确认撤销旧止盈后才清 ID；撤不干净则禁止新挂，避免币安重复限价
+        # 移动止盈仍接管时只撤残留限价，不新挂（避免与追踪双通道）
         old_tp_cleared = True
+        skip_new_tp_limit = inherit_trail in ("armed", "active")
         if strategy.take_profit_limit_order:
             for p in open_positions:
                 oid = (p.tp_limit_order_id or "").strip()
@@ -2939,7 +3190,7 @@ class PositionManager:
                     )
 
         # Step 4: place new combined TP order (best-effort)
-        if strategy.take_profit_limit_order:
+        if strategy.take_profit_limit_order and not skip_new_tp_limit:
             if not old_tp_cleared:
                 strategy_log_service.warning(
                     strategy_id,

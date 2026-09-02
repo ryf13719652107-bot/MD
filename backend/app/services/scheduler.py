@@ -43,7 +43,7 @@ from .position_manager import (
     strategy_signal_snapshot,
 )
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
-from .account_concurrency import account_order_sem, account_sync_lock
+from .account_concurrency import account_order_sem, hold_account_sync
 from .strategy_concurrency import clear_strategy_symbol_locks, hold_strategy_symbol
 from .backup_service import backup_trade
 from .order_times import exit_time_from_order
@@ -386,8 +386,7 @@ class StrategyScheduler:
                 await self._execute_strategy_impl(strategy_id, mid_candle=True)
 
     async def _sync_account_background(self, auth_binance, account_id: int):
-        lock = account_sync_lock(account_id)
-        async with lock:
+        async with hold_account_sync(account_id):
             try:
                 await self._syncer.sync(auth_binance, account_id, auth_binance)
             except Exception as e:
@@ -657,7 +656,7 @@ class StrategyScheduler:
             ]
 
             if orphan_prefetched and auth_binance:
-                async with account_sync_lock(sync_account_id):
+                async with hold_account_sync(sync_account_id):
                     peer_rows = (
                         await session.execute(
                             select(Strategy).where(
@@ -907,7 +906,7 @@ class StrategyScheduler:
             if mid_candle and auth_binance:
                 try:
                     # 与后台 PositionSync 共用账户锁，避免 TP 写 Trade 与 sync 双写
-                    async with account_sync_lock(sync_account_id):
+                    async with hold_account_sync(sync_account_id):
                         await self._position_mgr.check_tp_fills(
                             session, strategy, auth_binance, 0
                         )
@@ -1088,31 +1087,33 @@ class StrategyScheduler:
                     or ""
                 )
                 managed_ok = False
-                async with hold_strategy_symbol(strategy_id, sym_key, leg_side):
-                    for attempt in range(3):
-                        try:
-                            await self._position_mgr.manage_symbol(
-                                session, strategy, symbol, auth_binance, public_binance,
-                                open_positions, total_margin, leverage, tick_ctx,
-                            )
-                            await session.commit()
-                            managed_ok = True
-                            break
-                        except Exception as e:
-                            msg = str(e).lower()
-                            locked = "database is locked" in msg or "database locked" in msg
-                            strategy = await _rollback_and_refresh_strategy(session, strategy)
-                            if locked and attempt < 2:
-                                logger.warning(
-                                    "Strategy %d: manage %s database locked, retry %d/3",
-                                    strategy_id, symbol, attempt + 2,
+                # 必须先账户锁再腿锁，与接针写库/check_tp 一致，避免 AB-BA 死锁
+                async with hold_account_sync(sync_account_id):
+                    async with hold_strategy_symbol(strategy_id, sym_key, leg_side):
+                        for attempt in range(3):
+                            try:
+                                await self._position_mgr.manage_symbol(
+                                    session, strategy, symbol, auth_binance, public_binance,
+                                    open_positions, total_margin, leverage, tick_ctx,
                                 )
-                                await asyncio.sleep(0.35 * (attempt + 1))
-                                continue
-                            logger.exception(
-                                "Strategy %d: manage %s failed: %s", strategy_id, symbol, e
-                            )
-                            break
+                                await session.commit()
+                                managed_ok = True
+                                break
+                            except Exception as e:
+                                msg = str(e).lower()
+                                locked = "database is locked" in msg or "database locked" in msg
+                                strategy = await _rollback_and_refresh_strategy(session, strategy)
+                                if locked and attempt < 2:
+                                    logger.warning(
+                                        "Strategy %d: manage %s database locked, retry %d/3",
+                                        strategy_id, symbol, attempt + 2,
+                                    )
+                                    await asyncio.sleep(0.35 * (attempt + 1))
+                                    continue
+                                logger.exception(
+                                    "Strategy %d: manage %s failed: %s", strategy_id, symbol, e
+                                )
+                                break
                 if not managed_ok:
                     continue
 

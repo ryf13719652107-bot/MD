@@ -1216,7 +1216,7 @@ export default function StrategyForm({
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium text-emerald-100/95">时间移动止盈</div>
             <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-              开仓后5分钟内达到止盈阈值则激活毫秒级移动追踪，超时回退限价止盈；开关关闭按原逻辑运行。
+              设定时间内达到止盈阈值则一直按移动止盈追踪；超时未触发立即回退限价。开关关闭按原限价逻辑运行。
             </p>
             {trailingTpEnabled && (
               <div className="mt-2 grid grid-cols-3 gap-3">

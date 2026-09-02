@@ -45,7 +45,7 @@ from .price_stream import price_stream_manager
 from .account_position_stream import account_position_stream
 from .position_manager import PositionManager, _norm_sym
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
-from .account_concurrency import account_order_sem
+from .account_concurrency import account_order_sem, hold_account_sync
 from .strategy_concurrency import hold_strategy_symbol
 from .leverage_prewarm import prewarm_symbols_leverage
 from .wick_spike_engine import (
@@ -596,10 +596,24 @@ class WickSpikeRunner:
                     )
 
                     # --- 时间移动止盈：毫秒级追踪（开关关闭则 params=None 跳过，零影响）---
-                    # 价格有变化或武装/反弹 force_retry 时执行；armed 超时也在此检查
-                    if price > 0 and (price_changed or arm_active):
+                    # armed 必须用现价周期检查（激活/窗口超时），不能只等新成交：
+                    # 开仓后价格不再跳 seq 时，会一直停在 armed 并显示剩余负数、也不挂限价。
+                    armed_needs = self._trailing_armed_needs_tick(
+                        strategy_id, sym_key
+                    )
+                    trail_px = price
+                    if trail_px <= 0 and armed_needs:
+                        k_peek = kline_stream_manager.peek(public, sym, timeframe)
+                        if k_peek:
+                            try:
+                                trail_px = float(k_peek[-1][4])
+                            except (TypeError, ValueError, IndexError):
+                                trail_px = 0.0
+                    if trail_px > 0 and (
+                        price_changed or arm_active or armed_needs
+                    ):
                         self._tick_trailing(
-                            strategy_id, sym_key, price, now_ms
+                            strategy_id, sym_key, trail_px, now_ms
                         )
 
                     if not self._position_mgr._passes_new_entry_filters(
@@ -1241,6 +1255,19 @@ class WickSpikeRunner:
             "wick_spike trailing_tp inject strategy=%d %s — 开仓后立即追踪（零空窗）",
             strategy_id, sym_key,
         )
+        # 用成交流最后价立刻判一次，避免「已够止盈阈值但没新成交」空等整段窗口
+        try:
+            got = price_stream_manager.get(sym_key)
+            px = float(got[0]) if got else 0.0
+            if px > 0:
+                self._tick_trailing(strategy_id, sym_key, px, now_ms)
+        except Exception:
+            pass
+
+    def _trailing_armed_needs_tick(self, strategy_id: int, sym_key: str) -> bool:
+        """armed 即使没有新成交也要 tick：窗内用现价激活，到点立即回退限价。"""
+        mems = (self._trailing_mems.get(strategy_id) or {}).get(sym_key) or []
+        return any(m.state == STATE_ARMED for m in mems)
 
     def get_trailing_status(
         self, strategy_id: int, sym_key: str
@@ -1367,10 +1394,8 @@ class WickSpikeRunner:
                     rows = list(
                         (
                             await session.execute(
-                                select(Position).where(
-                                    Position.strategy_id == strategy_id,
-                                    Position.closed_at.is_(None),
-                                    Position.symbol == sym_key,
+                                self._position_mgr._open_positions_stmt(
+                                    strategy_id, sym_key
                                 )
                             )
                         ).scalars().all()
@@ -1384,11 +1409,16 @@ class WickSpikeRunner:
                     ]
                     if not oids:
                         for p in rows:
-                            p.trailing_tp_state = STATE_ACTIVE
+                            if (p.trailing_tp_state or "").strip() == STATE_ARMED:
+                                p.trailing_tp_state = STATE_ACTIVE
                         await session.commit()
                         return
                     auth = self._trailing_auth.get(strategy_id)
                     if auth is None:
+                        for p in rows:
+                            if (p.trailing_tp_state or "").strip() == STATE_ARMED:
+                                p.trailing_tp_state = STATE_ACTIVE
+                        await session.commit()
                         return
                     await self._position_mgr._cancel_bot_tp_order_ids(
                         auth, sym_key, set(oids), strategy_id, keep_id=""
@@ -1443,22 +1473,39 @@ class WickSpikeRunner:
                     open_positions = list(
                         (
                             await session.execute(
-                                select(Position).where(
-                                    Position.strategy_id == strategy_id,
-                                    Position.closed_at.is_(None),
-                                    Position.symbol == sym_key,
+                                self._position_mgr._open_positions_stmt(
+                                    strategy_id, sym_key
                                 )
                             )
                         ).scalars().all()
                     )
                     if not open_positions:
                         return
+                    # 只把仍 armed 的改 expired；已 active 的继续追踪，禁止误挂限价
+                    any_active = False
+                    any_armed = False
                     for p in open_positions:
-                        p.trailing_tp_state = STATE_EXPIRED
+                        st = (p.trailing_tp_state or "").strip()
+                        if st == STATE_ACTIVE:
+                            any_active = True
+                        elif st == STATE_ARMED:
+                            any_armed = True
+                            p.trailing_tp_state = STATE_EXPIRED
+                    if any_active:
+                        await session.commit()
+                        if any_armed:
+                            logger.info(
+                                "wick_spike trailing_tp expire skip limit "
+                                "strategy=%d %s — sibling still active",
+                                strategy_id,
+                                sym_key,
+                            )
+                        return
                     await session.flush()
 
                     auth = self._trailing_auth.get(strategy_id)
                     if auth is None:
+                        # state 已 expired，下次 manage 会挂限价
                         await session.commit()
                         return
                     from .martingale_engine import MartingaleEngine
@@ -1495,6 +1542,7 @@ class WickSpikeRunner:
                 strategy_id,
                 sym_key,
             )
+            await asyncio.sleep(1.0)
             self._fire_bg(
                 self._post_trailing_expire_async(strategy_id, sym_key, mem)
             )
@@ -1502,6 +1550,11 @@ class WickSpikeRunner:
             logger.error(
                 "wick_spike trailing_tp expire strategy=%d %s: %s",
                 strategy_id, sym_key, e,
+            )
+            # mem 已 expired，失败则不再发 window_expired；必须重试才能挂上限价
+            await asyncio.sleep(1.0)
+            self._fire_bg(
+                self._post_trailing_expire_async(strategy_id, sym_key, mem)
             )
 
     async def _post_trailing_close_async(
@@ -1519,6 +1572,7 @@ class WickSpikeRunner:
         closed_ok = False
         pos_side = (mem.side or "").lower()
         try:
+            # 只拿腿锁：不要等账户同步锁，否则 manage/sync 会拖住毫秒追踪市价
             async with hold_strategy_symbol(
                 strategy_id, sym_key, pos_side, timeout=_TRAILING_LOCK_WAIT_SEC
             ):
@@ -1527,17 +1581,17 @@ class WickSpikeRunner:
                     if db_strategy is None or db_strategy.status != "running":
                         closed_ok = True
                         return
-                    open_positions = list(
-                        (
+                    open_positions = [
+                        p
+                        for p in (
                             await session.execute(
-                                select(Position).where(
-                                    Position.strategy_id == strategy_id,
-                                    Position.closed_at.is_(None),
-                                    Position.symbol == sym_key,
+                                self._position_mgr._open_positions_stmt(
+                                    strategy_id, sym_key
                                 )
                             )
                         ).scalars().all()
-                    )
+                        if (p.side or "").lower() == pos_side
+                    ]
                     if not open_positions:
                         closed_ok = True
                         return
@@ -1896,9 +1950,19 @@ class WickSpikeRunner:
                         db_strategy.last_signal = signal.value
                         db_strategy.last_signal_at = now_beijing()
                         db_strategy.last_rsi = round(vol_ratio, 2)
-                        await self._position_mgr.execute_open_db(
-                            session, db_strategy, api_res
+                        open_side = (
+                            (api_res.position_side or db_strategy.direction or "")
+                            .lower()
                         )
+                        async with hold_account_sync(
+                            int(db_strategy.account_id or 0)
+                        ):
+                            async with hold_strategy_symbol(
+                                strategy_id, _norm_sym(symbol), open_side
+                            ):
+                                await self._position_mgr.execute_open_db(
+                                    session, db_strategy, api_res
+                                )
                         # 开仓成功立即推入 trailing mems，消除 15s 空窗
                         # （不等 _refresh_context，下一个 tick 即开始追踪）
                         await self._inject_trailing_mem_after_open(
@@ -1943,9 +2007,19 @@ class WickSpikeRunner:
                 async with async_session() as session:
                     db_strategy = await session.get(Strategy, strategy_id)
                     if db_strategy is not None:
-                        recovered = await self._position_mgr.recover_bot_open_after_db_fail(
-                            session, db_strategy, api_res, auth
+                        open_side = (
+                            (api_res.position_side or db_strategy.direction or "")
+                            .lower()
                         )
+                        async with hold_account_sync(
+                            int(db_strategy.account_id or 0)
+                        ):
+                            async with hold_strategy_symbol(
+                                strategy_id, _norm_sym(symbol), open_side
+                            ):
+                                recovered = await self._position_mgr.recover_bot_open_after_db_fail(
+                                    session, db_strategy, api_res, auth
+                                )
                         await session.commit()
                         if recovered:
                             logger.warning(

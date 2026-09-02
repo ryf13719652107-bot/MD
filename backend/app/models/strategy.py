@@ -94,7 +94,7 @@ class Strategy(Base):
     )
 
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
-    # 开仓后 window_sec 内达到 take_profit_pct → 激活毫秒级追踪；超时则回退限价止盈
+    # 窗口内达 take_profit_pct 则一直追踪；超时未触发立即回退限价
     trailing_tp_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0"
     )

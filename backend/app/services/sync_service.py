@@ -11,6 +11,7 @@ from ..config import now_beijing
 from ..services.binance_service import BinanceService
 from ..services.backup_service import backup_trade
 from ..services.order_times import exit_time_from_order
+from ..services.account_concurrency import hold_account_sync
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,29 @@ class PositionSyncService:
                 )
                 local_positions = list(result.scalars().all())
 
+                # 空列表保护：本地有 open 仓位但交易所返回空，可能是 API 异常
+                # （IP 白名单/权限/限频）。用 fetch_balance 二次确认，余额也拉不到则跳过，
+                # 避免把仍在交易所的仓位误判为已平仓（"同步平仓"）。
+                if not exchange_positions and local_positions:
+                    try:
+                        balance = await auth_binance.fetch_balance()
+                    except Exception:
+                        logger.warning(
+                            "Sync: fetch_positions empty + fetch_balance failed — "
+                            "skip sync (possible API error) account=%d",
+                            account_id,
+                        )
+                        return
+                    from .exchange_factory import extract_margin_balance
+
+                    if extract_margin_balance(auth_binance, balance) <= 0:
+                        logger.warning(
+                            "Sync: fetch_positions empty + margin missing — "
+                            "skip sync (possible API error) account=%d",
+                            account_id,
+                        )
+                        return
+
                 exchange_map: dict[tuple[str, str], dict] = {}
                 for ep in exchange_positions:
                     if float(ep.get("contracts", 0) or 0) <= 0:
@@ -139,11 +163,28 @@ class PositionSyncService:
                         continue
 
                     # 与 check_tp 一致：折叠符号竞态重复 L0，只对真实层写 Trade
-                    from .position_manager import _collapse_phantom_l0_duplicates
+                    from .position_manager import (
+                        _collapse_phantom_l0_duplicates,
+                        claim_open_position_close,
+                        find_existing_leg_close_trade,
+                    )
 
-                    legs = _collapse_phantom_l0_duplicates(legs, now=sync_now)
+                    original_legs = list(legs)
+                    legs = _collapse_phantom_l0_duplicates(original_legs, now=sync_now)
+                    kept_ids = {
+                        int(lp.id)
+                        for lp in legs
+                        if lp.id is not None and lp.closed_at is None
+                    }
                     legs = [lp for lp in legs if lp.closed_at is None]
                     if not legs:
+                        async with hold_account_sync(account_id):
+                            for lp in original_legs:
+                                if lp.id is None or lp.closed_at is None:
+                                    continue
+                                await claim_open_position_close(
+                                    session, int(lp.id), sync_now, symbol_norm=sym_key
+                                )
                         continue
 
                     order_ids: list[str] = []
@@ -171,41 +212,81 @@ class PositionSyncService:
                         close_reason = "sync"
 
                     closed_n = 0
-                    for lp in legs:
-                        if lp.closed_at is not None:
-                            continue
-                        exit_pnl = (
-                            (exit_price - lp.entry_price) * lp.quantity
-                            if lp.side == "long"
-                            else (lp.entry_price - exit_price) * lp.quantity
-                        )
-                        exit_pnl_pct = (
-                            ((exit_price - lp.entry_price) / lp.entry_price * 100)
-                            if lp.side == "long" and lp.entry_price > 0
-                            else ((lp.entry_price - exit_price) / lp.entry_price * 100)
-                            if lp.entry_price > 0
-                            else 0
-                        )
-                        trade = Trade(
-                            strategy_id=lp.strategy_id,
-                            account_id=lp.account_id,
-                            symbol=sym_key,
-                            side=lp.side,
-                            quantity=lp.quantity,
-                            entry_price=lp.entry_price,
-                            exit_price=exit_price,
-                            realized_pnl=exit_pnl,
-                            pnl_pct=round(exit_pnl_pct, 2),
-                            entry_time=lp.opened_at or sync_now,
-                            exit_time=exit_time,
-                            layer=lp.layer,
-                            close_reason=close_reason,
-                        )
-                        session.add(trade)
-                        trades_to_backup.append(trade)
-                        lp.closed_at = exit_time
-                        lp.symbol = sym_key
-                        closed_n += 1
+                    async with hold_account_sync(account_id):
+                        for lp in original_legs:
+                            if lp.id is None or int(lp.id) in kept_ids:
+                                continue
+                            if lp.closed_at is not None:
+                                await claim_open_position_close(
+                                    session, int(lp.id), exit_time, symbol_norm=sym_key
+                                )
+                        for lp in legs:
+                            if lp.closed_at is not None:
+                                continue
+                            if lp.id is not None:
+                                won = await claim_open_position_close(
+                                    session, int(lp.id), exit_time, symbol_norm=sym_key
+                                )
+                                if not won:
+                                    logger.warning(
+                                        "Sync: skip Trade for %s %s pos=%s — already claimed",
+                                        sym_key,
+                                        side_low,
+                                        lp.id,
+                                    )
+                                    continue
+                            lp.closed_at = exit_time
+                            lp.symbol = sym_key
+                            entry_ts = lp.opened_at or sync_now
+                            dup = await find_existing_leg_close_trade(
+                                session,
+                                strategy_id=int(lp.strategy_id or 0),
+                                symbol=sym_key,
+                                side=lp.side,
+                                layer=int(lp.layer or 0),
+                                entry_time=entry_ts,
+                                entry_price=float(lp.entry_price or 0),
+                                quantity=float(lp.quantity or 0),
+                            )
+                            if dup is not None:
+                                logger.warning(
+                                    "Sync: skip duplicate Trade for %s %s "
+                                    "(existing trade id=%s)",
+                                    sym_key,
+                                    side_low,
+                                    getattr(dup, "id", None),
+                                )
+                                continue
+                            exit_pnl = (
+                                (exit_price - lp.entry_price) * lp.quantity
+                                if lp.side == "long"
+                                else (lp.entry_price - exit_price) * lp.quantity
+                            )
+                            exit_pnl_pct = (
+                                ((exit_price - lp.entry_price) / lp.entry_price * 100)
+                                if lp.side == "long" and lp.entry_price > 0
+                                else ((lp.entry_price - exit_price) / lp.entry_price * 100)
+                                if lp.entry_price > 0
+                                else 0
+                            )
+                            trade = Trade(
+                                strategy_id=lp.strategy_id,
+                                account_id=lp.account_id,
+                                symbol=sym_key,
+                                side=lp.side,
+                                quantity=lp.quantity,
+                                entry_price=lp.entry_price,
+                                exit_price=exit_price,
+                                realized_pnl=exit_pnl,
+                                pnl_pct=round(exit_pnl_pct, 2),
+                                entry_time=entry_ts,
+                                exit_time=exit_time,
+                                layer=lp.layer,
+                                close_reason=close_reason,
+                            )
+                            session.add(trade)
+                            trades_to_backup.append(trade)
+                            closed_n += 1
                     if closed_n:
                         logger.warning(
                             "Sync: leg %s %s (%d DB rows) missing on exchange — closed with %s exit=%.8f",

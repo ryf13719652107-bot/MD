@@ -7,6 +7,7 @@ import pytest
 from app.services.account_concurrency import (
     ACCOUNT_ORDER_CONCURRENCY,
     account_order_sem,
+    hold_account_sync,
 )
 from app.services.binance_service import BinanceService
 from app.services.position_manager import PositionManager
@@ -297,6 +298,22 @@ async def test_sync_account_background_calls_syncer():
     await scheduler._sync_account_background(auth, 42)
 
     scheduler._syncer.sync.assert_awaited_once_with(auth, 42, auth)
+
+
+@pytest.mark.asyncio
+async def test_hold_account_sync_is_reentrant():
+    order: list[str] = []
+
+    async def inner():
+        async with hold_account_sync(7):
+            order.append("inner")
+
+    async with hold_account_sync(7):
+        order.append("outer")
+        await inner()
+        order.append("after")
+
+    assert order == ["outer", "inner", "after"]
 
 
 def test_scheduler_tick_uses_background_sync_not_await():

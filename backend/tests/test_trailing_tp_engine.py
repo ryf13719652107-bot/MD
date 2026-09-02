@@ -2,9 +2,9 @@
 
 覆盖边界：
   1.  profit_pct：做空/做多盈利计算与 entry_price=0 兜底
-  2.  5 分钟激活窗口临界：now_ms = window_sec*1000 - 1 不超时；+1 超时切 expired
+  2.  5 分钟窗口：到点未激活 → window_expired 立即回退限价
   3.  激活阈值临界：盈利恰等于 activate_threshold 激活；少 0.01% 不激活
-  4.  激活优先于超时：armed 且已超时但盈利达阈值 → apply_tick 先检查激活
+  4.  超时即使盈利已达阈值也不补激活 → expired（须在窗口内触发）
   5.  阶梯1 临界：peak_pct 恰 2.5 → 20；2.49 → 30
   6.  阶梯2 临界：peak_pct 恰 5.0 → 15；4.99 → 20
   7.  回撤触发平仓：peak 4%、当前 3%（回撤 25%）≥ 20 → should_close / apply_tick 返回 close
@@ -110,10 +110,10 @@ def test_window_boundary_not_expired_one_ms_before():
 
 
 def test_window_boundary_expired_one_ms_after():
-    """now_ms = window_sec*1000 + 1 超时 → apply_tick 返回 'window_expired' 且 state='expired'。"""
+    """now_ms = window_sec*1000 + 1 且未达阈值 → 立即 expired，回退限价。"""
     mem = make_mem(state=STATE_ARMED, opened_at_ms=0)
     params = make_params(window_sec=300.0, activate_threshold_pct=2.0)
-    # current=99 → 做空盈利 1%，未达阈值，避免激活优先
+    assert is_window_expired(mem, now_ms=300001, window_sec=300.0) is True
     result = apply_tick(mem, params, current_price=99.0, now_ms=300001)
     assert result == "window_expired"
     assert mem.state == STATE_EXPIRED
@@ -141,17 +141,23 @@ def test_activate_threshold_boundary_just_below():
 
 # ---------- 4. 激活优先于超时 ----------
 
-def test_activation_timeout_abandon_even_if_profit_hits():
-    """armed、已超时（now_ms 超过窗口）但盈利恰好达阈值 → 按规格放弃，返回 'window_expired'。
+def test_window_expired_even_if_profit_already_hits():
+    """窗口到点仍是 armed：即使现价已达阈值也不补激活，立即回退限价。
 
-    用户规格明确："开仓后超过5分钟仍未达到预设止盈阈值，则自动放弃移动止盈功能"。
-    超时后窗口关闭，即使此刻盈利达阈值也不应激活（窗口已过）。
-    should_activate 内置窗口守卫：超时返回 False → apply_tick 走 is_window_expired。
+    必须在设定时间内触发；超时未触发就改回限价。
     """
     mem = make_mem(state=STATE_ARMED, opened_at_ms=0)
     params = make_params(window_sec=300.0, activate_threshold_pct=2.0)
-    # now_ms=300001 已超时 1ms；current=98.0 做空盈利 2.0% 恰达阈值
     result = apply_tick(mem, params, current_price=98.0, now_ms=300001)
+    assert result == "window_expired"
+    assert mem.state == STATE_EXPIRED
+
+
+def test_window_expired_huge_profit_still_falls_back():
+    """窗口过很久、浮盈再大：只要没在窗内激活，仍立即回退限价。"""
+    mem = make_mem(state=STATE_ARMED, opened_at_ms=0, entry_price=0.0349)
+    params = make_params(window_sec=300.0, activate_threshold_pct=1.2)
+    result = apply_tick(mem, params, current_price=0.0097, now_ms=1_320_000)
     assert result == "window_expired"
     assert mem.state == STATE_EXPIRED
 
@@ -391,3 +397,20 @@ def test_non_wick_spike_strategy_not_taken_over():
     assert r is None
     assert mem.state == STATE_ARMED
     assert mem.peak_pct == 0.0  # 未更新
+
+
+def test_trailing_armed_needs_tick_without_new_trades():
+    """armed 即使没有新成交也要 tick，否则会卡在剩余负数、也不挂限价。"""
+    from app.services.wick_spike_runner import WickSpikeRunner
+
+    runner = WickSpikeRunner.__new__(WickSpikeRunner)
+    armed = make_mem(state=STATE_ARMED, opened_at_ms=0)
+    active = make_mem(state=STATE_ACTIVE, opened_at_ms=0)
+    armed.position_id = 1
+    active.position_id = 2
+    runner._trailing_mems = {
+        9: {"AKEUSDT": [armed], "UAIUSDT": [active]},
+    }
+    assert runner._trailing_armed_needs_tick(9, "AKEUSDT") is True
+    assert runner._trailing_armed_needs_tick(9, "UAIUSDT") is False
+    assert runner._trailing_armed_needs_tick(9, "NOPEUSDT") is False
