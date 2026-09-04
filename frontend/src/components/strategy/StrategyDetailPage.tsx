@@ -217,9 +217,7 @@ export default function StrategyDetailPage() {
                   ? `趋势WT (通道${strategy.wt_channel_length} 均线${strategy.wt_average_length} · ST ${strategy.st_timeframe_1 ?? '15m'}+${strategy.st_timeframe_2 ?? '30m'} ATR${strategy.st_atr_period ?? 10}×${strategy.st_factor ?? 3})`
                   : strategy.signal_source === 'martingale_base'
                     ? '基础马丁 (每根K线开盘开首单)'
-                    : strategy.signal_source === 'wick_spike'
-                      ? `毫秒接针 (量×${strategy.wick_volume_mult ?? 6} ATR×${strategy.wick_spike_atr_mult ?? 4}${(strategy.wick_atr_pct_floor_enabled ?? false) ? ` 地板${strategy.wick_atr_pct_floor ?? 0.5}%×${strategy.wick_atr_quiet_mult ?? 2}` : ' ATR地板关'})`
-                      : `RSI (周期${strategy.rsi_period} ${strategy.direction === 'long' ? '<' : '>'}${strategy.rsi_entry_threshold})`}
+                    : `RSI (周期${strategy.rsi_period} ${strategy.direction === 'long' ? '<' : '>'}${strategy.rsi_entry_threshold})`}
             </div>
           </div>
           <div>
