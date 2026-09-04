@@ -702,6 +702,45 @@ export default function StrategyForm({
                 <span className="text-xs text-gray-600">相对开盘→极值；默认 50；填 0 关闭</span>
               </div>
             </div>
+            <div className="rounded-lg border border-cyan-700/50 bg-cyan-950/20 px-3 py-2.5 space-y-2">
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>低波动 ATR 地板</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_atr_pct_floor_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-cyan-500 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+                <span className="text-[11px] font-normal text-cyan-200/80">
+                  {wickAtrFloorEnabled ? '已开启' : '默认关闭，打开后过滤闷盘假针'}
+                </span>
+              </label>
+              <span className="text-xs text-gray-500 block">
+                打开后刺破距离至少约 6%（ATR×6 时）；更闷的币约 9%。原 ATR×倍数已更大则不变。
+              </span>
+              {wickAtrFloorEnabled && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelClass}>第1层 ATR 地板 %</label>
+                    <input type="number" step="0.05" {...register('wick_atr_pct_floor', { valueAsNumber: true })} className={inputClass} />
+                    <span className="text-xs text-gray-600">默认 0.5</span>
+                  </div>
+                  <div>
+                    <label className={labelClass}>第1层安静倍数</label>
+                    <input type="number" step="0.1" {...register('wick_atr_quiet_mult', { valueAsNumber: true })} className={inputClass} />
+                    <span className="text-xs text-gray-600">默认 2</span>
+                  </div>
+                  <div>
+                    <label className={labelClass}>第2层 ATR 地板 %</label>
+                    <input type="number" step="0.05" {...register('wick_atr_pct_floor2', { valueAsNumber: true })} className={inputClass} />
+                    <span className="text-xs text-gray-600">默认 0.25；须小于第1层才生效；0=关闭</span>
+                  </div>
+                  <div>
+                    <label className={labelClass}>第2层安静倍数</label>
+                    <input type="number" step="0.1" {...register('wick_atr_quiet_mult2', { valueAsNumber: true })} className={inputClass} />
+                    <span className="text-xs text-gray-600">默认 3（垫 0.5% 时 ATR×6 约 9%）</span>
+                  </div>
+                </div>
+              )}
+            </div>
             <div>
               <label className={`${labelClass} flex items-center gap-2`}>
                 <span>市价反弹追踪</span>
@@ -739,43 +778,6 @@ export default function StrategyForm({
               </label>
               <span className="text-xs text-gray-600">做空：开盘低于 EMA25 不做空；做多相反</span>
             </div>
-            <div>
-              <label className={`${labelClass} flex items-center gap-2`}>
-                <span>低波动 ATR 地板</span>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" {...register('wick_atr_pct_floor_enabled')} className="sr-only peer" />
-                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
-                </label>
-              </label>
-              <span className="text-xs text-gray-600">
-                第1层：打开后 N 至少 = 开盘×地板%×ATR倍数×安静倍数（默认约 6%）；原 ATR×倍数已更大则不变。
-                第2层：仅当 ATR/开盘 低于第2层阈值（须小于第1层）时再 ×3（默认约 9%）。默认关闭。
-              </span>
-            </div>
-            {wickAtrFloorEnabled && (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelClass}>第1层 ATR 地板 %</label>
-                  <input type="number" step="0.05" {...register('wick_atr_pct_floor', { valueAsNumber: true })} className={inputClass} />
-                  <span className="text-xs text-gray-600">默认 0.5</span>
-                </div>
-                <div>
-                  <label className={labelClass}>第1层安静倍数</label>
-                  <input type="number" step="0.1" {...register('wick_atr_quiet_mult', { valueAsNumber: true })} className={inputClass} />
-                  <span className="text-xs text-gray-600">默认 2</span>
-                </div>
-                <div>
-                  <label className={labelClass}>第2层 ATR 地板 %</label>
-                  <input type="number" step="0.05" {...register('wick_atr_pct_floor2', { valueAsNumber: true })} className={inputClass} />
-                  <span className="text-xs text-gray-600">默认 0.25；须小于第1层才生效；0=关闭</span>
-                </div>
-                <div>
-                  <label className={labelClass}>第2层安静倍数</label>
-                  <input type="number" step="0.1" {...register('wick_atr_quiet_mult2', { valueAsNumber: true })} className={inputClass} />
-                  <span className="text-xs text-gray-600">默认 3（垫 0.5% 时 ATR×6 约 9%）</span>
-                </div>
-              </div>
-            )}
             <FormSection title="接针进阶" defaultOpen={false} hint="量能模式 / 武装窗 / 放宽">
               <div>
                 <label className={`${labelClass} flex items-center gap-2`}>
