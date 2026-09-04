@@ -128,6 +128,12 @@ export const api = {
   },
   closePosition: (id: number): Promise<{ status: string }> =>
     request(`/positions/${id}/close`, { method: 'POST' }),
+  closePositionLeg: (body: {
+    account_id: number;
+    symbol: string;
+    side: 'long' | 'short';
+  }): Promise<{ status: string; symbol: string; side: string; layers: number }> =>
+    request('/positions/close-leg', { method: 'POST', body: JSON.stringify(body) }),
 
   // Trades
   listTrades: (params?: {

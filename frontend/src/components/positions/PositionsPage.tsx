@@ -1,7 +1,10 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
 import { api, type TrailingState } from '../../services/api';
 import { useDashboardStore } from '../../store/dashboardStore';
+import { useAuthStore } from '../../store/authStore';
 import type { DashboardData, Position } from '../../types';
+import ConfirmDialog from '../ui/ConfirmDialog';
+import InlineNotice from '../ui/InlineNotice';
 import { ArrowDown, ArrowUp, Check, ChevronsUpDown, Minus } from 'lucide-react';
 
 type ExchangePos = DashboardData['exchange_positions'][number];
@@ -27,6 +30,8 @@ type DisplayRow = {
   /** 用于排序；无则 null（如仅交易所无主记录） */
   opened_at_ms: number | null;
   exchange_only: boolean;
+  account_id: number | null;
+  can_close: boolean;
 };
 
 type SortKey = 'notional' | 'pnl' | 'opened_at';
@@ -43,65 +48,77 @@ function exchangeNotionalUsdt(ep: ExchangePos): number {
 }
 
 function buildRows(dbPositions: Position[], exchangePositions: ExchangePos[]): DisplayRow[] {
-  const norm = (s: string) => s.replace(/\//g, '').replace(':USDT', '').toUpperCase();
+  const norm = (s: string) =>
+    (s || '').replace(/\//g, '').replace(/:USDT/g, '').replace(/_/g, '').toUpperCase();
+
+  const rowFromMatch = (
+    symbol: string,
+    side: 'long' | 'short',
+    match: Position[],
+    ep?: ExchangePos,
+  ): DisplayRow => {
+    let layer = '-';
+    if (match.length === 1) layer = `L${match[0].layer}`;
+    else if (match.length > 1) {
+      const layers = [...new Set(match.map((m) => m.layer))].sort((a, b) => a - b);
+      layer = `L${layers[0]}-L${layers[layers.length - 1]}（${match.length}层）`;
+    }
+    const tp = match.find((m) => m.take_profit_price != null)?.take_profit_price;
+    const tpId = match.some((m) => !!m.tp_limit_order_id);
+    const opened = match
+      .map((m) => m.opened_at)
+      .filter(Boolean)
+      .sort()[0];
+    const openedMs = opened ? new Date(opened as string).getTime() : null;
+    const hasTpPrice = tp != null;
+    const px = ep
+      ? ep.entry_price
+      : (match[0]?.entry_price ?? 0);
+    const notional = ep
+      ? exchangeNotionalUsdt(ep)
+      : match.reduce((s, p) => s + (p.mark_price ?? p.entry_price) * p.quantity, 0);
+    const pnl = ep
+      ? ep.unrealized_pnl
+      : match.reduce((s, p) => s + (p.unrealized_pnl ?? 0), 0);
+    return {
+      key: `${norm(symbol)}-${side}`,
+      symbol,
+      symbol_norm: normSym(symbol),
+      side,
+      notional_usdt: notional,
+      entry_price: px,
+      unrealized_pnl: pnl,
+      layer,
+      tp_has_order: tpId,
+      tp_target_only: hasTpPrice && !tpId,
+      opened_at_label: opened ? new Date(opened as string).toLocaleString() : '-',
+      opened_at_ms: Number.isFinite(openedMs ?? NaN) ? openedMs : null,
+      exchange_only: match.length === 0,
+      account_id: match[0]?.account_id ?? null,
+      can_close: match.some((m) => !!(m.exchange_order_id || '').trim()),
+    };
+  };
+
   if (exchangePositions.length > 0) {
     return exchangePositions.map((ep) => {
-      const sym = norm(ep.symbol);
       const side = (ep.side || '').toLowerCase() as 'long' | 'short';
       const match = dbPositions.filter(
-        (p) => norm(p.symbol) === sym && p.side === side,
+        (p) => norm(p.symbol) === norm(ep.symbol) && p.side === side,
       );
-      let layer = '-';
-      if (match.length === 1) layer = `L${match[0].layer}`;
-      else if (match.length > 1) {
-        const layers = [...new Set(match.map((m) => m.layer))].sort((a, b) => a - b);
-        layer = `L${layers[0]}-L${layers[layers.length - 1]}（${match.length}层）`;
-      }
-      const tp = match.find((m) => m.take_profit_price != null)?.take_profit_price;
-      const tpId = match.some((m) => !!m.tp_limit_order_id);
-      const opened = match
-        .map((m) => m.opened_at)
-        .filter(Boolean)
-        .sort()[0];
-      const openedMs = opened ? new Date(opened as string).getTime() : null;
-      const hasTpPrice = tp != null;
-      return {
-        key: `${sym}-${side}`,
-        symbol: ep.symbol,
-        symbol_norm: normSym(ep.symbol),
-        side,
-        notional_usdt: exchangeNotionalUsdt(ep),
-        entry_price: ep.entry_price,
-        unrealized_pnl: ep.unrealized_pnl,
-        layer,
-        tp_has_order: tpId,
-        tp_target_only: hasTpPrice && !tpId,
-        opened_at_label: opened ? new Date(opened as string).toLocaleString() : '-',
-        opened_at_ms: Number.isFinite(openedMs ?? NaN) ? openedMs : null,
-        exchange_only: match.length === 0,
-      };
+      return rowFromMatch(ep.symbol, side, match, ep);
     });
   }
   if (dbPositions.length > 0) {
-    return dbPositions.map((p) => {
-      const px = p.mark_price ?? p.entry_price;
-      const oms = p.opened_at ? new Date(p.opened_at).getTime() : null;
-      return {
-        key: String(p.id),
-        symbol: p.symbol,
-        symbol_norm: normSym(p.symbol),
-        side: p.side,
-        notional_usdt: px * p.quantity,
-        entry_price: p.entry_price,
-        unrealized_pnl: p.unrealized_pnl ?? 0,
-        layer: `L${p.layer}`,
-        tp_has_order: !!p.tp_limit_order_id,
-        tp_target_only: p.take_profit_price != null && !p.tp_limit_order_id,
-        opened_at_label: p.opened_at ? new Date(p.opened_at).toLocaleString() : '-',
-        opened_at_ms: Number.isFinite(oms ?? NaN) ? oms : null,
-        exchange_only: false,
-      };
-    });
+    const groups = new Map<string, Position[]>();
+    for (const p of dbPositions) {
+      const k = `${norm(p.symbol)}-${p.side}`;
+      const list = groups.get(k);
+      if (list) list.push(p);
+      else groups.set(k, [p]);
+    }
+    return [...groups.values()].map((match) =>
+      rowFromMatch(match[0].symbol, match[0].side, match),
+    );
   }
   return [];
 }
@@ -222,11 +239,15 @@ function renderTrailingMode(
 
 export default function PositionsPage() {
   const { selectedAccountId } = useDashboardStore();
+  const guest = useAuthStore((s) => s.role === 'guest');
   const [dbPositions, setDbPositions] = useState<Position[]>([]);
   const [exchangePositions, setExchangePositions] = useState<ExchangePos[]>([]);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [trailingMap, setTrailingMap] = useState<Record<string, TrailingState[]>>({});
+  const [confirmRow, setConfirmRow] = useState<DisplayRow | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [notice, setNotice] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   const loadRef = useRef<() => void>(() => {});
   const trailingRef = useRef<() => void>(() => {});
 
@@ -329,6 +350,34 @@ export default function PositionsPage() {
     }
   };
 
+  const runClose = async () => {
+    if (!confirmRow) return;
+    const acc = confirmRow.account_id ?? selectedAccountId;
+    if (acc == null) {
+      setNotice({ kind: 'error', text: '请先选择账户' });
+      return;
+    }
+    setConfirmBusy(true);
+    try {
+      const r = await api.closePositionLeg({
+        account_id: acc,
+        symbol: confirmRow.symbol,
+        side: confirmRow.side,
+      });
+      setNotice({
+        kind: 'success',
+        text: `${confirmRow.symbol} ${confirmRow.side === 'long' ? '做多' : '做空'} 已市价平仓（${r.layers} 层）`,
+      });
+      setConfirmRow(null);
+      await loadRef.current();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '平仓失败';
+      setNotice({ kind: 'error', text: msg });
+    } finally {
+      setConfirmBusy(false);
+    }
+  };
+
   const hasExchangeHint = exchangePositions.length > 0 && dbPositions.length === 0;
 
   return (
@@ -336,12 +385,18 @@ export default function PositionsPage() {
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
         <h2 className="text-xl font-bold">当前持仓</h2>
         <span className="text-xs text-gray-500">
-          名义 USDT 来自交易所；限价止盈来自本地策略库 · 每 30 秒刷新；止盈模式每 2 秒刷新
+          名义 USDT 来自交易所；限价止盈来自本地策略库 · 每 60 秒刷新；止盈模式每 2 秒刷新
           <span className="ml-2 text-gray-600 font-mono" title="每次 npm run build 更新；若与执行时间不符说明浏览器或 CDN 仍在用旧包">
             build:{__FRONTEND_BUILD_STAMP__}
           </span>
         </span>
       </div>
+
+      {notice && (
+        <InlineNotice kind={notice.kind} onClose={() => setNotice(null)}>
+          {notice.text}
+        </InlineNotice>
+      )}
 
       {hasExchangeHint && (
         <p className="text-xs text-amber-500/90 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
@@ -377,6 +432,7 @@ export default function PositionsPage() {
                 dir={sortDir}
                 onClick={() => toggleSort('opened_at')}
               />
+              <th className="p-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -420,11 +476,39 @@ export default function PositionsPage() {
                   {row.unrealized_pnl.toFixed(2)} USDT
                 </td>
                 <td className="p-3 text-gray-500 text-xs">{row.opened_at_label}</td>
+                <td className="p-3 text-right whitespace-nowrap">
+                  <button
+                    type="button"
+                    disabled={
+                      guest
+                      || !row.can_close
+                      || confirmBusy
+                    }
+                    onClick={() => {
+                      if (guest || !row.can_close) return;
+                      setConfirmRow(row);
+                    }}
+                    title={
+                      guest
+                        ? '访客模式无法平仓'
+                        : row.can_close
+                          ? '市价平掉该交易对此方向的机器人仓'
+                          : '仅交易所仓，无机器人记录，无法代平'
+                    }
+                    className={
+                      guest || !row.can_close
+                        ? 'px-2.5 py-1 text-xs rounded-md border border-gray-800 text-gray-600 cursor-not-allowed'
+                        : 'px-2.5 py-1 text-xs rounded-md border border-red-500/40 text-red-300 hover:bg-red-600/20 hover:border-red-400/70'
+                    }
+                  >
+                    平仓
+                  </button>
+                </td>
               </tr>
             ))}
             {sortedRows.length === 0 && (
               <tr>
-                <td colSpan={9} className="p-8 text-center text-gray-600">
+                <td colSpan={10} className="p-8 text-center text-gray-600">
                   暂无持仓
                 </td>
               </tr>
@@ -432,6 +516,23 @@ export default function PositionsPage() {
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={confirmRow != null}
+        title="确认市价平仓？"
+        detail={
+          confirmRow
+            ? `将市价平掉 ${confirmRow.symbol} ${confirmRow.side === 'long' ? '做多' : '做空'} 的机器人仓（含全部马丁层），不会平同向手动仓。此操作不可撤销。`
+            : undefined
+        }
+        confirmLabel="确认平仓"
+        danger
+        busy={confirmBusy}
+        onConfirm={runClose}
+        onCancel={() => {
+          if (!confirmBusy) setConfirmRow(null);
+        }}
+      />
     </div>
   );
 }

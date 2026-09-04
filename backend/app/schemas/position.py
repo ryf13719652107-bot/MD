@@ -3,6 +3,12 @@ from datetime import datetime
 from typing import Optional
 
 
+class CloseLegRequest(BaseModel):
+    account_id: int
+    symbol: str
+    side: str  # long | short
+
+
 class PositionResponse(BaseModel):
     id: int
     strategy_id: Optional[int]
