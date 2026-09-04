@@ -50,6 +50,11 @@ const schema = z.object({
   wick_arm_grace_max_tip_gap_pct: z.number().min(0).max(20),
   wick_rebound_enabled: z.boolean(),
   wick_ema25_filter_enabled: z.boolean(),
+  wick_atr_pct_floor_enabled: z.boolean(),
+  wick_atr_pct_floor: z.number().min(0).max(5),
+  wick_atr_quiet_mult: z.number().min(0.1).max(10),
+  wick_atr_pct_floor2: z.number().min(0).max(5),
+  wick_atr_quiet_mult2: z.number().min(0.1).max(10),
   wick_rebound_trigger_pct: z.number().min(0).max(100),
   wick_rebound_abort_pct: z.number().min(0).max(100),
   wick_rebound_wait_sec: z.number().min(0).max(60),
@@ -196,6 +201,11 @@ function toFormDefaults(
       wick_arm_grace_max_tip_gap_pct: initialData.wick_arm_grace_max_tip_gap_pct ?? 2,
       wick_rebound_enabled: initialData.wick_rebound_enabled ?? true,
       wick_ema25_filter_enabled: initialData.wick_ema25_filter_enabled ?? true,
+      wick_atr_pct_floor_enabled: initialData.wick_atr_pct_floor_enabled ?? false,
+      wick_atr_pct_floor: initialData.wick_atr_pct_floor ?? 0.5,
+      wick_atr_quiet_mult: initialData.wick_atr_quiet_mult ?? 2,
+      wick_atr_pct_floor2: initialData.wick_atr_pct_floor2 ?? 0.25,
+      wick_atr_quiet_mult2: initialData.wick_atr_quiet_mult2 ?? 3,
       wick_rebound_trigger_pct: initialData.wick_rebound_trigger_pct ?? 20,
       wick_rebound_abort_pct: initialData.wick_rebound_abort_pct ?? 35,
       wick_rebound_wait_sec: initialData.wick_rebound_wait_sec ?? 0,
@@ -289,6 +299,11 @@ function toFormDefaults(
     wick_arm_grace_max_tip_gap_pct: 2,
     wick_rebound_enabled: true,
     wick_ema25_filter_enabled: true,
+    wick_atr_pct_floor_enabled: false,
+    wick_atr_pct_floor: 0.5,
+    wick_atr_quiet_mult: 2,
+    wick_atr_pct_floor2: 0.25,
+    wick_atr_quiet_mult2: 3,
     wick_rebound_trigger_pct: 20,
     wick_rebound_abort_pct: 35,
     wick_rebound_wait_sec: 0,
@@ -464,6 +479,7 @@ export default function StrategyForm({
   const martingaleRsiEnabled = watch('martingale_rsi_enabled', true);
   const wickMartingaleMode = watch('wick_martingale_mode', 'price_and_wt');
   const wickVolumeMode = watch('wick_volume_mode', 'original');
+  const wickAtrFloorEnabled = watch('wick_atr_pct_floor_enabled', false);
   const trailingTpEnabled = watch('trailing_tp_enabled', false);
 
   // Auto-adjust RSI threshold on mount and when direction changes
@@ -723,6 +739,43 @@ export default function StrategyForm({
               </label>
               <span className="text-xs text-gray-600">做空：开盘低于 EMA25 不做空；做多相反</span>
             </div>
+            <div>
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>低波动 ATR 地板</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_atr_pct_floor_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+              </label>
+              <span className="text-xs text-gray-600">
+                第1层：打开后 N 至少 = 开盘×地板%×ATR倍数×安静倍数（默认约 6%）；原 ATR×倍数已更大则不变。
+                第2层：仅当 ATR/开盘 低于第2层阈值（须小于第1层）时再 ×3（默认约 9%）。默认关闭。
+              </span>
+            </div>
+            {wickAtrFloorEnabled && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass}>第1层 ATR 地板 %</label>
+                  <input type="number" step="0.05" {...register('wick_atr_pct_floor', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">默认 0.5</span>
+                </div>
+                <div>
+                  <label className={labelClass}>第1层安静倍数</label>
+                  <input type="number" step="0.1" {...register('wick_atr_quiet_mult', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">默认 2</span>
+                </div>
+                <div>
+                  <label className={labelClass}>第2层 ATR 地板 %</label>
+                  <input type="number" step="0.05" {...register('wick_atr_pct_floor2', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">默认 0.25；须小于第1层才生效；0=关闭</span>
+                </div>
+                <div>
+                  <label className={labelClass}>第2层安静倍数</label>
+                  <input type="number" step="0.1" {...register('wick_atr_quiet_mult2', { valueAsNumber: true })} className={inputClass} />
+                  <span className="text-xs text-gray-600">默认 3（垫 0.5% 时 ATR×6 约 9%）</span>
+                </div>
+              </div>
+            )}
             <FormSection title="接针进阶" defaultOpen={false} hint="量能模式 / 武装窗 / 放宽">
               <div>
                 <label className={`${labelClass} flex items-center gap-2`}>

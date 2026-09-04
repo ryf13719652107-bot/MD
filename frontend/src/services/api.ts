@@ -384,6 +384,12 @@ export type WickStatsAnalysis = {
   opened_total?: number;
   trigger_total?: number;
   block_reasons: Record<string, number>;
+  atr_pct_floor?: {
+    boosted_n: number;
+    blocked_n: number;
+    blocked_tier2_n?: number;
+    note?: string;
+  };
   tip_gap_opened?: WickStatsSummary;
   tip_gap_trigger?: WickStatsSummary;
   trade_age_ms?: WickStatsSummary;
@@ -453,6 +459,8 @@ export type WickSymbolMonitorRow = {
   vol_x?: number | null;
   need_x?: number | null;
   tip_gap_pct?: number | null;
+  atr_pct?: number | null;
+  atr_floor_block?: boolean | null;
   reason: string;
 };
 

@@ -7,6 +7,10 @@
   4) 超时未放量 → 本根作废，不再重武装
 
 N = 上根 ATR × atr_mult。开盘价由调用方传入（须为 K 线官方 open）。
+低波动 ATR 地板（atr_pct_floor_enabled，产品默认关；两层）：
+  ATR/开盘 无论是否低于 0.5%：N 至少 = 开盘 × 0.5% × atr_mult × 2（默认，ATR×6 时约 6%）；
+  ATR/开盘 < 0.25%：仍垫 0.5%，再 ×3（默认，ATR×6 时约 9%）；
+  高波动（原 ATR×倍数已更大）不变；第2层阈值须小于第1层否则忽略。
 
 progress 量能放宽（可选，默认开）：
   progress = |极值-开盘| / N；
@@ -87,6 +91,12 @@ class WickSpikeParams:
     # 1m 开盘 vs EMA25 过滤；产品层默认开，此处默认关（单测不受趋势滤）
     ema25_filter_enabled: bool = False
     ema25_period: int = 25
+    # 低波动 ATR 地板；产品层默认关
+    atr_pct_floor_enabled: bool = False
+    atr_pct_floor: float = 0.5  # 第1层垫高用的 ATR%；N 至少 = 开盘×该值×atr_mult×quiet_mult
+    atr_quiet_mult: float = 2.0  # 第1层安静倍数
+    atr_pct_floor2: float = 0.25  # 第2层触发阈值（须 < floor1）；0=关闭
+    atr_quiet_mult2: float = 3.0  # 第2层安静倍数（仍垫第1层地板）
     # 成交量确认模式：original=瞬时量全程；instant_early=前段瞬时+后段真实；real_only=纯真实累计量
     volume_mode: str = "original"
     # instant_early 模式：本根进度超过该比例(0~1)后切换为真实累计量
@@ -347,6 +357,81 @@ def _volume_hot(
     if mult <= 0:
         return True
     return snap.vol_now >= snap.vol_sma * mult
+
+
+def atr_open_pct(snap: WickBarSnapshot) -> float:
+    """上根 ATR 占本根开盘价的百分比。"""
+    o = float(snap.bar_open or 0)
+    a = float(snap.atr or 0)
+    if o <= 0 or a <= 0:
+        return 0.0
+    return a / o * 100.0
+
+
+def raw_atr_n(params: WickSpikeParams, snap: WickBarSnapshot) -> float:
+    return float(snap.atr) * float(params.atr_mult or 0)
+
+
+def atr_floor_tier(params: WickSpikeParams, snap: WickBarSnapshot) -> tuple[float, float]:
+    """低波动加严：(垫高后的 ATR%, 安静倍数)。未加严返回 (0, 1)。
+
+    第1层作为绝对地板：N 至少 = 开盘×floor×atr_mult×quiet_mult（默认约 6%）。
+    不再用 ATR%<0.5% 硬切，否则 0.5%～1% 的币会掉回只吃最小涨跌幅，比更闷的币更松。
+    第2层：仅当 ATR% < floor2 且 floor2 < floor1 时，仍垫第1层地板再 × quiet_mult2。
+    """
+    if not params.atr_pct_floor_enabled:
+        return 0.0, 1.0
+    pct = atr_open_pct(snap)
+    f1 = float(params.atr_pct_floor or 0)
+    q1 = float(params.atr_quiet_mult or 0)
+    f2 = float(params.atr_pct_floor2 or 0)
+    q2 = float(params.atr_quiet_mult2 or 0)
+    cands: list[tuple[float, float]] = []
+    if f1 > 0 and q1 > 0:
+        cands.append((f1, q1))
+    if (
+        f2 > 0
+        and q2 > 0
+        and pct + 1e-12 < f2
+        and (f1 <= 0 or f2 + 1e-12 < f1)
+    ):
+        pad2 = f1 if f1 > 0 else f2
+        cands.append((pad2, q2))
+    if not cands:
+        return 0.0, 1.0
+    return max(cands, key=lambda t: (t[0] * t[1], t[1]))
+
+
+def effective_atr_n(params: WickSpikeParams, snap: WickBarSnapshot) -> float:
+    """刺破距离 N。低波动时把 ATR% 垫到地板后再 × atr_mult × 对应层安静倍数。"""
+    raw = raw_atr_n(params, snap)
+    if raw <= 0:
+        return raw
+    pad, q = atr_floor_tier(params, snap)
+    if pad <= 0:
+        return raw
+    o = float(snap.bar_open or 0)
+    if o <= 0:
+        return raw
+    n = o * (pad / 100.0) * float(params.atr_mult) * max(q, 1.0)
+    return n if n > raw else raw
+
+
+def atr_floor_is_boosted(params: WickSpikeParams, snap: WickBarSnapshot) -> bool:
+    return effective_atr_n(params, snap) > raw_atr_n(params, snap) + 1e-12
+
+
+def _direction_pierced(
+    direction: str, bar_open: float, extreme: float, last_price: float, n: float
+) -> bool:
+    d = (direction or "").lower()
+    if d == "long":
+        thr = bar_open - n
+        return extreme <= thr or last_price <= thr
+    if d == "short":
+        thr = bar_open + n
+        return extreme >= thr or last_price >= thr
+    return False
 
 
 def spike_progress(direction: str, bar_open: float, extreme: float, n: float) -> float:
@@ -772,9 +857,11 @@ def near_miss_diag(
     if state.triggered_bar_ts == snap.bar_open_ts:
         return None
 
-    n = snap.atr * params.atr_mult
+    n = effective_atr_n(params, snap)
     if n <= 0:
         return None
+    raw_n = raw_atr_n(params, snap)
+    boosted = n > raw_n + 1e-12
 
     direction = (params.direction or "").lower()
     ema_block = ema25_filter_blocks(params, snap)
@@ -796,13 +883,19 @@ def near_miss_diag(
     else:
         return None
 
+    raw_pierced = _direction_pierced(
+        direction, snap.bar_open, extreme, last_price, raw_n
+    )
     progress = spike_progress(direction, snap.bar_open, extreme, n)
+    raw_progress = spike_progress(direction, snap.bar_open, extreme, raw_n)
     move_pct = spike_move_pct(direction, snap.bar_open, extreme)
     need = effective_volume_mult(params, progress)
     vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
     vol_hot = _volume_hot(params, snap, volume_mult=need)
     vol_near = need <= 0 or vol_ratio >= need * 0.5
-    px_near = progress >= 0.5
+    px_near = progress >= 0.5 or (
+        boosted and (raw_pierced or raw_progress >= 0.5)
+    )
     armed = state.armed_bar_ts == snap.bar_open_ts and state.armed_at_ms > 0
     if not pierced and not px_near and not armed:
         return None
@@ -820,6 +913,15 @@ def near_miss_diag(
         if not (eo == eo and eo > 0):
             eo = float(snap.bar_open)
         ema_s = f" ema25_block=True ema25={float(snap.ema25):.6g} ema_open={eo:.6g}"
+    floor_s = ""
+    if params.atr_pct_floor_enabled and boosted:
+        pct = atr_open_pct(snap)
+        _pad, q = atr_floor_tier(params, snap)
+        floor_block = raw_pierced and not pierced
+        floor_s = (
+            f" atr_pct={pct:.3f} atr_floor_boost=True "
+            f"atr_floor_block={str(floor_block)} atr_floor_q={q:g}"
+        )
     return (
         f"dir={direction} px={last_price:.6g} open={snap.bar_open:.6g} "
         f"ext={extreme:.6g} thr={thr:.6g} pierce={pierced} "
@@ -827,7 +929,7 @@ def near_miss_diag(
         f"vol×={vol_ratio:.2f} need×={need:g} vol_hot={vol_hot} "
         f"retrace%={retrace:.2f} armed={armed} arm_age_ms={arm_age} "
         f"await_vol={state.armed_awaiting_vol if armed else False} "
-        f"retrace_waived={waived}{ema_s}"
+        f"retrace_waived={waived}{ema_s}{floor_s}"
     )
 
 
@@ -922,7 +1024,7 @@ def on_tick(
     else:
         return None
 
-    n = snap.atr * params.atr_mult
+    n = effective_atr_n(params, snap)
     if n <= 0:
         return None
 
@@ -1093,7 +1195,7 @@ def pierce_vol_view(
     if last_price <= 0 or snap.bar_open <= 0 or snap.atr <= 0:
         return None
     direction = (params.direction or "").lower()
-    n = snap.atr * params.atr_mult
+    n = effective_atr_n(params, snap)
     if n <= 0:
         return None
     if direction == "long":

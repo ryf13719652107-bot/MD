@@ -175,6 +175,7 @@ export default function WickStatsPage() {
 
   const deep = data?.vol_blocked_deep;
   const cf = deep?.counterfactual;
+  const atrFloor = data?.atr_pct_floor;
   const oq = data?.open_quality;
   const noAccount = selectedAccountId == null;
 
@@ -319,7 +320,7 @@ export default function WickStatsPage() {
                       <td className="px-2 py-1 text-right font-mono">
                         {r.need_x == null ? '-' : r.need_x.toFixed(2)}
                       </td>
-                      <td className="px-2 py-1 text-gray-400 max-w-md">{r.reason}</td>
+                      <td className={`px-2 py-1 max-w-md ${r.atr_floor_block || (r.reason || '').startsWith('低波动ATR地板') ? 'text-amber-300' : 'text-gray-400'}`}>{r.reason}</td>
                     </tr>
                   ))}
                   {(symMon.rows || []).length === 0 && (
@@ -475,7 +476,7 @@ export default function WickStatsPage() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
               <div className="text-xs text-gray-500">近失记录（有节流，仅参考）</div>
               <div className="text-xl font-semibold text-gray-100">{data.near_miss_total}</div>
@@ -494,6 +495,18 @@ export default function WickStatsPage() {
               <div className="text-xs text-gray-500">若门槛改 5 倍可过</div>
               <div className="text-xl font-semibold text-emerald-300">
                 {cf ? `${cf.need_5_pass}/${cf.total}` : '-'}
+              </div>
+            </div>
+            <div className="bg-gray-900 border border-amber-900/40 rounded-lg p-3">
+              <div className="text-xs text-gray-500">低波动ATR地板拦截</div>
+              <div className="text-xl font-semibold text-amber-200">
+                {atrFloor ? `${atrFloor.blocked_n}/${atrFloor.boosted_n}` : '-'}
+              </div>
+              <div className="text-[10px] text-gray-600 mt-1">
+                拦截/已加严
+                {atrFloor?.blocked_tier2_n
+                  ? ` · 其中第2层：${atrFloor.blocked_tier2_n}`
+                  : ''}
               </div>
             </div>
           </div>
@@ -532,6 +545,14 @@ export default function WickStatsPage() {
                   </li>
                 ))}
               </ul>
+            )}
+            {atrFloor && (atrFloor.blocked_n > 0 || atrFloor.boosted_n > 0) && (
+              <p className="text-xs text-amber-400/90 pt-2">
+                低波动 ATR 地板：已加严 {atrFloor.boosted_n} 条近失，拦截 {atrFloor.blocked_n} 条
+                {atrFloor.blocked_tier2_n
+                  ? `（第2层：${atrFloor.blocked_tier2_n}）`
+                  : ''}
+              </p>
             )}
             {cf && cf.total > 0 && (
               <p className="text-xs text-gray-500 pt-2">

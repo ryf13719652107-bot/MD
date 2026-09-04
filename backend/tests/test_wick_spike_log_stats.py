@@ -298,3 +298,88 @@ def test_weekly_review_uses_complete_events_only(tmp_path):
     assert "近失" in wr["notes"][0]
     assert "busy" in wr["notes"][2] or "trigger" in wr["notes"][2]
 
+
+def test_parse_near_miss_atr_floor_block_and_reason():
+    from app.services.wick_spike_log_stats import _near_miss_reason_zh
+
+    line = (
+        "2026-09-04 20:29:10 [INFO] app.services.wick_spike_runner: "
+        "wick_spike near-miss strategy=9 XPLUSUSDT dir=long "
+        "px=0.0949 open=0.09938 ext=0.0949 thr=0.09342 pierce=False "
+        "atr=0.0004075 atrN=0.0059628 progress=0.75 amp%=4.51 vol×=8.10 need×=6 vol_hot=True "
+        "retrace%=0.00 armed=False arm_age_ms=0 await_vol=False retrace_waived=False "
+        "atr_pct=0.410 atr_floor_boost=True atr_floor_block=True"
+    )
+    row = parse_line(line)
+    assert row is not None
+    assert row.atr_floor_boost is True
+    assert row.atr_floor_block is True
+    assert abs(row.atr_pct - 0.410) < 1e-9
+    why = _near_miss_reason_zh(row)
+    assert why.startswith("低波动ATR地板")
+    from app.services.wick_spike_log_stats import WickLogReport, build_analysis
+
+    report = WickLogReport(near_misses=[row])
+    analysis = build_analysis(report)
+    assert analysis["atr_pct_floor"]["blocked_n"] == 1
+    assert analysis["atr_pct_floor"]["boosted_n"] == 1
+    assert analysis["block_reasons"].get("低波动ATR地板加严") == 1
+    assert "低波动ATR地板" in analysis["text"]
+
+
+def test_parse_near_miss_atr_floor_tier2_reason():
+    from app.services.wick_spike_log_stats import (
+        WickLogReport,
+        _near_miss_reason_zh,
+        build_analysis,
+    )
+
+    line = (
+        "2026-09-04 21:00:00 [INFO] app.services.wick_spike_runner: "
+        "wick_spike near-miss strategy=9 DEADUSDT dir=long "
+        "px=93.0 open=100.0 ext=93.0 thr=91.0 pierce=False "
+        "atr=0.20 atrN=9.0 progress=0.78 amp%=7.00 vol×=8.10 need×=6 vol_hot=True "
+        "retrace%=0.00 armed=False arm_age_ms=0 await_vol=False retrace_waived=False "
+        "atr_pct=0.200 atr_floor_boost=True atr_floor_block=True atr_floor_q=3"
+    )
+    row = parse_line(line)
+    assert row is not None
+    assert abs(row.atr_floor_q - 3) < 1e-9
+    why = _near_miss_reason_zh(row)
+    assert "低波动ATR地板×3" in why
+    analysis = build_analysis(WickLogReport(near_misses=[row]))
+    assert analysis["atr_pct_floor"]["blocked_tier2_n"] == 1
+    assert analysis["block_reasons"].get("低波动ATR地板×3") == 1
+
+
+def test_boost_without_raw_pierce_not_counted_as_floor_block():
+    """加严了但原始倍数也没刺破 → 不得算成地板拦截。"""
+    from app.services.wick_spike_log_stats import (
+        WickLogReport,
+        _near_miss_reason_zh,
+        build_analysis,
+    )
+
+    line = (
+        "2026-09-04 20:40:00 [INFO] app.services.wick_spike_runner: "
+        "wick_spike near-miss strategy=9 QUIETUSDT dir=long "
+        "px=97.8 open=100.0 ext=97.8 thr=94.0 pierce=False "
+        "atr=0.41 atrN=6.0 progress=0.37 amp%=2.20 vol×=8.10 need×=8 vol_hot=True "
+        "retrace%=0.00 armed=False arm_age_ms=0 await_vol=False retrace_waived=False "
+        "atr_pct=0.410 atr_floor_boost=True atr_floor_block=False atr_floor_q=2"
+    )
+    row = parse_line(line)
+    assert row is not None
+    assert row.atr_floor_boost is True
+    assert row.atr_floor_block is False
+    why = _near_miss_reason_zh(row)
+    assert not why.startswith("低波动ATR地板")
+    analysis = build_analysis(WickLogReport(near_misses=[row]))
+    assert analysis["atr_pct_floor"]["boosted_n"] == 1
+    assert analysis["atr_pct_floor"]["blocked_n"] == 0
+    assert not any(
+        str(k).startswith("低波动ATR地板") for k in (analysis.get("block_reasons") or {})
+    )
+
+
+

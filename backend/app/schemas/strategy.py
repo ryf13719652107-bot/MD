@@ -137,6 +137,34 @@ class StrategyCreate(BaseModel):
         default=True,
         description="1m开盘vsEMA25：空开盘<EMA不做空；多开盘>EMA不做多",
     )
+    wick_atr_pct_floor_enabled: bool = Field(
+        default=False,
+        description="低波动ATR地板：刺破距离N至少=开盘×地板%×ATR倍数×安静倍数；默认关",
+    )
+    wick_atr_pct_floor: float = Field(
+        default=0.5,
+        ge=0,
+        le=5,
+        description="第1层垫高用的ATR%；N至少=开盘×该值×ATR倍数×安静倍数",
+    )
+    wick_atr_quiet_mult: float = Field(
+        default=2.0,
+        gt=0,
+        le=10,
+        description="低波动时再乘的ATR倍数，默认2",
+    )
+    wick_atr_pct_floor2: float = Field(
+        default=0.25,
+        ge=0,
+        le=5,
+        description="第2层ATR/开盘%阈值；低于此且须小于第1层才生效；仍垫第1层地板再×第2层安静倍数；0=关闭",
+    )
+    wick_atr_quiet_mult2: float = Field(
+        default=3.0,
+        gt=0,
+        le=10,
+        description="第2层安静倍数，默认3（垫第1层0.5%，ATR×6时约9%）",
+    )
     wick_rebound_trigger_pct: float = Field(
         default=20.0, ge=0, le=100, description="反弹占针深%触发市价"
     )
@@ -251,6 +279,11 @@ class StrategyUpdate(BaseModel):
     wick_rebound_abort_pct: Optional[float] = Field(default=None, ge=0, le=100)
     wick_rebound_wait_sec: Optional[float] = Field(default=None, ge=0, le=60)
     wick_ema25_filter_enabled: Optional[bool] = None
+    wick_atr_pct_floor_enabled: Optional[bool] = None
+    wick_atr_pct_floor: Optional[float] = Field(default=None, ge=0, le=5)
+    wick_atr_quiet_mult: Optional[float] = Field(default=None, gt=0, le=10)
+    wick_atr_pct_floor2: Optional[float] = Field(default=None, ge=0, le=5)
+    wick_atr_quiet_mult2: Optional[float] = Field(default=None, gt=0, le=10)
     wick_martingale_mode: Optional[Literal["price_drop", "price_and_wt"]] = None
     wick_volume_mode: Optional[Literal["original", "instant_early", "real_only"]] = None
     wick_instant_active_until_pct: Optional[float] = Field(default=None, ge=0, le=1)
@@ -350,6 +383,11 @@ class StrategyResponse(BaseModel):
     wick_rebound_abort_pct: float = 35.0
     wick_rebound_wait_sec: float = 0.0
     wick_ema25_filter_enabled: bool = True
+    wick_atr_pct_floor_enabled: bool = False
+    wick_atr_pct_floor: float = 0.5
+    wick_atr_quiet_mult: float = 2.0
+    wick_atr_pct_floor2: float = 0.25
+    wick_atr_quiet_mult2: float = 3.0
     wick_martingale_mode: str = "price_and_wt"
     wick_volume_mode: str = "original"
     wick_instant_active_until_pct: float = 0.5

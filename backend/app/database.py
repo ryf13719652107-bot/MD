@@ -97,6 +97,11 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN wick_rebound_abort_pct FLOAT DEFAULT 35.0",
             "ALTER TABLE strategies ADD COLUMN wick_rebound_wait_sec FLOAT DEFAULT 0.0",
             "ALTER TABLE strategies ADD COLUMN wick_ema25_filter_enabled BOOLEAN DEFAULT 1",
+            "ALTER TABLE strategies ADD COLUMN wick_atr_pct_floor_enabled BOOLEAN DEFAULT 0",
+            "ALTER TABLE strategies ADD COLUMN wick_atr_pct_floor FLOAT DEFAULT 0.5",
+            "ALTER TABLE strategies ADD COLUMN wick_atr_quiet_mult FLOAT DEFAULT 2.0",
+            "ALTER TABLE strategies ADD COLUMN wick_atr_pct_floor2 FLOAT DEFAULT 0.25",
+            "ALTER TABLE strategies ADD COLUMN wick_atr_quiet_mult2 FLOAT DEFAULT 3.0",
             "ALTER TABLE strategies ADD COLUMN wick_martingale_mode VARCHAR(32) DEFAULT 'price_and_wt'",
             "ALTER TABLE strategies ADD COLUMN skip_min_qty_exceeds BOOLEAN DEFAULT 1",
             "ALTER TABLE accounts ADD COLUMN cashflow_sync_cursor_ms INTEGER",
@@ -275,6 +280,56 @@ async def init_db():
                 lambda c: c.exec_driver_sql(
                     "UPDATE strategies SET wick_ema25_filter_enabled=1 "
                     "WHERE wick_ema25_filter_enabled IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_atr_pct_floor_enabled=0 "
+                    "WHERE wick_atr_pct_floor_enabled IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_atr_pct_floor=0.5 "
+                    "WHERE wick_atr_pct_floor IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_atr_quiet_mult=2.0 "
+                    "WHERE wick_atr_quiet_mult IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_atr_pct_floor2=0.25 "
+                    "WHERE wick_atr_pct_floor2 IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_atr_quiet_mult2=3.0 "
+                    "WHERE wick_atr_quiet_mult2 IS NULL"
                 )
             )
         except Exception:

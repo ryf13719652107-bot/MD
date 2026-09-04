@@ -38,6 +38,16 @@ export interface Strategy {
   wick_rebound_enabled: boolean;
   /** 1m 开盘 vs EMA25：空开盘低于EMA不做空；多开盘高于EMA不做多；默认开 */
   wick_ema25_filter_enabled: boolean;
+  /** 低波动 ATR 地板：N 至少=开盘×地板%×ATR倍数×安静倍数；默认关 */
+  wick_atr_pct_floor_enabled: boolean;
+  /** 第1层垫高用的 ATR%；默认 0.5 */
+  wick_atr_pct_floor: number;
+  /** 低波动时再乘的 ATR 倍数；默认 2 */
+  wick_atr_quiet_mult: number;
+  /** 第2层 ATR/开盘 % 触发阈值；默认 0.25；须小于第1层；0=关闭 */
+  wick_atr_pct_floor2: number;
+  /** 第2层安静倍数；默认 3（垫第1层 0.5%） */
+  wick_atr_quiet_mult2: number;
   /** 反弹占针深 % 触发市价；默认 20 */
   wick_rebound_trigger_pct: number;
   /** 反弹占针深 % 放弃（超此为反转）；默认 35 */
@@ -141,6 +151,11 @@ export interface StrategyFormData {
   wick_arm_grace_max_tip_gap_pct: number;
   wick_rebound_enabled: boolean;
   wick_ema25_filter_enabled: boolean;
+  wick_atr_pct_floor_enabled: boolean;
+  wick_atr_pct_floor: number;
+  wick_atr_quiet_mult: number;
+  wick_atr_pct_floor2: number;
+  wick_atr_quiet_mult2: number;
   wick_rebound_trigger_pct: number;
   wick_rebound_abort_pct: number;
   wick_rebound_wait_sec: number;

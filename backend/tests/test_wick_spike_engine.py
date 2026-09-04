@@ -1062,3 +1062,186 @@ def test_last_trade_on_bar_rejects_previous_bar_print():
     assert last_trade_on_bar(180_500, bar_open, tf_ms) is True
     assert last_trade_on_bar(0, bar_open, tf_ms) is True  # 无成交时间，交给 forming close
     assert last_trade_on_bar(180_000, 0, tf_ms) is True
+
+
+def test_effective_atr_n_quiet_uses_floor_times_quiet_mult():
+    from app.services.wick_spike_engine import effective_atr_n
+
+    params = WickSpikeParams(
+        direction="long",
+        atr_mult=6.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+    )
+    snap = _snap(open_=0.09938, atr=0.0004075)
+    n = effective_atr_n(params, snap)
+    assert abs(n / 0.09938 * 100.0 - 6.0) < 1e-6
+
+
+def test_effective_atr_n_very_quiet_pads_half_pct_times_three():
+    """ATR% < 0.25% 时垫 0.5% 再 ×3 → 约 9%（atr_mult=6）。"""
+    from app.services.wick_spike_engine import effective_atr_n
+
+    params = WickSpikeParams(
+        direction="long",
+        atr_mult=6.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+        atr_pct_floor2=0.25,
+        atr_quiet_mult2=3.0,
+    )
+    snap = _snap(open_=100.0, atr=0.20)
+    n = effective_atr_n(params, snap)
+    assert abs(n / 100.0 * 100.0 - 9.0) < 1e-6
+
+
+def test_effective_atr_n_high_vol_unchanged():
+    from app.services.wick_spike_engine import effective_atr_n, raw_atr_n
+
+    params = WickSpikeParams(
+        direction="long",
+        atr_mult=6.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+    )
+    snap = _snap(open_=100.0, atr=1.2)
+    assert abs(effective_atr_n(params, snap) - raw_atr_n(params, snap)) < 1e-12
+
+
+def test_atr_pct_floor_blocks_quiet_coin_medium_spike():
+    """过最小涨跌幅和原始 ATR 倍数，过不了地板加严 → 拦截。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=6.0,
+        min_move_pct=4.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+    )
+    snap = _snap(open_=100.0, atr=0.41, vol_now=80.0, vol_sma=10.0, high=100.0, low=95.5)
+    assert on_tick(state, params, snap, last_price=95.5, now_ms=1) is None
+    diag = near_miss_diag(params, snap, state, 95.5, now_ms=1)
+    assert diag is not None
+    assert "atr_floor_boost=True" in diag
+    assert "atr_floor_block=True" in diag
+
+
+def test_atr_pct_floor_allows_when_deep_enough():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=6.0,
+        min_move_pct=4.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+    )
+    snap = _snap(open_=100.0, atr=0.41, vol_now=80.0, vol_sma=10.0, high=100.0, low=93.5)
+    assert on_tick(state, params, snap, last_price=93.5, now_ms=1) == Signal.LONG
+
+
+def test_atr_pct_floor_off_keeps_raw_threshold():
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=6.0,
+        min_move_pct=4.0,
+        atr_pct_floor_enabled=False,
+    )
+    snap = _snap(open_=100.0, atr=0.41, vol_now=80.0, vol_sma=10.0, high=100.0, low=95.5)
+    assert on_tick(state, params, snap, last_price=95.5, now_ms=1) == Signal.LONG
+
+
+def test_atr_pct_floor_near_miss_when_boosted_progress_below_half():
+    """加严后 progress<0.5，但原始倍数已刺破 → 仍记近失以便统计拦截。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=6.0,
+        min_move_pct=4.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+    )
+    snap = _snap(open_=100.0, atr=0.41, vol_now=80.0, vol_sma=10.0, high=100.0, low=97.2)
+    assert on_tick(state, params, snap, last_price=97.2, now_ms=1) is None
+    diag = near_miss_diag(params, snap, state, 97.2, now_ms=1)
+    assert diag is not None
+    assert "atr_floor_block=True" in diag
+
+
+def test_atr_pct_floor_tier2_needs_about_9pct():
+    """极低波动：垫 0.5%×3≈9%；7% 拦、10% 过。"""
+    state = WickSymbolState()
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=6.0,
+        min_move_pct=4.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+        atr_pct_floor2=0.25,
+        atr_quiet_mult2=3.0,
+    )
+    snap = _snap(open_=100.0, atr=0.20, vol_now=80.0, vol_sma=10.0, high=100.0, low=93.0)
+    assert on_tick(state, params, snap, last_price=93.0, now_ms=1) is None
+    diag = near_miss_diag(params, snap, state, 93.0, now_ms=1)
+    assert diag is not None
+    assert "atr_floor_q=3" in diag
+    snap2 = _snap(open_=100.0, atr=0.20, vol_now=80.0, vol_sma=10.0, high=100.0, low=90.0)
+    assert on_tick(state, params, snap2, last_price=90.0, now_ms=2) == Signal.LONG
+
+
+def test_effective_atr_n_mid_band_uses_layer1_floor():
+    """ATR%=0.55% 原倍数约 3.3%，应垫到 6%，避免比更闷的币更容易开。"""
+    from app.services.wick_spike_engine import effective_atr_n, raw_atr_n
+
+    params = WickSpikeParams(
+        direction="long",
+        volume_mult=8.0,
+        atr_mult=6.0,
+        min_move_pct=4.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+        atr_pct_floor2=0.25,
+        atr_quiet_mult2=3.0,
+    )
+    snap = _snap(open_=100.0, atr=0.55)
+    n = effective_atr_n(params, snap)
+    assert abs(n / 100.0 * 100.0 - 6.0) < 1e-6
+    assert raw_atr_n(params, snap) < n
+    state = WickSymbolState()
+    mid = _snap(open_=100.0, atr=0.55, vol_now=80.0, vol_sma=10.0, high=100.0, low=95.8)
+    assert on_tick(state, params, mid, last_price=95.8, now_ms=1) is None
+    deep = _snap(open_=100.0, atr=0.55, vol_now=80.0, vol_sma=10.0, high=100.0, low=93.5)
+    assert on_tick(WickSymbolState(), params, deep, last_price=93.5, now_ms=1) == Signal.LONG
+
+
+def test_atr_floor_tier2_ignored_when_not_stricter_than_tier1():
+    """floor2 >= floor1 时忽略第2层，避免 0.55% 误走 ×3≈9%。"""
+    from app.services.wick_spike_engine import effective_atr_n
+
+    params = WickSpikeParams(
+        direction="long",
+        atr_mult=6.0,
+        atr_pct_floor_enabled=True,
+        atr_pct_floor=0.5,
+        atr_quiet_mult=2.0,
+        atr_pct_floor2=0.6,
+        atr_quiet_mult2=3.0,
+    )
+    snap = _snap(open_=100.0, atr=0.55)
+    n = effective_atr_n(params, snap)
+    assert abs(n / 100.0 * 100.0 - 6.0) < 1e-6
+
+

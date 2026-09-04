@@ -55,6 +55,7 @@ from .wick_spike_engine import (
     build_bar_snapshot,
     clear_rebound,
     enrich_snap_with_trades,
+    effective_atr_n,
     effective_volume_mult,
     is_arm_active,
     last_trade_on_bar,
@@ -177,6 +178,31 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
             True
             if getattr(strategy, "wick_ema25_filter_enabled", None) is None
             else bool(strategy.wick_ema25_filter_enabled)
+        ),
+        atr_pct_floor_enabled=(
+            False
+            if getattr(strategy, "wick_atr_pct_floor_enabled", None) is None
+            else bool(strategy.wick_atr_pct_floor_enabled)
+        ),
+        atr_pct_floor=float(
+            getattr(strategy, "wick_atr_pct_floor", 0.5)
+            if getattr(strategy, "wick_atr_pct_floor", None) is not None
+            else 0.5
+        ),
+        atr_quiet_mult=float(
+            getattr(strategy, "wick_atr_quiet_mult", 2.0)
+            if getattr(strategy, "wick_atr_quiet_mult", None) is not None
+            else 2.0
+        ),
+        atr_pct_floor2=float(
+            getattr(strategy, "wick_atr_pct_floor2", 0.25)
+            if getattr(strategy, "wick_atr_pct_floor2", None) is not None
+            else 0.25
+        ),
+        atr_quiet_mult2=float(
+            getattr(strategy, "wick_atr_quiet_mult2", 3.0)
+            if getattr(strategy, "wick_atr_quiet_mult2", None) is not None
+            else 3.0
         ),
         # 成交量确认模式：original/instant_early/real_only
         volume_mode=str(getattr(strategy, "wick_volume_mode", "original") or "original"),
@@ -1741,7 +1767,7 @@ class WickSpikeRunner:
     ) -> str:
         """腿锁内：门禁 + 市价开仓。调用方必须已持有 strategy_leg_lock。"""
         vol_ratio = (snap.vol_now / snap.vol_sma) if snap.vol_sma > 0 else 0.0
-        n = snap.atr * params.atr_mult
+        n = effective_atr_n(params, snap)
         # 优先用武装极值，与 on_tick 决策一致
         if extreme_override is not None and float(extreme_override) > 0:
             extreme = float(extreme_override)

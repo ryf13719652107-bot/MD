@@ -68,6 +68,22 @@ class Strategy(Base):
     wick_ema25_filter_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="1"
     )
+    # 低波动 ATR 地板：N 至少 = 开盘×地板%×ATR倍数×安静倍数；第2层仅 ATR% < floor2 < floor1 时再叠倍数
+    wick_atr_pct_floor_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    wick_atr_pct_floor: Mapped[float] = mapped_column(
+        Float, default=0.5, server_default="0.5"
+    )
+    wick_atr_quiet_mult: Mapped[float] = mapped_column(
+        Float, default=2.0, server_default="2.0"
+    )
+    wick_atr_pct_floor2: Mapped[float] = mapped_column(
+        Float, default=0.25, server_default="0.25"
+    )
+    wick_atr_quiet_mult2: Mapped[float] = mapped_column(
+        Float, default=3.0, server_default="3.0"
+    )
     # 反弹占针深%触发市价（开盘100针尖90，深10%，20%=92触发）
     wick_rebound_trigger_pct: Mapped[float] = mapped_column(
         Float, default=20.0, server_default="20.0"

@@ -27,6 +27,10 @@ _NEAR_MISS_RE = re.compile(
     + r"(?:\s+await_vol=(?P<await_vol>\w+))?"
     + r"(?:\s+retrace_waived=(?P<retrace_waived>\w+))?"
     + r"(?:\s+ema25_block=(?P<ema25_block>\w+))?"
+    + r"(?:\s+atr_pct=(?P<atr_pct>[^\s]+))?"
+    + r"(?:\s+atr_floor_boost=(?P<atr_floor_boost>\w+))?"
+    + r"(?:\s+atr_floor_block=(?P<atr_floor_block>\w+))?"
+    + r"(?:\s+atr_floor_q=(?P<atr_floor_q>[^\s]+))?"
 )
 
 # 新格式（含 tip_gap / open / ext / progress）
@@ -106,6 +110,10 @@ class NearMissRow:
     await_vol: bool | None = None
     retrace_waived: bool | None = None
     ema25_block: bool | None = None
+    atr_pct: float = float("nan")
+    atr_floor_boost: bool | None = None
+    atr_floor_block: bool | None = None
+    atr_floor_q: float = float("nan")
 
     @property
     def tip_gap_pct(self) -> float:
@@ -254,6 +262,18 @@ def parse_line(line: str) -> Optional[object]:
             ema25_block=(
                 _b(gd["ema25_block"]) if gd.get("ema25_block") is not None else None
             ),
+            atr_pct=_f(gd.get("atr_pct")),
+            atr_floor_boost=(
+                _b(gd["atr_floor_boost"])
+                if gd.get("atr_floor_boost") is not None
+                else None
+            ),
+            atr_floor_block=(
+                _b(gd["atr_floor_block"])
+                if gd.get("atr_floor_block") is not None
+                else None
+            ),
+            atr_floor_q=_f(gd.get("atr_floor_q")),
         )
     m = _OPENED_RE.search(line)
     if m:
@@ -707,8 +727,26 @@ def build_analysis(
     deep_u = sorted(dedup.values(), key=lambda x: (x.ts, x.symbol))
 
     reason: Counter[str] = Counter()
+    floor_boosted_n = 0
+    floor_blocked_n = 0
+    floor_blocked_q2_n = 0
     for r in report.near_misses:
-        if r.pierce and not r.vol_hot:
+        if r.atr_floor_boost is True:
+            floor_boosted_n += 1
+        floor_hit = r.atr_floor_block is True
+        if floor_hit:
+            floor_blocked_n += 1
+            if r.atr_floor_q == r.atr_floor_q and r.atr_floor_q >= 2.5:
+                floor_blocked_q2_n += 1
+        if r.ema25_block is True:
+            reason["EMA25趋势过滤"] += 1
+        elif floor_hit:
+            q = r.atr_floor_q
+            if q == q and q > 1:
+                reason[f"低波动ATR地板×{q:g}"] += 1
+            else:
+                reason["低波动ATR地板加严"] += 1
+        elif r.pierce and not r.vol_hot:
             reason["已刺破但量能不够"] += 1
         elif (not r.pierce) and r.vol_hot:
             reason["量能够但未刺破"] += 1
@@ -797,6 +835,12 @@ def build_analysis(
     text_lines.append(f"下单: {_summary_zh(open_api_stat, unit='ms')}")
 
     text_lines.append("")
+    text_lines.append("--- 低波动ATR地板 ---")
+    text_lines.append(
+        f"近失中已加严 {floor_boosted_n} 条 / 因此未刺破（拦截） {floor_blocked_n} 条"
+        f"（其中第2层拦截 {floor_blocked_q2_n} 条；原始 ATR×倍数本会刺破，加严后未达）"
+    )
+    text_lines.append("")
     text_lines.append("--- 近失卡点分布 ---")
     for k, v in reason.most_common():
         text_lines.append(f"  {k}: {v}")
@@ -869,6 +913,12 @@ def build_analysis(
             },
             "rows": rows,
         },
+        "atr_pct_floor": {
+            "boosted_n": floor_boosted_n,
+            "blocked_n": floor_blocked_n,
+            "blocked_tier2_n": floor_blocked_q2_n,
+            "note": "第1层：N至少=开盘×0.5%×atr_mult×2（约6%）；第2层 ATR%<0.25% 再×3≈9%（ATR×6）",
+        },
         "text": "\n".join(text_lines),
     }
 
@@ -890,6 +940,22 @@ def _near_miss_reason_zh(r: NearMissRow) -> str:
         if d == "long":
             return "EMA25过滤：1m开盘高于EMA25，偏强不做多"
         return "EMA25过滤：开盘相对EMA25不符方向"
+    floor_block = r.atr_floor_block is True
+    if floor_block:
+        pct_s = (
+            f"ATR%={r.atr_pct:.3f}"
+            if r.atr_pct == r.atr_pct
+            else "ATR%偏低"
+        )
+        amp_s = f"；amp%={r.move_pct:.2f}" if r.move_pct == r.move_pct else ""
+        n_pct = ""
+        if r.open > 0 and r.atr_n == r.atr_n:
+            n_pct = f"，加严后刺破约需 {r.atr_n / r.open * 100.0:.2f}%"
+        q_s = f"×{r.atr_floor_q:g}" if r.atr_floor_q == r.atr_floor_q else ""
+        return (
+            f"低波动ATR地板{q_s}：{pct_s}，原始ATR倍数已刺破但加严后未达"
+            f"{n_pct}{amp_s}"
+        )
     if r.pierce and r.vol_x < r.need_x:
         return (
             f"已刺破但量能不足：vol×={r.vol_x:.2f} < need×={r.need_x:g}"
@@ -1009,6 +1075,8 @@ def build_symbol_monitor(
                 ),
                 "armed": r.armed,
                 "arm_age_ms": r.arm_age_ms,
+                "atr_pct": r.atr_pct if r.atr_pct == r.atr_pct else None,
+                "atr_floor_block": r.atr_floor_block,
                 "reason": why,
             }
         )
