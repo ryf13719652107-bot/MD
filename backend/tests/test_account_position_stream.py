@@ -69,3 +69,19 @@ def test_clear_leg_alias():
     s.set_leg(7, "ETHUSDT", "short", 2.0)
     s.clear_leg(7, "ETHUSDT", "short")
     assert s.leg_qty(7, "ETHUSDT", "short") == 0.0
+
+
+def test_existing_leg_qty_trusts_fresh_stream_zero():
+    """账户流已空仓时，不得用过期 tick_ctx 腿数挡再开。"""
+    from app.services.tick_context import TickContext
+    from app.services.wick_spike_runner import _existing_leg_qty, account_position_stream
+
+    acc = 900_001
+    try:
+        account_position_stream.set_leg(acc, "BULLAUSDT", "short", 0.0)
+        ctx = TickContext()
+        ctx.exchange_legs[("BULLAUSDT", "short")] = 12.0
+        assert _existing_leg_qty(acc, "BULLAUSDT", "short", ctx, "BULLAUSDT") == 0.0
+    finally:
+        account_position_stream._legs.pop(acc, None)
+        account_position_stream._updated_at.pop(acc, None)

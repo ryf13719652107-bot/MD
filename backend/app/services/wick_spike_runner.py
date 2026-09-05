@@ -46,7 +46,7 @@ from .account_position_stream import account_position_stream
 from .position_manager import PositionManager, _norm_sym
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem, hold_account_sync
-from .strategy_concurrency import hold_strategy_symbol
+from .strategy_concurrency import hold_strategy_symbol, strategy_leg_lock
 from .leverage_prewarm import prewarm_symbols_leverage
 from .wick_spike_engine import (
     WickSpikeParams,
@@ -217,6 +217,24 @@ def _wick_params_from_strategy(strategy: Strategy) -> tuple[WickSpikeParams, int
     timeframe = strategy.timeframe
     direction = strategy.direction
     return params, atr_period, vol_period, timeframe, direction
+
+
+def _existing_leg_qty(
+    account_id: int,
+    symbol: str,
+    side: str,
+    tick_ctx: TickContext,
+    sym_key: str,
+) -> float:
+    """账户流或本轮 tick 缓存里的同向腿数量；没有则 0。
+
+    账户流新鲜且为 0 时必须信 0，不能回落到过期 tick_ctx（平仓后会假 has_pos 挡再开）。
+    """
+    if account_id > 0:
+        q = account_position_stream.leg_qty(account_id, symbol, side)
+        if q is not None:
+            return float(q) if q > 0 else 0.0
+    return float((tick_ctx.exchange_legs or {}).get((sym_key, side), 0) or 0)
 
 
 def _track_bar_ts(st: WickSymbolState) -> Optional[int]:
@@ -952,22 +970,41 @@ class WickSpikeRunner:
                                 e,
                             )
                             release_bar_trigger(_st)
-                            return
+                        else:
+                            now_done = int(time.time() * 1000)
+                            open_side = (
+                                (_signal.value or getattr(_strategy, "direction", None) or "")
+                                .lower()
+                            )
+                            already_open = (
+                                _existing_leg_qty(
+                                    int(getattr(_strategy, "account_id", 0) or 0),
+                                    _sym,
+                                    open_side,
+                                    _ctx,
+                                    _sym_key,
+                                )
+                                > 0
+                            )
+                            # 先锁本根再放 inflight，避免成交后窗口里再打一枪
+                            if outcome == "opened" or outcome == "has_pos" or already_open:
+                                mark_bar_triggered(
+                                    _st, _params, _bar_ts, now_done
+                                )
+                                if outcome != "opened":
+                                    clear_rebound(_st)
+                                if outcome == "opened":
+                                    next_refresh = min(next_refresh, time.time() + 1.0)
+                            elif outcome in ("busy", "retryable_fail"):
+                                # 同腿还在下单/写库：勿清触发，否则会再打出「占用中」
+                                if not strategy_leg_lock(
+                                    strategy_id, _sym_key, open_side
+                                ).locked():
+                                    release_bar_trigger(_st)
+                            else:
+                                clear_rebound(_st)
                         finally:
                             open_inflight.discard(_sym_key)
-
-                        now_done = int(time.time() * 1000)
-                        if outcome == "opened":
-                            mark_bar_triggered(
-                                _st, _params, _bar_ts, now_done
-                            )
-                            # 尽快刷新上下文，纳入新仓腿
-                            next_refresh = min(next_refresh, time.time() + 1.0)
-                        elif outcome in ("busy", "retryable_fail"):
-                            release_bar_trigger(_st)
-                        else:
-                            # has_pos / blocked：锁定本根，清反弹态
-                            clear_rebound(_st)
 
                     self._fire_bg(_bg_try_open())
 
@@ -1711,6 +1748,11 @@ class WickSpikeRunner:
             )
             return reason
 
+        acc_id = int(getattr(strategy, "account_id", 0) or 0)
+        # 已成交/已有同向腿：不要再去抢锁，避免成交旁刷「占用中」
+        if _existing_leg_qty(acc_id, symbol, side, tick_ctx, sym_key) > 0:
+            return _skip("has_pos", "already_open")
+
         # 同策略同币同向短等；管其它币/另一条反向策略不影响
         try:
             async with hold_strategy_symbol(
@@ -1737,11 +1779,15 @@ class WickSpikeRunner:
                     skip=_skip,
                 )
         except asyncio.TimeoutError:
-            strategy_log_service.info(
+            # 市价单持锁常 >0.5s；另一路等到超时。若已经成交则不当占用。
+            if _existing_leg_qty(acc_id, symbol, side, tick_ctx, sym_key) > 0:
+                return _skip("has_pos", "leg_lock_timeout")
+            logger.info(
+                "wick_spike skip strategy=%d %s reason=busy leg_lock_timeout",
                 strategy_id,
-                f"{symbol} 接针触发但同向腿占用中，稍后重试",
+                sym_key,
             )
-            return _skip("busy", "leg_lock_timeout")
+            return "busy"
 
     async def _try_open_locked(
         self,

@@ -607,6 +607,23 @@ def _klines_for_confirmed_signal_only(klines: list, timeframe: str) -> list:
     return klines[:-1]
 
 
+def _confirmed_klines_fixed(
+    klines: list,
+    timeframe: str,
+    *,
+    limit: int | None = None,
+) -> list:
+    """已收盘 K，再截成固定长度。
+
+    WT/EMA 有路径依赖：缓冲 500 根和 200 根算出的 WT1 会差 1～2，刚好卡在 ±60
+    时就会出现「同参数一台加仓一台跳过」。各机统一用最近 ``limit`` 根已收盘 K。
+    """
+    confirmed = _klines_for_confirmed_signal_only(klines, timeframe)
+    if limit is not None and int(limit) > 0 and len(confirmed) > int(limit):
+        return confirmed[-int(limit) :]
+    return confirmed
+
+
 def wick_martingale_mode_needs_wt(mode: str | None) -> bool:
     """接针加仓是否需要 WT 确认（在涨跌幅门槛之后）。缺省按 price_and_wt。"""
     return (mode or "price_and_wt") != "price_drop"
@@ -629,10 +646,17 @@ def martingale_wt_confirm_allows_add(
     wt = calculate_wavetrend(klines_confirm, wt_channel_length, wt_average_length)
     if wt is None:
         return True, "WT不可用，跳过确认"
+    tail = ""
+    try:
+        n = len(klines_confirm)
+        bar_ts = int(klines_confirm[-1][0])
+        tail = f" n={n} bar={bar_ts}"
+    except (TypeError, ValueError, IndexError):
+        tail = f" n={len(klines_confirm)}"
     confirm = generate_wt_signal(wt, direction, wt_os_level, wt_ob_level)
     if confirm == Signal.NEUTRAL:
-        return False, f"WT1={wt['wt1']:.2f} 信号已消失"
-    return True, f"WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f}"
+        return False, f"WT1={wt['wt1']:.2f} 信号已消失{tail}"
+    return True, f"WT1={wt['wt1']:.2f} WT2={wt['wt2']:.2f}{tail}"
 
 
 class PositionManager:
@@ -1343,7 +1367,7 @@ class PositionManager:
         )
         if not klines:
             return None
-        confirmed = _klines_for_confirmed_signal_only(klines, timeframe)
+        confirmed = _confirmed_klines_fixed(klines, timeframe, limit=limit)
         st = calculate_supertrend(confirmed, atr_period, factor)
         if st is None:
             return None
@@ -1409,7 +1433,9 @@ class PositionManager:
         if not klines:
             return None
 
-        klines_signal = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
+        klines_signal = _confirmed_klines_fixed(
+            klines, strategy.timeframe, limit=limit
+        )
         rsi = 0.0
         signal_label = "RSI"
         last_rsi_val: float | None = None
@@ -2976,7 +3002,11 @@ class PositionManager:
             )
             and klines is not None
         ):
-            klines_confirm = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
+            klines_confirm = _confirmed_klines_fixed(
+                klines,
+                strategy.timeframe,
+                limit=self._wt_like_limit(strategy.signal_source),
+            )
             ok, detail = martingale_wt_confirm_allows_add(
                 klines_confirm,
                 direction=strategy.direction,
@@ -3000,7 +3030,11 @@ class PositionManager:
             and klines is not None
             and public_binance is not None
         ):
-            klines_confirm = _klines_for_confirmed_signal_only(klines, strategy.timeframe)
+            klines_confirm = _confirmed_klines_fixed(
+                klines,
+                strategy.timeframe,
+                limit=self._wt_like_limit(strategy.signal_source),
+            )
             if strategy.signal_source == "wavetrend":
                 ok, detail = martingale_wt_confirm_allows_add(
                     klines_confirm,
