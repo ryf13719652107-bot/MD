@@ -712,10 +712,188 @@ class BinanceService:
         merged["filled"] = total_filled
         return merged
 
+    def _native_symbol(self, symbol: str) -> str:
+        formatted = self._format_symbol(symbol)
+        return formatted.replace("/", "").replace(":USDT", "").replace("_", "").upper()
+
+    @staticmethod
+    def _unknown_order_error(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return (
+            "-2011" in msg
+            or "-2013" in msg
+            or "unknown order" in msg
+            or "order does not exist" in msg
+            or "does not exist" in msg
+        )
+
+    @staticmethod
+    def _algo_id_param(order_id: str) -> int | str:
+        oid = str(order_id or "").strip()
+        return int(oid) if oid.isdigit() else oid
+
+    async def _algo_request(self, method: str, params: dict):
+        """POST/GET/DELETE /fapi/v1/algoOrder。优先 ccxt 隐式方法，旧版回退 request。"""
+        verb = (method or "GET").upper()
+        implicit = {
+            "POST": "fapiPrivatePostAlgoOrder",
+            "GET": "fapiPrivateGetAlgoOrder",
+            "DELETE": "fapiPrivateDeleteAlgoOrder",
+        }.get(verb)
+        fn = getattr(self.exchange, implicit, None) if implicit else None
+        if callable(fn):
+            return await fn(params)
+        req = getattr(self.exchange, "request", None)
+        if not callable(req):
+            raise RuntimeError("ccxt 缺少 Algo Order API，请升级 ccxt")
+        return await req("algoOrder", "fapiPrivate", verb, params)
+
+    @staticmethod
+    def _normalize_algo_order(raw: dict) -> dict:
+        """把 Algo 回报收成现有 TP/SL 链路能认的 ccxt 形态（id/status/amount/filled）。"""
+        info = dict(raw) if isinstance(raw, dict) else {}
+        algo_id = info.get("algoId") or info.get("id") or ""
+        algo_status = str(info.get("algoStatus") or info.get("status") or "").upper()
+        qty = 0.0
+        filled = 0.0
+        avg = 0.0
+        price = 0.0
+        for key in ("quantity", "origQty", "amount"):
+            try:
+                qty = float(info.get(key) or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            if qty > 0:
+                break
+        for key in ("executedQty", "executed_quantity", "filled"):
+            try:
+                filled = float(info.get(key) or 0)
+            except (TypeError, ValueError):
+                filled = 0.0
+            if filled > 0:
+                break
+        for key in ("averagePrice", "avgPrice", "actualPrice"):
+            try:
+                avg = float(info.get(key) or 0)
+            except (TypeError, ValueError):
+                avg = 0.0
+            if avg > 0:
+                break
+        for key in ("price", "triggerPrice"):
+            try:
+                price = float(info.get(key) or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            if price > 0:
+                break
+        status_map = {
+            "NEW": "open",
+            "WORKING": "open",
+            "TRIGGERING": "open",
+            "TRIGGERED": "open",
+            "FINISHED": "closed",
+            "FILLED": "filled",
+            "CANCELED": "canceled",
+            "CANCELLED": "canceled",
+            "REJECTED": "rejected",
+            "EXPIRED": "expired",
+        }
+        status = status_map.get(algo_status, (algo_status or "open").lower())
+        if status in ("closed", "filled") and filled <= 0 and avg <= 0 and algo_status == "FINISHED":
+            status = "canceled"
+        out = {
+            "id": str(algo_id),
+            "status": status,
+            "amount": qty,
+            "filled": filled,
+            "average": avg if avg > 0 else None,
+            "price": price,
+            "info": info,
+        }
+        actual = str(info.get("actualOrderId") or "").strip()
+        if actual and actual not in ("0",):
+            out["info"] = dict(info)
+        return out
+
+    @staticmethod
+    def _merge_algo_child(algo: dict, child: dict) -> dict:
+        merged = dict(algo)
+        st = (child.get("status") or "").lower()
+        if st:
+            merged["status"] = st
+        try:
+            filled = float(child.get("filled") or 0)
+        except (TypeError, ValueError):
+            filled = 0.0
+        if filled > 0:
+            merged["filled"] = filled
+        try:
+            avg = float(child.get("average") or 0)
+        except (TypeError, ValueError):
+            avg = 0.0
+        if avg > 0:
+            merged["average"] = avg
+        info = dict(merged.get("info") or {})
+        info["child"] = child
+        merged["info"] = info
+        return merged
+
+    async def _fetch_algo_order(self, order_id: str, symbol: str) -> dict:
+        native = self._native_symbol(symbol)
+        raw = await self._algo_request(
+            "GET", {"algoId": self._algo_id_param(order_id), "symbol": native}
+        )
+        if isinstance(raw, list):
+            raw = raw[0] if raw else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        order = self._normalize_algo_order(raw)
+        actual = str((raw or {}).get("actualOrderId") or "").strip()
+        if actual and actual not in ("0",):
+            try:
+                child = await self.exchange.fetch_order(actual, self._format_symbol(symbol))
+                order = self._merge_algo_child(order, child)
+            except Exception:
+                pass
+        return order
+
+    async def fetch_order(self, order_id: str, symbol: str) -> dict:
+        """普通限价先查 /order；接针K止损是 algoId，未找到再查 /algoOrder。"""
+        formatted = self._format_symbol(symbol)
+        try:
+            return await self.exchange.fetch_order(order_id, formatted)
+        except Exception as e:
+            if not self._unknown_order_error(e):
+                raise
+        return await self._fetch_algo_order(order_id, symbol)
+
     async def cancel_order(self, order_id: str, symbol: str) -> dict:
-        """Cancel an existing order by ID."""
-        formatted_symbol = self._format_symbol(symbol)
-        return await self.exchange.cancel_order(order_id, formatted_symbol)
+        """先撤普通单；未知则撤 Algo。已触发的 STOP 要撤 actualOrderId。"""
+        formatted = self._format_symbol(symbol)
+        try:
+            return await self.exchange.cancel_order(order_id, formatted)
+        except Exception as e:
+            if not self._unknown_order_error(e):
+                raise
+        try:
+            raw = await self._algo_request(
+                "DELETE",
+                {"algoId": self._algo_id_param(order_id), "symbol": self._native_symbol(symbol)},
+            )
+            if isinstance(raw, dict):
+                return self._normalize_algo_order(raw)
+            return {"id": str(order_id), "status": "canceled"}
+        except Exception as e2:
+            if not self._unknown_order_error(e2):
+                raise
+            try:
+                algo = await self._fetch_algo_order(order_id, symbol)
+                actual = str((algo.get("info") or {}).get("actualOrderId") or "").strip()
+                if actual and actual not in ("0",):
+                    return await self.exchange.cancel_order(actual, formatted)
+            except Exception:
+                pass
+            raise e2
 
     async def fetch_my_trades(
         self,
@@ -889,22 +1067,35 @@ class BinanceService:
         stop_price: float | None = None,
         position_side: str = "LONG",
     ) -> dict:
-        """币安 USDM STOP 条件限价。双向只传 positionSide，不带 reduceOnly。"""
+        """币安 USDM STOP 条件限价，走 Algo Order API（普通 /order 会 -4120）。"""
         formatted = self._format_symbol(symbol)
         await self.ensure_markets_loaded()
         raw = float(stop_price) if stop_price is not None else float(price)
         aligned = self._align_stop_price(symbol, raw, side)
-        params = self._order_params(position_side, reduce_only=False)
-        params["stopPrice"] = aligned
-        params["workingType"] = "CONTRACT_PRICE"
-        return await self.exchange.create_order(
-            formatted,
-            "STOP",
-            side,
-            amount,
-            aligned,
-            params,
-        )
+        try:
+            qty = float(self.exchange.amount_to_precision(formatted, amount))
+        except Exception:
+            qty = float(amount)
+        payload: dict = {
+            "algoType": "CONDITIONAL",
+            "symbol": self._native_symbol(symbol),
+            "side": (side or "").upper(),
+            "type": "STOP",
+            "quantity": qty,
+            "triggerPrice": aligned,
+            "price": aligned,
+            "timeInForce": "GTC",
+            "workingType": "CONTRACT_PRICE",
+        }
+        if self.hedge_mode:
+            payload["positionSide"] = position_side
+        raw_order = await self._algo_request("POST", payload)
+        if not isinstance(raw_order, dict):
+            raw_order = {}
+        order = self._normalize_algo_order(raw_order)
+        if not order.get("id"):
+            raise RuntimeError(f"Algo STOP 返回无 algoId: {raw_order}")
+        return order
 
     async def close_position_qty(self, symbol: str, side: str, amount: float) -> dict:
         """按数量减仓平仓（reduceOnly），不扫整腿、不用 closePosition。

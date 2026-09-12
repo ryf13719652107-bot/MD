@@ -388,23 +388,135 @@ async def test_binance_stop_limit_params():
     svc.hedge_mode = True
     svc._pinned = True
     svc._exchange = MagicMock()
-    svc._exchange.create_order = AsyncMock(return_value={"id": "1"})
+    svc._exchange.create_order = AsyncMock()
+    svc._exchange.fapiPrivatePostAlgoOrder = AsyncMock(
+        return_value={"algoId": 10001, "algoStatus": "NEW", "quantity": "2"}
+    )
+    svc._exchange.amount_to_precision = MagicMock(side_effect=lambda _s, a: str(a))
     svc._exchange.price_to_precision = MagicMock(side_effect=lambda _s, p: f"{float(p):.4f}")
     svc._is_expired = lambda: False
     svc.ensure_markets_loaded = AsyncMock()
     svc._format_symbol = lambda s: s
     svc.price_tick_size = lambda _s: 0.01
-    await svc.create_stop_limit_order(
+    out = await svc.create_stop_limit_order(
         "BTCUSDT", "buy", 2.0, 1.21, stop_price=1.21, position_side="SHORT"
     )
-    args, kwargs = svc.exchange.create_order.call_args
-    assert args[1] == "STOP"
-    assert args[2] == "buy"
-    params = args[5]
-    assert params["stopPrice"] == pytest.approx(1.21)
-    assert params["workingType"] == "CONTRACT_PRICE"
-    assert params["positionSide"] == "SHORT"
-    assert "reduceOnly" not in params
+    svc.exchange.create_order.assert_not_called()
+    svc.exchange.fapiPrivatePostAlgoOrder.assert_called_once()
+    payload = svc.exchange.fapiPrivatePostAlgoOrder.call_args[0][0]
+    assert payload["algoType"] == "CONDITIONAL"
+    assert payload["type"] == "STOP"
+    assert payload["side"] == "BUY"
+    assert payload["triggerPrice"] == pytest.approx(1.21)
+    assert payload["price"] == pytest.approx(1.21)
+    assert payload["workingType"] == "CONTRACT_PRICE"
+    assert payload["positionSide"] == "SHORT"
+    assert "reduceOnly" not in payload
+    assert out["id"] == "10001"
+    assert out["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_binance_fetch_order_falls_back_to_algo():
+    from app.services.binance_service import BinanceService
+
+    svc = BinanceService.__new__(BinanceService)
+    svc._pinned = True
+    svc._exchange = MagicMock()
+    svc._is_expired = lambda: False
+    svc._format_symbol = lambda s: "BTC/USDT:USDT"
+    svc.exchange.fetch_order = AsyncMock(side_effect=Exception("binanceusdm -2013 Order does not exist"))
+    svc.exchange.fapiPrivateGetAlgoOrder = AsyncMock(
+        return_value={
+            "algoId": 10001,
+            "algoStatus": "NEW",
+            "quantity": "72.25",
+            "triggerPrice": "0.1380",
+        }
+    )
+    order = await svc.fetch_order("10001", "BTCUSDT")
+    assert order["id"] == "10001"
+    assert order["status"] == "open"
+    assert order["amount"] == pytest.approx(72.25)
+
+
+@pytest.mark.asyncio
+async def test_binance_cancel_order_falls_back_to_algo():
+    from app.services.binance_service import BinanceService
+
+    svc = BinanceService.__new__(BinanceService)
+    svc._pinned = True
+    svc._exchange = MagicMock()
+    svc._is_expired = lambda: False
+    svc._format_symbol = lambda s: "BTC/USDT:USDT"
+    svc.exchange.cancel_order = AsyncMock(side_effect=Exception("binanceusdm -2011 Unknown order sent"))
+    svc.exchange.fapiPrivateDeleteAlgoOrder = AsyncMock(
+        return_value={"algoId": 10001, "algoStatus": "CANCELED"}
+    )
+    out = await svc.cancel_order("10001", "BTCUSDT")
+    assert out["status"] == "canceled"
+    svc.exchange.fapiPrivateDeleteAlgoOrder.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_binance_stop_limit_uses_request_when_implicit_missing():
+    from app.services.binance_service import BinanceService
+
+    svc = BinanceService.__new__(BinanceService)
+    svc.hedge_mode = True
+    svc._pinned = True
+    svc._exchange = MagicMock()
+    svc._exchange.create_order = AsyncMock()
+    svc._exchange.fapiPrivatePostAlgoOrder = None
+    svc._exchange.request = AsyncMock(
+        return_value={"algoId": 20002, "algoStatus": "NEW", "quantity": "2"}
+    )
+    svc._exchange.amount_to_precision = MagicMock(side_effect=lambda _s, a: str(a))
+    svc._exchange.price_to_precision = MagicMock(side_effect=lambda _s, p: f"{float(p):.4f}")
+    svc._is_expired = lambda: False
+    svc.ensure_markets_loaded = AsyncMock()
+    svc._format_symbol = lambda s: s
+    svc.price_tick_size = lambda _s: 0.01
+    out = await svc.create_stop_limit_order(
+        "BTCUSDT", "sell", 2.0, 1.10, stop_price=1.10, position_side="LONG"
+    )
+    svc.exchange.request.assert_called_once()
+    args, _kwargs = svc.exchange.request.call_args
+    assert args[0] == "algoOrder"
+    assert args[1] == "fapiPrivate"
+    assert args[2] == "POST"
+    assert args[3]["type"] == "STOP"
+    assert out["id"] == "20002"
+
+
+@pytest.mark.asyncio
+async def test_binance_fetch_algo_merges_triggered_child_fill():
+    from app.services.binance_service import BinanceService
+
+    svc = BinanceService.__new__(BinanceService)
+    svc._pinned = True
+    svc._exchange = MagicMock()
+    svc._is_expired = lambda: False
+    svc._format_symbol = lambda s: "NIL/USDT:USDT"
+    svc.exchange.fetch_order = AsyncMock(
+        side_effect=[
+            Exception("binanceusdm -2013 Order does not exist"),
+            {"id": "888", "status": "closed", "filled": 72.25, "average": 0.1381},
+        ]
+    )
+    svc.exchange.fapiPrivateGetAlgoOrder = AsyncMock(
+        return_value={
+            "algoId": 10001,
+            "algoStatus": "TRIGGERED",
+            "quantity": "72.25",
+            "actualOrderId": 888,
+        }
+    )
+    order = await svc.fetch_order("10001", "NILUSDT")
+    assert order["id"] == "10001"
+    assert order["status"] == "closed"
+    assert order["filled"] == pytest.approx(72.25)
+    assert order["average"] == pytest.approx(0.1381)
 
 
 @pytest.mark.asyncio

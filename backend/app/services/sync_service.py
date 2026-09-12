@@ -51,8 +51,7 @@ async def _exit_from_tp_orders(
         if not oid:
             continue
         try:
-            # GATE：服务层带 settle + 张→币；币安保持原 exchange.fetch_order
-            if getattr(binance_service, "exchange_id", None) == "gate":
+            if callable(getattr(binance_service, "fetch_order", None)):
                 oi = await binance_service.fetch_order(oid, symbol)
             else:
                 oi = await binance_service.exchange.fetch_order(oid, formatted)

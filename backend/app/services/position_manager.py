@@ -271,8 +271,12 @@ def _order_fill_avg_price(
 
 
 async def _fetch_order(client, order_id: str, symbol: str) -> dict:
-    """查订单：币安保持原 exchange.fetch_order；GATE 走服务层（settle + 张→币）。"""
+    """查订单：GATE 走服务层；币安走服务层（普通单 + Algo 止损）。"""
     if getattr(client, "exchange_id", None) == "gate":
+        return await client.fetch_order(order_id, symbol)
+    if getattr(client, "exchange_id", None) == "binance" and callable(
+        getattr(client, "fetch_order", None)
+    ):
         return await client.fetch_order(order_id, symbol)
     return await client.exchange.fetch_order(order_id, client._format_symbol(symbol))
 
@@ -499,6 +503,7 @@ def _sl_order_still_working(status: str) -> bool:
         "open",
         "new",
         "untriggered",
+        "triggered",
         "partially_filled",
         "partial",
         "",
