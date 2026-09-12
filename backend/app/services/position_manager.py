@@ -437,6 +437,113 @@ def _tp_limit_reduce_only(client) -> bool:
     return getattr(client, "exchange_id", None) == "gate"
 
 
+def wick_bar_sl_enabled(strategy) -> bool:
+    return (
+        (getattr(strategy, "signal_source", None) or "") == "wick_spike"
+        and bool(getattr(strategy, "wick_bar_sl_enabled", False))
+    )
+
+
+def wick_bar_stop_price(
+    side: str,
+    bar_high: float,
+    bar_low: float,
+    tick: float,
+) -> float:
+    """接针K止损价：多=最低外侧 1 tick，空=最高外侧 1 tick。"""
+    side_l = (side or "").lower()
+    try:
+        hi = float(bar_high or 0)
+    except (TypeError, ValueError):
+        hi = 0.0
+    try:
+        lo = float(bar_low or 0)
+    except (TypeError, ValueError):
+        lo = 0.0
+    try:
+        tk = float(tick or 0)
+    except (TypeError, ValueError):
+        tk = 0.0
+    if tk < 0:
+        tk = 0.0
+    if side_l == "long":
+        if lo <= 0:
+            return 0.0
+        if tk <= 0:
+            tk = lo * 1e-6
+        px = lo - tk
+        return px if px > 0 else lo
+    if hi <= 0:
+        return 0.0
+    if tk <= 0:
+        tk = hi * 1e-6
+    return hi + tk
+
+
+def _order_executed_qty(order: dict) -> float:
+    if not isinstance(order, dict):
+        return 0.0
+    info = order.get("info") if isinstance(order.get("info"), dict) else {}
+    for raw in (order.get("filled"), info.get("executedQty"), info.get("executed_qty")):
+        try:
+            v = float(raw or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return v
+    return 0.0
+
+
+def _sl_order_still_working(status: str) -> bool:
+    return (status or "").lower() in (
+        "open",
+        "new",
+        "untriggered",
+        "partially_filled",
+        "partial",
+        "",
+    )
+
+
+def _sl_order_dead_unfilled(status: str, filled: float, avg: float) -> bool:
+    st = (status or "").lower()
+    if st in ("canceled", "cancelled", "expired", "rejected"):
+        return True
+    if st in ("closed", "filled") and filled <= 0 and avg <= 0:
+        return True
+    return False
+
+
+def _client_price_tick(client, symbol: str) -> float:
+    fn = getattr(client, "price_tick_size", None)
+    if not callable(fn):
+        return 0.0
+    try:
+        return float(fn(symbol) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _position_sl_price(positions: list) -> float:
+    for p in positions or []:
+        try:
+            px = float(getattr(p, "stop_loss_price", 0) or 0)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px > 0:
+            return px
+    return 0.0
+
+
+def _position_sl_order_ids(positions: list) -> set[str]:
+    ids: set[str] = set()
+    for p in positions or []:
+        oid = str(getattr(p, "sl_stop_order_id", None) or "").strip()
+        if oid:
+            ids.add(oid)
+    return ids
+
+
 def _order_reduce_only_flag(order: dict) -> bool | None:
     """解析挂单 reduceOnly；无法判断时返回 None。"""
     if not isinstance(order, dict):
@@ -819,6 +926,51 @@ class PositionManager:
             if getattr(p, "tp_limit_order_id", None):
                 p.tp_limit_order_id = None
 
+    async def _cancel_bot_sl_order_ids(
+        self,
+        auth_binance: BinanceService,
+        symbol: str,
+        order_ids: list[str] | set[str],
+        strategy_id: int,
+        *,
+        keep_id: str = "",
+    ) -> None:
+        """只撤销机器人记下的条件止损单号。"""
+        keep = str(keep_id or "")
+        seen: set[str] = set()
+        for oid in order_ids:
+            oid_s = str(oid or "").strip()
+            if not oid_s or oid_s == keep or oid_s in seen:
+                continue
+            seen.add(oid_s)
+            ok = await self._cancel_tp_order_confirmed(auth_binance, oid_s, symbol)
+            if ok:
+                strategy_log_service.info(
+                    strategy_id, f"{symbol} 撤销机器人接针K止损单 id={oid_s}"
+                )
+            else:
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 撤销机器人接针K止损单失败 id={oid_s}"
+                )
+
+    async def cancel_bot_sls_on_positions(
+        self,
+        auth_binance: BinanceService,
+        symbol: str,
+        positions: list,
+        strategy_id: int,
+    ) -> None:
+        """平仓前撤掉这些仓位上的机器人条件止损单。"""
+        ids = _position_sl_order_ids(positions)
+        if not ids:
+            return
+        await self._cancel_bot_sl_order_ids(
+            auth_binance, symbol, ids, strategy_id, keep_id=""
+        )
+        for p in positions:
+            if getattr(p, "sl_stop_order_id", None):
+                p.sl_stop_order_id = None
+
     async def _cancel_duplicate_tp_limits(
         self,
         auth_binance: BinanceService,
@@ -1056,6 +1208,176 @@ class PositionManager:
         extra = f"：{last_err}" if last_err else ""
         strategy_log_service.warning(
             strategy_id, f"{symbol} 补挂止盈失败(已重试){extra} — 仍可用市价止盈兜底"
+        )
+
+    async def _place_sl_stop_order(
+        self,
+        auth_binance: BinanceService,
+        symbol: str,
+        pos_side: str,
+        qty: float,
+        sl_price: float,
+    ) -> dict:
+        close_side = "sell" if pos_side == "long" else "buy"
+        ps = "LONG" if pos_side == "long" else "SHORT"
+        return await auth_binance.create_stop_limit_order(
+            symbol,
+            close_side,
+            qty,
+            sl_price,
+            stop_price=sl_price,
+            position_side=ps,
+        )
+
+    async def _ensure_sl_stop_orders(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        symbol: str,
+        auth_binance: BinanceService,
+        open_positions: list,
+        total_qty: float,
+        pos_side: str,
+    ) -> None:
+        """接针K条件止损：对账/补挂。价取已写入的 stop_loss_price，不跟本根再改。"""
+        bot_positions = _bot_owned_positions(open_positions)
+        if not bot_positions:
+            return
+        bot_qty = sum(float(p.quantity or 0) for p in bot_positions)
+        if bot_qty <= 0:
+            return
+        qty = bot_qty if bot_qty > 0 else float(total_qty or 0)
+        strategy_id = strategy.id
+        existing_ids = _position_sl_order_ids(bot_positions)
+        sl_price = _position_sl_price(bot_positions)
+
+        if not wick_bar_sl_enabled(strategy):
+            if existing_ids:
+                await self._cancel_bot_sl_order_ids(
+                    auth_binance, symbol, existing_ids, strategy_id, keep_id=""
+                )
+                for p in bot_positions:
+                    p.sl_stop_order_id = None
+                await session.flush()
+            return
+        if sl_price <= 0:
+            return
+
+        if existing_ids:
+            keep = sorted(existing_ids)[0]
+            keep_order = None
+            fetch_failed = False
+            try:
+                keep_order = await asyncio.wait_for(
+                    _fetch_order(auth_binance, keep, symbol), timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                keep_order = None
+                fetch_failed = True
+            except Exception as e:
+                keep_order = None
+                fetch_failed = not _is_order_missing_error(e)
+            st = ((keep_order or {}).get("status") or "").lower()
+            if keep_order and _sl_order_still_working(st):
+                if self._tp_qty_ok(keep_order, qty):
+                    for p in bot_positions:
+                        p.sl_stop_order_id = keep
+                        p.stop_loss_price = sl_price
+                    await self._cancel_bot_sl_order_ids(
+                        auth_binance, symbol, existing_ids, strategy_id, keep_id=keep
+                    )
+                    await session.flush()
+                    return
+                await self._cancel_bot_sl_order_ids(
+                    auth_binance, symbol, existing_ids, strategy_id, keep_id=""
+                )
+                for p in bot_positions:
+                    p.sl_stop_order_id = None
+                await session.flush()
+            elif keep_order and st in ("closed", "filled"):
+                filled = _order_executed_qty(keep_order)
+                avg = _order_fill_avg_price(keep_order, 0.0, allow_order_price=False)
+                if filled > 0 or avg > 0:
+                    positions_data = [
+                        {"quantity": p.quantity, "entry_price": p.entry_price}
+                        for p in bot_positions
+                    ]
+                    close_eng = MartingaleEngine(
+                        base_quantity=qty,
+                        multiplier=getattr(strategy, "martingale_mult", 1.5),
+                        max_layers=getattr(strategy, "max_layers", 8),
+                        price_drop_multiplier=float(
+                            getattr(strategy, "price_drop_multiplier", 1.0) or 1.0
+                        ),
+                        take_profit_pct=float(
+                            getattr(strategy, "take_profit_pct", 2.0) or 2.0
+                        ),
+                    )
+                    avg_entry, _ = close_eng.get_avg_entry_price(positions_data)
+                    await self._try_close_on_sl_fill(
+                        session,
+                        strategy,
+                        symbol,
+                        auth_binance,
+                        bot_positions,
+                        close_eng,
+                        avg_entry,
+                        pos_side,
+                        float(avg or sl_price),
+                    )
+                    return
+                for p in bot_positions:
+                    p.sl_stop_order_id = None
+                await session.flush()
+            else:
+                if fetch_failed:
+                    strategy_log_service.warning(
+                        strategy_id,
+                        f"{symbol} 查接针K止损单超时 — 暂不重挂以防重复",
+                    )
+                    return
+                await self._cancel_bot_sl_order_ids(
+                    auth_binance, symbol, existing_ids, strategy_id, keep_id=""
+                )
+                for p in bot_positions:
+                    p.sl_stop_order_id = None
+                await session.flush()
+
+        last_err: Exception | None = None
+        for attempt in range(2):
+            try:
+                sl_order = await self._place_sl_stop_order(
+                    auth_binance, symbol, pos_side, qty, sl_price
+                )
+                oid = sl_order.get("id", "")
+                if oid:
+                    oid_s = str(oid)
+                    for p in bot_positions:
+                        p.sl_stop_order_id = oid_s
+                        p.stop_loss_price = sl_price
+                    await session.flush()
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{symbol} 补挂接针K止损 @{sl_price:.6f} qty={qty:.4f} id={oid_s}",
+                    )
+                    return
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 补挂接针K止损异常 — 返回无id: {sl_order}"
+                )
+            except Exception as sl_err:
+                last_err = sl_err
+                logger.error(
+                    "Strategy %d: SL stop re-place failed for %s (attempt %d): %s",
+                    strategy_id,
+                    symbol,
+                    attempt + 1,
+                    sl_err,
+                )
+                if attempt == 0:
+                    await asyncio.sleep(0.5)
+        extra = f"：{last_err}" if last_err else ""
+        strategy_log_service.warning(
+            strategy_id, f"{symbol} 补挂接针K止损失败(已重试){extra}"
         )
 
     async def _reconcile_orphan_from_exchange(
@@ -1785,6 +2107,57 @@ class PositionManager:
         result.tp_limit_order_id = tp_limit_order_id
         return result
 
+    async def place_open_sl_stop(
+        self,
+        auth_binance: BinanceService,
+        strategy: Strategy,
+        result: OpenApiResult,
+    ) -> OpenApiResult:
+        """市价成交后挂接针K条件限价止损（不计入 open_api_ms）。"""
+        if not wick_bar_sl_enabled(strategy):
+            return result
+        sl_price = float(getattr(result, "sl_price", 0) or 0)
+        if sl_price <= 0:
+            return result
+        strategy_id = strategy.id
+        symbol = result.symbol
+        sl_placed = False
+        sl_stop_order_id: str | None = None
+        for attempt in range(2):
+            try:
+                sl_order = await self._place_sl_stop_order(
+                    auth_binance,
+                    symbol,
+                    result.position_side,
+                    result.filled_qty,
+                    sl_price,
+                )
+                oid = sl_order.get("id", "")
+                if oid:
+                    sl_stop_order_id = str(oid)
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{symbol} 挂接针K止损 @{sl_price:.6f} id={sl_stop_order_id}",
+                    )
+                    sl_placed = True
+                    break
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 挂接针K止损异常 — 返回无id: {sl_order}"
+                )
+            except Exception as sl_err:
+                logger.error(
+                    "Strategy %d: SL stop order failed for %s (attempt %d): %s",
+                    strategy_id, symbol, attempt + 1, sl_err,
+                )
+                if attempt == 0:
+                    await asyncio.sleep(0.5)
+        if not sl_placed:
+            strategy_log_service.warning(
+                strategy_id, f"{symbol} 接针K止损挂单失败(已重试) — 下次tick将尝试补挂"
+            )
+        result.sl_stop_order_id = sl_stop_order_id
+        return result
+
     async def execute_wick_open_market(
         self,
         candidate: SignalCandidate,
@@ -2068,6 +2441,10 @@ class PositionManager:
                     primary.exchange_order_id = str(oid)
                 if result.tp_limit_order_id:
                     primary.tp_limit_order_id = result.tp_limit_order_id
+                if float(getattr(result, "sl_price", 0) or 0) > 0:
+                    primary.stop_loss_price = float(result.sl_price)
+                if getattr(result, "sl_stop_order_id", None):
+                    primary.sl_stop_order_id = result.sl_stop_order_id
                 # trailing_tp：merge 只补未接管的仓；已 armed/active 禁止打回 armed
                 if getattr(strategy, "trailing_tp_enabled", False) and (
                     strategy.signal_source or ""
@@ -2106,6 +2483,10 @@ class PositionManager:
             )
             if result.tp_limit_order_id:
                 pos.tp_limit_order_id = result.tp_limit_order_id
+            if float(getattr(result, "sl_price", 0) or 0) > 0:
+                pos.stop_loss_price = float(result.sl_price)
+            if getattr(result, "sl_stop_order_id", None):
+                pos.sl_stop_order_id = result.sl_stop_order_id
             # trailing_tp：仅 wick_spike 策略启用（只有 wick_spike_runner 有实时追踪）；
             # 非 wick_spike 误开则不设 armed，避免 scheduler 跳过 TP 却无追踪→裸奔
             if getattr(strategy, "trailing_tp_enabled", False) and (
@@ -2555,6 +2936,20 @@ class PositionManager:
             if tp_filled:
                 return
 
+        sl_filled = await self._try_close_on_sl_fill(
+            session,
+            strategy,
+            symbol,
+            auth_binance,
+            open_positions,
+            eng,
+            avg_entry,
+            pos_side,
+            current_price,
+        )
+        if sl_filled:
+            return
+
         # --- 补挂/补关联止盈限价单（重启丢单等）---
         # trailing 接管时跳过：armed/active 由 wick_spike_runner 管限价单；
         # expired 已回退原逻辑，正常补挂
@@ -2570,10 +2965,26 @@ class PositionManager:
                 total_qty,
                 pos_side,
             )
+        await self._ensure_sl_stop_orders(
+            session,
+            strategy,
+            symbol,
+            auth_binance,
+            open_positions,
+            total_qty,
+            pos_side,
+        )
 
         # --- Check martingale add ---
         last_entry = max(open_positions, key=lambda p: p.layer).entry_price
         result = eng.should_add_position(current_layer, last_entry, current_price, pos_side)
+        if result.should_add and wick_bar_sl_enabled(strategy):
+            strategy_log_service.info(
+                strategy_id,
+                f"{symbol} 接针K止损已启用，跳过马丁加仓",
+            )
+            await session.flush()
+            return
         if result.should_add:
             if ctx is not None and not ctx.wallet_balance_valid:
                 strategy_log_service.warning(
@@ -2586,6 +2997,65 @@ class PositionManager:
             return
 
         await session.flush()
+
+    async def _try_close_on_sl_fill(
+        self,
+        session,
+        strategy,
+        symbol,
+        auth_binance,
+        open_positions,
+        eng,
+        avg_entry,
+        pos_side,
+        current_price,
+    ) -> bool:
+        """条件止损已成交则写库平仓。返回 True 表示本腿已处理完（含已成交无均价需等待）。"""
+        sl_id = ""
+        for p in open_positions:
+            sl_id = str(getattr(p, "sl_stop_order_id", None) or "").strip()
+            if sl_id:
+                break
+        if not sl_id:
+            return False
+        try:
+            order_info = await asyncio.wait_for(
+                _fetch_order(auth_binance, sl_id, symbol),
+                timeout=2.0,
+            )
+        except (Exception, asyncio.TimeoutError):
+            return False
+        status = (order_info.get("status") or "").lower()
+        if _sl_order_still_working(status):
+            return False
+        avg_fill = _order_fill_avg_price(order_info, 0.0, allow_order_price=False)
+        filled = _order_executed_qty(order_info)
+        if _sl_order_dead_unfilled(status, filled, avg_fill):
+            return False
+        if status not in ("closed", "filled"):
+            return False
+        if avg_fill <= 0:
+            logger.warning(
+                "Strategy %d: %s SL filled but no avg/cumQuote — wait sync",
+                strategy.id,
+                symbol,
+            )
+            return True
+        await self._close_positions(
+            session,
+            strategy,
+            symbol,
+            auth_binance,
+            open_positions,
+            eng,
+            avg_entry,
+            pos_side,
+            "stop_loss",
+            current_price,
+            pre_exit_price=avg_fill,
+            fill_order=order_info,
+        )
+        return True
 
     async def check_tp_fills(self, session, strategy, auth_binance, current_price: float):
         from ..models.position import Position
@@ -2600,8 +3070,10 @@ class PositionManager:
 
         processed_symbols: set[tuple[str, str]] = set()
         for p in open_positions:
-            # 有止盈单 ID 即检测；不依赖 take_profit_price（补关联后可能为空）
-            if not p.tp_limit_order_id:
+            has_tp = bool((p.tp_limit_order_id or "").strip())
+            has_sl = bool(str(getattr(p, "sl_stop_order_id", None) or "").strip())
+            # 有止盈或止损单即检测；不依赖 take_profit_price（补关联后可能为空）
+            if not has_tp and not has_sl:
                 continue
             # 必须按规范符号去重：BMTUSDT 与 BMT/USDT:USDT 是同一腿
             sym_norm = _norm_sym(p.symbol)
@@ -2611,52 +3083,74 @@ class PositionManager:
             # 腿锁：与接针同币同向开仓互斥；其它币/反向腿仍可进行
             try:
                 async with hold_strategy_symbol(strategy_id, sym_norm, p.side):
-                    order_info = await asyncio.wait_for(
-                        _fetch_order(auth_binance, p.tp_limit_order_id, p.symbol),
-                        timeout=2.0,
-                    )
-                    status = (order_info.get("status") or "").lower()
-                    avg_fill = _order_fill_avg_price(
-                        order_info, 0.0, allow_order_price=False
-                    )
-                    if status in ("closed", "filled"):
-                        if avg_fill <= 0:
-                            logger.warning(
-                                "Strategy %d: TP order %s filled but no avg/cumQuote for %s — skip close, retry",
-                                strategy_id,
-                                p.tp_limit_order_id,
-                                p.symbol,
+                    symbol_positions = [
+                        op
+                        for op in open_positions
+                        if _norm_sym(op.symbol) == sym_norm
+                        and (op.side or "").lower() == symbol_side_key[1]
+                        and op.closed_at is None
+                    ]
+                    if not symbol_positions:
+                        continue
+                    symbol_positions = _collapse_phantom_l0_duplicates(symbol_positions)
+                    symbol_positions = [
+                        op for op in symbol_positions if op.closed_at is None
+                    ]
+                    if not symbol_positions:
+                        continue
+                    positions_data = [{"quantity": op.quantity, "entry_price": op.entry_price} for op in symbol_positions]
+                    eng = MartingaleEngine(base_quantity=symbol_positions[0].quantity, multiplier=strategy.martingale_mult,
+                                           max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
+                    avg_entry, _ = eng.get_avg_entry_price(positions_data)
+                    if has_tp:
+                        try:
+                            order_info = await asyncio.wait_for(
+                                _fetch_order(auth_binance, p.tp_limit_order_id, p.symbol),
+                                timeout=2.0,
                             )
-                            continue
-                        symbol_positions = [
-                            op
-                            for op in open_positions
-                            if _norm_sym(op.symbol) == sym_norm
-                            and (op.side or "").lower() == symbol_side_key[1]
-                            and op.closed_at is None
-                        ]
-                        if not symbol_positions:
-                            continue
-                        # 折叠符号竞态留下的重复 L0，避免一条交易所腿写出多条 Trade
-                        symbol_positions = _collapse_phantom_l0_duplicates(symbol_positions)
-                        symbol_positions = [
-                            op for op in symbol_positions if op.closed_at is None
-                        ]
-                        if not symbol_positions:
-                            continue
-                        positions_data = [{"quantity": op.quantity, "entry_price": op.entry_price} for op in symbol_positions]
-                        eng = MartingaleEngine(base_quantity=symbol_positions[0].quantity, multiplier=strategy.martingale_mult,
-                                               max_layers=strategy.max_layers, price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0), take_profit_pct=strategy.take_profit_pct)
-                        avg_entry, _ = eng.get_avg_entry_price(positions_data)
-                        await self._close_positions(
-                            session, strategy, sym_norm, auth_binance, symbol_positions,
-                            eng, avg_entry, p.side, "take_profit", current_price,
-                            pre_exit_price=avg_fill, fill_order=order_info,
+                            status = (order_info.get("status") or "").lower()
+                            avg_fill = _order_fill_avg_price(
+                                order_info, 0.0, allow_order_price=False
+                            )
+                            if status in ("closed", "filled"):
+                                if avg_fill <= 0:
+                                    logger.warning(
+                                        "Strategy %d: TP order %s filled but no avg/cumQuote for %s — skip close, retry",
+                                        strategy_id,
+                                        p.tp_limit_order_id,
+                                        p.symbol,
+                                    )
+                                    processed_symbols.add(symbol_side_key)
+                                    continue
+                                await self._close_positions(
+                                    session, strategy, sym_norm, auth_binance, symbol_positions,
+                                    eng, avg_entry, p.side, "take_profit", current_price,
+                                    pre_exit_price=avg_fill, fill_order=order_info,
+                                )
+                                logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, sym_norm, avg_fill)
+                                processed_symbols.add(symbol_side_key)
+                                continue
+                        except (Exception, asyncio.TimeoutError):
+                            logger.warning(
+                                "Strategy %d: TP order check failed for %s %s — still check SL",
+                                strategy_id, p.symbol, p.side,
+                            )
+                    if has_sl:
+                        closed = await self._try_close_on_sl_fill(
+                            session,
+                            strategy,
+                            p.symbol,
+                            auth_binance,
+                            symbol_positions,
+                            eng,
+                            avg_entry,
+                            p.side,
+                            current_price,
                         )
-                        logger.info("Strategy %d: TP fill detected mid-candle for %s @%.4f", strategy_id, sym_norm, avg_fill)
-                        processed_symbols.add(symbol_side_key)
+                        if closed:
+                            processed_symbols.add(symbol_side_key)
             except (Exception, asyncio.TimeoutError):
-                logger.warning("Strategy %d: TP order check failed for %s %s, retrying next cycle", strategy_id, p.symbol, p.side)
+                logger.warning("Strategy %d: TP/SL order check failed for %s %s, retrying next cycle", strategy_id, p.symbol, p.side)
 
     async def _close_positions(
         self,
@@ -2699,8 +3193,26 @@ class PositionManager:
                         except (Exception, asyncio.TimeoutError):
                             pass
                         break
-            strategy_log_service.success(strategy_id, f"{symbol} 止盈平仓 — 限价单已成交 @{exit_price:.4f}")
-            logger.info("Strategy %d: TP limit filled for %s @%.4f", strategy_id, symbol, exit_price)
+            if close_reason == "stop_loss":
+                strategy_log_service.success(
+                    strategy_id, f"{symbol} 接针K止损 — 条件限价已成交 @{exit_price:.4f}"
+                )
+                logger.info("Strategy %d: SL stop filled for %s @%.4f", strategy_id, symbol, exit_price)
+            else:
+                strategy_log_service.success(strategy_id, f"{symbol} 止盈平仓 — 限价单已成交 @{exit_price:.4f}")
+                logger.info("Strategy %d: TP limit filled for %s @%.4f", strategy_id, symbol, exit_price)
+            try:
+                await self.cancel_bot_tps_on_positions(
+                    auth_binance, symbol, open_positions, strategy_id
+                )
+            except Exception:
+                pass
+            try:
+                await self.cancel_bot_sls_on_positions(
+                    auth_binance, symbol, open_positions, strategy_id
+                )
+            except Exception:
+                pass
         elif close_reason == "take_profit" and strategy.take_profit_limit_order:
             has_tp_order = any(p.tp_limit_order_id for p in open_positions)
             if not has_tp_order:
@@ -2768,6 +3280,12 @@ class PositionManager:
                             pass
                         p.tp_limit_order_id = None
                 try:
+                    await self.cancel_bot_sls_on_positions(
+                        auth_binance, symbol, open_positions, strategy_id
+                    )
+                except Exception:
+                    pass
+                try:
                     close_qty = sum(
                         float(p.quantity or 0)
                         for p in open_positions
@@ -2833,6 +3351,12 @@ class PositionManager:
                     except Exception:
                         pass
                     p.tp_limit_order_id = None
+            try:
+                await self.cancel_bot_sls_on_positions(
+                    auth_binance, symbol, open_positions, strategy_id
+                )
+            except Exception:
+                pass
 
             if exit_price <= 0:
                 try:
@@ -3156,11 +3680,13 @@ class PositionManager:
             new_avg_entry = (avg_entry * total_qty + new_avg * filled_qty) / new_total
             tp_price = eng.get_take_profit_price(new_avg_entry, pos_side)
 
+            inherit_sl = _position_sl_price(open_positions)
             pos = Position(
                 strategy_id=strategy_id, account_id=strategy.account_id,
                 symbol=_norm_sym(symbol), side=pos_side, quantity=filled_qty,
                 entry_price=new_avg, mark_price=current_price, layer=result.next_layer,
                 take_profit_price=tp_price, exchange_order_id=order.get("id", ""),
+                stop_loss_price=inherit_sl if inherit_sl > 0 else None,
             )
             # trailing_tp：窗口内已激活则加仓后继续追踪，不改回限价。
             # 新层继承当前态；内存入场价改成加仓后均价，峰值按峰值价重算。
@@ -3275,6 +3801,73 @@ class PositionManager:
                         strategy_id,
                         f"{symbol} 止盈挂单更新失败(已重试) — 下次tick将用市价止盈兜底",
                     )
+
+        # 接针K止损：价不变，数量改成全腿后撤旧挂新
+        sl_price = _position_sl_price(list(open_positions) + [pos])
+        if sl_price <= 0:
+            sl_price = _position_sl_price(open_positions)
+        if wick_bar_sl_enabled(strategy) and sl_price > 0:
+            pos.stop_loss_price = sl_price
+            old_sl_cleared = True
+            for p in list(open_positions) + [pos]:
+                oid = str(getattr(p, "sl_stop_order_id", None) or "").strip()
+                if not oid:
+                    continue
+                ok = await self._cancel_tp_order_confirmed(auth_binance, oid, symbol)
+                if ok:
+                    strategy_log_service.info(strategy_id, f"{symbol} 取消旧接针K止损单 {oid}")
+                    p.sl_stop_order_id = None
+                else:
+                    old_sl_cleared = False
+                    strategy_log_service.warning(
+                        strategy_id,
+                        f"{symbol} 旧接针K止损单 {oid} 未能确认撤销 — 跳过新挂以防重复",
+                    )
+            if old_sl_cleared:
+                sl_placed = False
+                for attempt in range(2):
+                    try:
+                        sl_order = await self._place_sl_stop_order(
+                            auth_binance, symbol, pos_side, new_total, sl_price
+                        )
+                        sl_oid = sl_order.get("id", "")
+                        if sl_oid:
+                            sl_oid_s = str(sl_oid)
+                            pos.sl_stop_order_id = sl_oid_s
+                            pos.stop_loss_price = sl_price
+                            for p in open_positions:
+                                p.sl_stop_order_id = sl_oid_s
+                                p.stop_loss_price = sl_price
+                            await session.flush()
+                            strategy_log_service.info(
+                                strategy_id,
+                                f"{symbol} 更新接针K止损 @{sl_price:.6f} qty={new_total:.4f}",
+                            )
+                            sl_placed = True
+                            break
+                        strategy_log_service.warning(
+                            strategy_id, f"{symbol} 更新接针K止损异常 — 返回无id: {sl_order}"
+                        )
+                    except Exception as sl_err:
+                        logger.error(
+                            "Strategy %d: SL stop update failed for %s (attempt %d): %s",
+                            strategy_id,
+                            symbol,
+                            attempt + 1,
+                            sl_err,
+                        )
+                        if attempt == 0:
+                            await asyncio.sleep(0.5)
+                if not sl_placed:
+                    strategy_log_service.warning(
+                        strategy_id,
+                        f"{symbol} 接针K止损更新失败(已重试) — 下次tick将尝试补挂",
+                    )
+            else:
+                strategy_log_service.warning(
+                    strategy_id,
+                    f"{symbol} 加仓后接针K止损未更新（旧单未撤净）；下次 manage 将尝试补挂",
+                )
 
         logger.info("Strategy %d: martingale add layer %d for %s qty=%.4f price=%.4f drop=%.1f%%",
                     strategy_id, result.next_layer, symbol, result.next_quantity, new_avg, result.price_drop_from_last)

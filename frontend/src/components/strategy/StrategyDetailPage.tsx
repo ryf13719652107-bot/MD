@@ -240,6 +240,12 @@ export default function StrategyDetailPage() {
             <span className={labelClass}>止盈 / 均价止损</span>
             <div className={valClass}>{strategy.take_profit_pct}% ({strategy.take_profit_limit_order ? '限价单' : '市价单'}) / {strategy.stop_loss_enabled ? `${strategy.stop_loss_pct}%` : '禁用'}</div>
           </div>
+          {strategy.signal_source === 'wick_spike' && (
+            <div>
+              <span className={labelClass}>接针K止损</span>
+              <div className={valClass}>{strategy.wick_bar_sl_enabled ? '条件限价（空本根最高 / 多本根最低，不加仓）' : '已禁用'}</div>
+            </div>
+          )}
           <div>
             <span className={labelClass}>单币止损</span>
             <div className={valClass}>

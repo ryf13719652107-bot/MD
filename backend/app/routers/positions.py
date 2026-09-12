@@ -215,6 +215,12 @@ async def close_position(position_id: int, db: AsyncSession = Depends(get_db)):
                 await binance.cancel_order(position.tp_limit_order_id, position.symbol)
             except Exception:
                 pass
+        sl_oid = str(getattr(position, "sl_stop_order_id", None) or "").strip()
+        if sl_oid:
+            try:
+                await binance.cancel_order(sl_oid, position.symbol)
+            except Exception:
+                pass
         close_qty = float(position.quantity or 0)
         if close_qty <= 0:
             raise HTTPException(status_code=400, detail="持仓数量无效")

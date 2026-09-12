@@ -108,6 +108,10 @@ class Strategy(Base):
     wick_instant_active_until_pct: Mapped[float] = mapped_column(
         Float, default=0.5, server_default="0.5"
     )
+    # 接针K条件限价止损：空=本根最高、多=本根最低；默认关
+    wick_bar_sl_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
 
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     # 窗口内达 take_profit_pct 则一直追踪；超时未触发立即回退限价

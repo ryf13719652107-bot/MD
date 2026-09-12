@@ -104,6 +104,9 @@ async def init_db():
             "ALTER TABLE strategies ADD COLUMN wick_atr_quiet_mult2 FLOAT DEFAULT 3.0",
             "ALTER TABLE strategies ADD COLUMN wick_martingale_mode VARCHAR(32) DEFAULT 'price_and_wt'",
             "ALTER TABLE strategies ADD COLUMN skip_min_qty_exceeds BOOLEAN DEFAULT 1",
+            "ALTER TABLE strategies ADD COLUMN wick_bar_sl_enabled BOOLEAN DEFAULT 0",
+            "ALTER TABLE positions ADD COLUMN sl_stop_order_id VARCHAR(100)",
+            "ALTER TABLE positions ADD COLUMN stop_loss_price FLOAT",
             "ALTER TABLE accounts ADD COLUMN cashflow_sync_cursor_ms INTEGER",
             "ALTER TABLE accounts ADD COLUMN exchange VARCHAR(20) DEFAULT 'binance'",
         ]
@@ -380,6 +383,16 @@ async def init_db():
                 lambda c: c.exec_driver_sql(
                     "UPDATE strategies SET skip_min_qty_exceeds=1 "
                     "WHERE skip_min_qty_exceeds IS NULL"
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            await conn.run_sync(
+                lambda c: c.exec_driver_sql(
+                    "UPDATE strategies SET wick_bar_sl_enabled=0 "
+                    "WHERE wick_bar_sl_enabled IS NULL"
                 )
             )
         except Exception:

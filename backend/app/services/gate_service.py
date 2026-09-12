@@ -786,6 +786,17 @@ class GateService:
         )
         return self._order_qty_to_base(order, cs)
 
+    async def create_stop_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        price: float,
+        stop_price: float | None = None,
+        position_side: str = "LONG",
+    ) -> dict:
+        raise NotImplementedError("Gate 不支持接针条件限价止损")
+
     async def close_position_qty(self, symbol: str, side: str, amount: float) -> dict:
         """按数量减仓平仓（reduceOnly），不扫整腿。"""
         qty = float(amount or 0)

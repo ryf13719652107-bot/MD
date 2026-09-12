@@ -23,6 +23,8 @@ class PositionResponse(BaseModel):
     take_profit_price: Optional[float]
     exchange_order_id: Optional[str]
     tp_limit_order_id: Optional[str] = None
+    sl_stop_order_id: Optional[str] = None
+    stop_loss_price: Optional[float] = None
     opened_at: datetime
     closed_at: Optional[datetime]
 

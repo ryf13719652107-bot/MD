@@ -230,6 +230,9 @@ export default function StrategyPage() {
               <div>跌幅触发: <span className="text-gray-200">{s.price_drop_pct}%{s.price_drop_multiplier != null && s.price_drop_multiplier !== 1 ? ` (x${s.price_drop_multiplier} 递增)` : ''}</span></div>
               <div>止盈: <span className="text-gray-200">{s.take_profit_pct}% {s.take_profit_limit_order ? '(限价单)' : '(市价单)'}</span></div>
               <div>均价止损: <span className="text-gray-200">{s.stop_loss_enabled ? `${s.stop_loss_pct}%` : '已禁用'}</span></div>
+              {s.signal_source === 'wick_spike' && (
+                <div>接针K止损: <span className="text-gray-200">{s.wick_bar_sl_enabled ? '条件限价（空最高/多最低，不加仓）' : '已禁用'}</span></div>
+              )}
               <div>单币止损: <span className="text-gray-200">{formatSingleSymbolStopLoss(s.single_symbol_stop_loss_enabled, s.single_symbol_stop_loss_pct)}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>
               <div>选币间隔: <span className="text-gray-200">{formatCoinPoolRefreshHours(s.coin_pool_refresh_seconds)} / {formatCoinPoolFetchMode(s.coin_pool_fetch_mode, s.coin_pool_anchor_hour, s.coin_pool_anchor_minute)}</span></div>

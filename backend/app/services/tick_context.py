@@ -61,3 +61,5 @@ class OpenApiResult:
     filled_qty: float
     tp_price: float = 0.0
     tp_limit_order_id: str | None = None
+    sl_price: float = 0.0
+    sl_stop_order_id: str | None = None

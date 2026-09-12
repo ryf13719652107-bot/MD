@@ -437,6 +437,9 @@ async def panic_close_strategy(strategy_id: int, db: AsyncSession = Depends(get_
             await pm.cancel_bot_tps_on_positions(
                 binance, sym_key, positions, strategy_id
             )
+            await pm.cancel_bot_sls_on_positions(
+                binance, sym_key, positions, strategy_id
+            )
         except Exception as e_tp:
             logging.warning(
                 "Panic close: cancel bot TP failed %s %s: %s", sym_key, side, e_tp

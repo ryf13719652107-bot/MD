@@ -825,6 +825,87 @@ class BinanceService:
             params=self._order_params(position_side, reduce_only),
         )
 
+    def price_tick_size(self, symbol: str) -> float:
+        """合约 PRICE_FILTER.tickSize；未知则 0。"""
+        try:
+            formatted = self._format_symbol(symbol)
+            market = self.exchange.market(formatted)
+        except Exception:
+            return 0.0
+        for f in (market.get("info") or {}).get("filters") or []:
+            if f.get("filterType") != "PRICE_FILTER":
+                continue
+            try:
+                ts = float(f.get("tickSize") or 0)
+            except (TypeError, ValueError):
+                ts = 0.0
+            if ts > 0:
+                return ts
+        prec = market.get("precision") if isinstance(market.get("precision"), dict) else {}
+        raw = prec.get("price") if isinstance(prec, dict) else None
+        if isinstance(raw, int) and raw > 0:
+            return 10 ** (-raw)
+        try:
+            ts = float(raw or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        return ts if ts > 0 else 0.0
+
+    def _round_price(self, formatted_symbol: str, price: float) -> float:
+        try:
+            return float(self.exchange.price_to_precision(formatted_symbol, price))
+        except Exception:
+            return float(price)
+
+    def _align_stop_price(self, symbol: str, price: float, side: str) -> float:
+        """买止损向上取整、卖止损向下取整，避免 round 回针尖立刻触发。"""
+        px = float(price)
+        tick = self.price_tick_size(symbol)
+        if tick > 0:
+            n = px / tick
+            if (side or "").lower() == "buy":
+                px = math.ceil(n - 1e-12) * tick
+            else:
+                floored = math.floor(n + 1e-12) * tick
+                px = floored if floored > 0 else px
+        formatted = self._format_symbol(symbol)
+        rounded = self._round_price(formatted, px)
+        if tick <= 0 or rounded <= 0:
+            return rounded if rounded > 0 else px
+        if (side or "").lower() == "buy" and rounded + 1e-15 < px:
+            rounded = self._round_price(formatted, rounded + tick)
+        elif (side or "").lower() != "buy" and rounded > px + 1e-15:
+            down = self._round_price(formatted, rounded - tick)
+            if down > 0:
+                rounded = down
+        return rounded
+
+    async def create_stop_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        price: float,
+        stop_price: float | None = None,
+        position_side: str = "LONG",
+    ) -> dict:
+        """币安 USDM STOP 条件限价。双向只传 positionSide，不带 reduceOnly。"""
+        formatted = self._format_symbol(symbol)
+        await self.ensure_markets_loaded()
+        raw = float(stop_price) if stop_price is not None else float(price)
+        aligned = self._align_stop_price(symbol, raw, side)
+        params = self._order_params(position_side, reduce_only=False)
+        params["stopPrice"] = aligned
+        params["workingType"] = "CONTRACT_PRICE"
+        return await self.exchange.create_order(
+            formatted,
+            "STOP",
+            side,
+            amount,
+            aligned,
+            params,
+        )
+
     async def close_position_qty(self, symbol: str, side: str, amount: float) -> dict:
         """按数量减仓平仓（reduceOnly），不扫整腿、不用 closePosition。
 

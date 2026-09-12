@@ -43,7 +43,13 @@ from .log_service import strategy_log_service
 from .kline_stream import kline_stream_manager, _timeframe_ms
 from .price_stream import price_stream_manager
 from .account_position_stream import account_position_stream
-from .position_manager import PositionManager, _norm_sym
+from .position_manager import (
+    PositionManager,
+    _client_price_tick,
+    _norm_sym,
+    wick_bar_sl_enabled,
+    wick_bar_stop_price,
+)
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem, hold_account_sync
 from .strategy_concurrency import hold_strategy_symbol, strategy_leg_lock
@@ -2006,7 +2012,21 @@ class WickSpikeRunner:
         """
         symbol = api_res.symbol
         try:
+            if wick_bar_sl_enabled(strategy):
+                ensure = getattr(auth, "ensure_markets_loaded", None)
+                if callable(ensure):
+                    try:
+                        await ensure()
+                    except Exception:
+                        pass
+                api_res.sl_price = wick_bar_stop_price(
+                    api_res.position_side,
+                    float(getattr(snap, "kline_high", 0) or 0),
+                    float(getattr(snap, "kline_low", 0) or 0),
+                    _client_price_tick(auth, api_res.symbol),
+                )
             api_res = await self._position_mgr.place_open_tp_limit(auth, strategy, api_res)
+            api_res = await self._position_mgr.place_open_sl_stop(auth, strategy, api_res)
 
             last_db_err: Exception | None = None
             for attempt in range(_DB_WRITE_RETRIES):

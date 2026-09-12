@@ -188,12 +188,18 @@ class PositionSyncService:
                         continue
 
                     order_ids: list[str] = []
+                    sl_ids: list[str] = []
                     seen: set[str] = set()
+                    sl_seen: set[str] = set()
                     for lp in legs:
                         oid = (lp.tp_limit_order_id or "").strip()
                         if oid and oid not in seen:
                             seen.add(oid)
                             order_ids.append(oid)
+                        sl_oid = str(getattr(lp, "sl_stop_order_id", None) or "").strip()
+                        if sl_oid and sl_oid not in sl_seen:
+                            sl_seen.add(sl_oid)
+                            sl_ids.append(sl_oid)
 
                     exit_price: float | None = None
                     close_reason = "sync"
@@ -207,9 +213,31 @@ class PositionSyncService:
                             exit_time = order_exit_time
                         if exit_price is None or exit_price <= 0:
                             close_reason = "sync"
+                    if (exit_price is None or exit_price <= 0) and sl_ids and binance_service:
+                        sl_px, sl_reason, sl_exit_time = await _exit_from_tp_orders(
+                            binance_service, ref.symbol, sl_ids
+                        )
+                        if sl_px and sl_px > 0:
+                            exit_price = sl_px
+                            close_reason = "stop_loss"
+                            if sl_exit_time is not None:
+                                exit_time = sl_exit_time
+                        elif sl_reason == "take_profit":
+                            close_reason = "sync"
                     if exit_price is None or exit_price <= 0:
                         exit_price = float(ref.mark_price or ref.entry_price or 0)
                         close_reason = "sync"
+                    leftover = (
+                        sl_ids
+                        if close_reason == "take_profit"
+                        else (order_ids if close_reason == "stop_loss" else order_ids + sl_ids)
+                    )
+                    if leftover and binance_service:
+                        for oid in leftover:
+                            try:
+                                await binance_service.cancel_order(oid, ref.symbol)
+                            except Exception:
+                                pass
 
                     closed_n = 0
                     async with hold_account_sync(account_id):

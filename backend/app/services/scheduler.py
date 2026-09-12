@@ -491,6 +491,9 @@ class StrategyScheduler:
                                     await self._position_mgr.cancel_bot_tps_on_positions(
                                         auth_binance, sym, rows, strategy_id
                                     )
+                                    await self._position_mgr.cancel_bot_sls_on_positions(
+                                        auth_binance, sym, rows, strategy_id
+                                    )
                                 except Exception as e_tp:
                                     logger.warning(
                                         "Margin stop: cancel bot TP failed %s %s: %s",

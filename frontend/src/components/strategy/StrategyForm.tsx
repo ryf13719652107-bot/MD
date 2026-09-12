@@ -61,6 +61,7 @@ const schema = z.object({
   wick_martingale_mode: z.enum(['price_drop', 'price_and_wt']),
   wick_volume_mode: z.enum(['original', 'instant_early', 'real_only']),
   wick_instant_active_until_pct: z.number().min(0).max(1),
+  wick_bar_sl_enabled: z.boolean(),
   trailing_tp_enabled: z.boolean(),
   trailing_tp_window_sec: z.number().min(1).max(3600),
   trailing_tp_drawdown_base_pct: z.number().min(0).max(100),
@@ -217,6 +218,7 @@ function toFormDefaults(
           ? initialData.wick_volume_mode
           : 'original',
       wick_instant_active_until_pct: initialData.wick_instant_active_until_pct ?? 0.5,
+      wick_bar_sl_enabled: initialData.wick_bar_sl_enabled ?? false,
       trailing_tp_enabled: initialData.trailing_tp_enabled ?? false,
       trailing_tp_window_sec: initialData.trailing_tp_window_sec ?? 300,
       trailing_tp_drawdown_base_pct: initialData.trailing_tp_drawdown_base_pct ?? 30,
@@ -310,6 +312,7 @@ function toFormDefaults(
     wick_martingale_mode: 'price_and_wt',
     wick_volume_mode: 'original',
     wick_instant_active_until_pct: 0.5,
+    wick_bar_sl_enabled: false,
     trailing_tp_enabled: false,
     trailing_tp_window_sec: 300,
     trailing_tp_drawdown_base_pct: 30,
@@ -1220,6 +1223,18 @@ export default function StrategyForm({
               </label>
             </label>
           </div>
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>接针K止损</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_bar_sl_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-red-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+              </label>
+              <span className="text-xs text-gray-600">空按本根最高、多按本根最低挂条件限价；开启后不再马丁加仓；默认关</span>
+            </div>
+          )}
           <div>
             <label className={labelClass}>止损 (%)</label>
             <input type="number" step="0.1" {...register('stop_loss_pct', { valueAsNumber: true })} className={inputClass} disabled={!stopLossEnabled} />

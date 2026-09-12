@@ -60,6 +60,8 @@ export interface Strategy {
   wick_volume_mode: 'original' | 'instant_early' | 'real_only';
   /** instant_early 模式下瞬时量生效的本根进度上限(0~1) */
   wick_instant_active_until_pct: number;
+  /** 接针K条件限价止损：空按本根最高、多按本根最低；默认关 */
+  wick_bar_sl_enabled: boolean;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */
@@ -165,6 +167,8 @@ export interface StrategyFormData {
   wick_volume_mode: 'original' | 'instant_early' | 'real_only';
   /** instant_early 模式下瞬时量生效的本根进度上限(0~1) */
   wick_instant_active_until_pct: number;
+  /** 接针K条件限价止损：空按本根最高、多按本根最低；默认关 */
+  wick_bar_sl_enabled: boolean;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */

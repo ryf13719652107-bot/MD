@@ -21,6 +21,8 @@ class Position(Base):
     take_profit_price: Mapped[float] = mapped_column(Float, nullable=True)
     exchange_order_id: Mapped[str] = mapped_column(String(100), nullable=True)
     tp_limit_order_id: Mapped[str] = mapped_column(String(100), nullable=True)
+    sl_stop_order_id: Mapped[str] = mapped_column(String(100), nullable=True)
+    stop_loss_price: Mapped[float] = mapped_column(Float, nullable=True)
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=now_beijing)
     closed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     # 时间移动止盈状态（仅 strategy.trailing_tp_enabled=True 时使用）

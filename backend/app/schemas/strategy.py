@@ -191,6 +191,10 @@ class StrategyCreate(BaseModel):
         le=1,
         description="instant_early模式下瞬时量生效的本根进度上限(0~1)",
     )
+    wick_bar_sl_enabled: bool = Field(
+        default=False,
+        description="接针K条件限价止损：空按本根最高、多按本根最低；开启后不再马丁加仓；默认关",
+    )
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     trailing_tp_enabled: bool = Field(
         default=False,
@@ -287,6 +291,7 @@ class StrategyUpdate(BaseModel):
     wick_martingale_mode: Optional[Literal["price_drop", "price_and_wt"]] = None
     wick_volume_mode: Optional[Literal["original", "instant_early", "real_only"]] = None
     wick_instant_active_until_pct: Optional[float] = Field(default=None, ge=0, le=1)
+    wick_bar_sl_enabled: Optional[bool] = None
     trailing_tp_enabled: Optional[bool] = None
     trailing_tp_window_sec: Optional[float] = Field(default=None, gt=0, le=3600)
     trailing_tp_drawdown_base_pct: Optional[float] = Field(default=None, ge=0, le=100)
@@ -391,6 +396,7 @@ class StrategyResponse(BaseModel):
     wick_martingale_mode: str = "price_and_wt"
     wick_volume_mode: str = "original"
     wick_instant_active_until_pct: float = 0.5
+    wick_bar_sl_enabled: bool = False
     trailing_tp_enabled: bool = False
     trailing_tp_window_sec: float = 300.0
     trailing_tp_drawdown_base_pct: float = 30.0
