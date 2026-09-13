@@ -448,13 +448,164 @@ def wick_bar_sl_enabled(strategy) -> bool:
     )
 
 
+def merge_wick_bar_high(*xs: object) -> float:
+    vals: list[float] = []
+    for x in xs:
+        try:
+            v = float(x or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            vals.append(v)
+    return max(vals) if vals else 0.0
+
+
+def merge_wick_bar_low(*xs: object) -> float:
+    vals: list[float] = []
+    for x in xs:
+        try:
+            v = float(x or 0)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            vals.append(v)
+    return min(vals) if vals else 0.0
+
+
+_WICK_SL_TF = "1m"
+_WICK_SL_TF_MS = 60_000
+
+
+def _norm_kline_ts_ms(ts: object) -> int:
+    """K 线开盘时间统一成毫秒（秒级会 ×1000）。"""
+    try:
+        t = int(ts or 0)
+    except (TypeError, ValueError):
+        return 0
+    if t <= 0:
+        return 0
+    if t < 10_000_000_000:
+        return t * 1000
+    return t
+
+
+def _same_bar_ts(a: object, b: object, tf_ms: int = _WICK_SL_TF_MS) -> bool:
+    ta = _norm_kline_ts_ms(a)
+    tb = _norm_kline_ts_ms(b)
+    if ta <= 0 or tb <= 0:
+        return False
+    step = int(tf_ms or _WICK_SL_TF_MS)
+    if step <= 0:
+        return ta == tb
+    return (ta // step) == (tb // step)
+
+
+def wick_sl_1m_bar_ts(*candidates: object) -> int:
+    """开仓所属的 1 分钟开盘 ts（毫秒）。"""
+    for raw in candidates:
+        ts = _norm_kline_ts_ms(raw)
+        if ts > 0:
+            return (ts // _WICK_SL_TF_MS) * _WICK_SL_TF_MS
+    return 0
+
+
+def forming_ohlc_from_rows(
+    rows, bar_open_ts: int, tf_ms: int = _WICK_SL_TF_MS
+) -> tuple[float, float]:
+    """从 K 线列表取开仓那根的 (high, low)。
+
+    精确 ts、秒/毫秒、同一分钟桶都算命中；对不上不拿上一根冒充。
+    """
+    want = _norm_kline_ts_ms(bar_open_ts)
+    if not rows:
+        return 0.0, 0.0
+    parsed: list[tuple[int, float, float]] = []
+    for r in rows:
+        if not isinstance(r, (list, tuple)) or len(r) < 4:
+            continue
+        try:
+            ts = _norm_kline_ts_ms(r[0])
+            hi = float(r[2] or 0)
+            lo = float(r[3] or 0)
+        except (TypeError, ValueError, IndexError):
+            continue
+        if ts <= 0:
+            continue
+        parsed.append((ts, hi if hi > 0 else 0.0, lo if lo > 0 else 0.0))
+    if not parsed:
+        return 0.0, 0.0
+    if want > 0:
+        for ts, hi, lo in parsed:
+            if ts == want or _same_bar_ts(ts, want, tf_ms):
+                return hi, lo
+        return 0.0, 0.0
+    last = parsed[-1]
+    return last[1], last[2]
+
+
+async def fetch_forming_ohlc(
+    client, symbol: str, timeframe: str, bar_open_ts: int
+) -> tuple[float, float]:
+    """REST 拉最近 1m K，取开仓那根官方高低（热路径禁止调用）。"""
+    fn = getattr(client, "fetch_klines", None)
+    if not callable(fn) or not symbol:
+        return 0.0, 0.0
+    tf = str(timeframe or _WICK_SL_TF) or _WICK_SL_TF
+    since = _norm_kline_ts_ms(bar_open_ts)
+    try:
+        rows = await fn(symbol, tf, limit=5, since=since or None)
+    except TypeError:
+        rows = await fn(symbol, tf, limit=5)
+    return forming_ohlc_from_rows(rows, bar_open_ts)
+
+
+def resolve_wick_sl_ohlc(
+    *,
+    rest_high: float,
+    rest_low: float,
+    trade_high: float,
+    trade_low: float,
+    trade_bar_ts: int,
+    snap_high: float,
+    snap_low: float,
+    bar_ts: int,
+    side: str = "",
+) -> tuple[float, float, str]:
+    """止损高低：REST 官方 1m 为准；同 1 分钟成交流可补针尖。REST 失败才退回同根快照。"""
+    same_trade = _same_bar_ts(trade_bar_ts, bar_ts)
+    t_hi = float(trade_high or 0) if same_trade else 0.0
+    t_lo = float(trade_low or 0) if same_trade else 0.0
+    if t_hi <= 0:
+        t_hi = 0.0
+    if t_lo <= 0:
+        t_lo = 0.0
+    side_l = (side or "").lower()
+    if side_l == "long":
+        rest_ok = rest_low > 0
+    elif side_l == "short":
+        rest_ok = rest_high > 0
+    else:
+        rest_ok = rest_high > 0 or rest_low > 0
+    if rest_ok:
+        return (
+            merge_wick_bar_high(rest_high, t_hi),
+            merge_wick_bar_low(rest_low, t_lo),
+            "rest",
+        )
+    return (
+        merge_wick_bar_high(snap_high, t_hi),
+        merge_wick_bar_low(snap_low, t_lo),
+        "memory",
+    )
+
+
 def wick_bar_stop_price(
     side: str,
     bar_high: float,
     bar_low: float,
-    tick: float,
+    tick: float = 0.0,
 ) -> float:
-    """接针K止损价：多=最低外侧 1 tick，空=最高外侧 1 tick。"""
+    """接针K止损价：开仓前本根最低/最高本身（多=最低，空=最高）。"""
     side_l = (side or "").lower()
     try:
         hi = float(bar_high or 0)
@@ -464,24 +615,9 @@ def wick_bar_stop_price(
         lo = float(bar_low or 0)
     except (TypeError, ValueError):
         lo = 0.0
-    try:
-        tk = float(tick or 0)
-    except (TypeError, ValueError):
-        tk = 0.0
-    if tk < 0:
-        tk = 0.0
     if side_l == "long":
-        if lo <= 0:
-            return 0.0
-        if tk <= 0:
-            tk = lo * 1e-6
-        px = lo - tk
-        return px if px > 0 else lo
-    if hi <= 0:
-        return 0.0
-    if tk <= 0:
-        tk = hi * 1e-6
-    return hi + tk
+        return lo if lo > 0 else 0.0
+    return hi if hi > 0 else 0.0
 
 
 def _order_executed_qty(order: dict) -> float:
@@ -1244,7 +1380,7 @@ class PositionManager:
         total_qty: float,
         pos_side: str,
     ) -> None:
-        """接针K条件止损：对账/补挂。价取已写入的 stop_loss_price，不跟本根再改。"""
+        """接针K条件止损：对账/补挂。价取开仓时写入的本根最低/最高，不再改。"""
         bot_positions = _bot_owned_positions(open_positions)
         if not bot_positions:
             return
@@ -2140,6 +2276,17 @@ class PositionManager:
                 oid = sl_order.get("id", "")
                 if oid:
                     sl_stop_order_id = str(oid)
+                    try:
+                        hung = float(
+                            sl_order.get("stopPrice")
+                            or sl_order.get("price")
+                            or 0
+                        )
+                    except (TypeError, ValueError):
+                        hung = 0.0
+                    if hung > 0:
+                        sl_price = hung
+                        result.sl_price = hung
                     strategy_log_service.info(
                         strategy_id,
                         f"{symbol} 挂接针K止损 @{sl_price:.6f} id={sl_stop_order_id}",

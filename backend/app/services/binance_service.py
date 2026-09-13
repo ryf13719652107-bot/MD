@@ -1036,12 +1036,15 @@ class BinanceService:
             return float(price)
 
     def _align_stop_price(self, symbol: str, price: float, side: str) -> float:
-        """买止损向上取整、卖止损向下取整，避免 round 回针尖立刻触发。"""
+        """买止损向上取整、卖止损向下取整。已在 tick 上则保持，避免 0.128799 被浮点削成 0.128798。"""
         px = float(price)
         tick = self.price_tick_size(symbol)
         if tick > 0:
             n = px / tick
-            if (side or "").lower() == "buy":
+            nearest = round(n)
+            if abs(n - nearest) <= 1e-6:
+                px = nearest * tick
+            elif (side or "").lower() == "buy":
                 px = math.ceil(n - 1e-12) * tick
             else:
                 floored = math.floor(n + 1e-12) * tick
@@ -1095,6 +1098,8 @@ class BinanceService:
         order = self._normalize_algo_order(raw_order)
         if not order.get("id"):
             raise RuntimeError(f"Algo STOP 返回无 algoId: {raw_order}")
+        order["price"] = aligned
+        order["stopPrice"] = aligned
         return order
 
     async def close_position_qty(self, symbol: str, side: str, amount: float) -> dict:

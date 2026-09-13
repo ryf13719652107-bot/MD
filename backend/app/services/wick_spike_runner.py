@@ -45,10 +45,12 @@ from .price_stream import price_stream_manager
 from .account_position_stream import account_position_stream
 from .position_manager import (
     PositionManager,
-    _client_price_tick,
     _norm_sym,
+    fetch_forming_ohlc,
+    resolve_wick_sl_ohlc,
     wick_bar_sl_enabled,
     wick_bar_stop_price,
+    wick_sl_1m_bar_ts,
 )
 from .tick_context import SignalCandidate, TickContext, exchange_legs_from_positions
 from .account_concurrency import account_order_sem, hold_account_sync
@@ -767,6 +769,7 @@ class WickSpikeRunner:
                     scale_on = bool(
                         getattr(filter_strategy, "wick_loss_scale_enabled", False)
                     )
+                    wick_sl_on = wick_bar_sl_enabled(filter_strategy)
                     in_pos = stream_leg is not None and stream_leg > 0
                     same_bar_locked = (
                         st.triggered_bar_ts is not None
@@ -775,7 +778,7 @@ class WickSpikeRunner:
                     )
                     if (
                         auth is not None
-                        and (reopen_on or scale_on)
+                        and (reopen_on or scale_on or wick_sl_on)
                         and (in_pos or (reopen_on and same_bar_locked))
                         and now - last_sl_reopen_check.get(sym_key, 0.0) >= 1.0
                     ):
@@ -1753,7 +1756,8 @@ class WickSpikeRunner:
                     scale = bool(
                         getattr(strategy, "wick_loss_scale_enabled", False)
                     )
-                    if not reopen and not scale:
+                    wick_sl = wick_bar_sl_enabled(strategy)
+                    if not reopen and not scale and not wick_sl:
                         return
                     open_positions = [
                         p
@@ -2195,10 +2199,15 @@ class WickSpikeRunner:
         # 锁外：挂止盈 + 写库丢后台 fire-and-forget，主循环立即继续扫描其他 symbol
         # （内存腿已更新 + apply_local_fill，防双开不受影响；DB 失败有 orphan reconcile 兜底）
         # 注意：_post_open 在币种锁释放前已 schedule；实际 IO 在锁外执行
+        open_1m_ts = wick_sl_1m_bar_ts(
+            price_stream_manager.bar_open_ms(symbol),
+            int(time.time() * 1000),
+            getattr(snap, "bar_open_ts", 0),
+        )
         self._fire_bg(self._post_open_async(
             strategy_id, strategy, api_res, auth, signal,
             price, snap, extreme, n, progress, gap, vol_ratio, need,
-            trade_age_ms, open_api_ms, signal_to_order_ms,
+            trade_age_ms, open_api_ms, signal_to_order_ms, open_1m_ts,
         ))
         return "opened"
 
@@ -2220,6 +2229,7 @@ class WickSpikeRunner:
         trade_age_ms: int,
         open_api_ms: float,
         signal_to_order_ms: float,
+        open_1m_ts: int = 0,
     ) -> None:
         """后台执行：挂止盈限价 + 写库 + orphan reconcile。不阻塞主循环。
 
@@ -2234,12 +2244,49 @@ class WickSpikeRunner:
                         await ensure()
                     except Exception:
                         pass
-                api_res.sl_price = wick_bar_stop_price(
-                    api_res.position_side,
-                    float(getattr(snap, "kline_high", 0) or 0),
-                    float(getattr(snap, "kline_low", 0) or 0),
-                    _client_price_tick(auth, api_res.symbol),
+                side_l = (api_res.position_side or "").lower()
+                bar_ts = int(open_1m_ts or 0)
+                if bar_ts <= 0:
+                    snap_1m = wick_sl_1m_bar_ts(getattr(snap, "bar_open_ts", 0))
+                    stream_1m = wick_sl_1m_bar_ts(
+                        price_stream_manager.bar_open_ms(symbol)
+                    )
+                    if snap_1m > 0 and stream_1m > 0 and stream_1m != snap_1m:
+                        bar_ts = snap_1m
+                    else:
+                        bar_ts = stream_1m or snap_1m
+                rest_hi, rest_lo = 0.0, 0.0
+                try:
+                    rest_hi, rest_lo = await fetch_forming_ohlc(
+                        auth, symbol, "1m", bar_ts
+                    )
+                except Exception:
+                    rest_hi, rest_lo = 0.0, 0.0
+                hi, lo, src = resolve_wick_sl_ohlc(
+                    rest_high=rest_hi,
+                    rest_low=rest_lo,
+                    trade_high=price_stream_manager.bar_high(symbol),
+                    trade_low=price_stream_manager.bar_low(symbol),
+                    trade_bar_ts=price_stream_manager.bar_open_ms(symbol),
+                    snap_high=float(getattr(snap, "kline_high", 0) or 0),
+                    snap_low=float(getattr(snap, "kline_low", 0) or 0),
+                    bar_ts=bar_ts,
+                    side=side_l,
                 )
+                api_res.sl_price = wick_bar_stop_price(side_l, hi, lo)
+                if api_res.sl_price > 0:
+                    if side_l == "long":
+                        strategy_log_service.info(
+                            strategy_id,
+                            f"{symbol} 接针K止损取开仓前1m最低={api_res.sl_price:.6f}"
+                            f"（{src} REST={rest_lo:.6g} 快照={float(getattr(snap, 'kline_low', 0) or 0):.6g}）",
+                        )
+                    else:
+                        strategy_log_service.info(
+                            strategy_id,
+                            f"{symbol} 接针K止损取开仓前1m最高={api_res.sl_price:.6f}"
+                            f"（{src} REST={rest_hi:.6g} 快照={float(getattr(snap, 'kline_high', 0) or 0):.6g}）",
+                        )
             api_res = await self._position_mgr.place_open_tp_limit(auth, strategy, api_res)
             api_res = await self._position_mgr.place_open_sl_stop(auth, strategy, api_res)
 

@@ -7,24 +7,135 @@ import pytest
 
 from app.services.position_manager import (
     PositionManager,
+    fetch_forming_ohlc,
+    forming_ohlc_from_rows,
+    merge_wick_bar_high,
+    merge_wick_bar_low,
+    resolve_wick_sl_ohlc,
     wick_bar_sl_enabled,
     wick_bar_stop_price,
+    wick_sl_1m_bar_ts,
 )
 from app.services.tick_context import OpenApiResult
 from app.services.strategy_engine import Signal
 
 
-def test_wick_bar_stop_price_long_uses_low_minus_tick():
-    assert wick_bar_stop_price("long", 1.20, 1.00, 0.01) == pytest.approx(0.99)
+def test_wick_bar_stop_price_long_is_bar_low():
+    assert wick_bar_stop_price("long", 1.20, 1.00, 0.01) == pytest.approx(1.00)
+    assert wick_bar_stop_price("long", 0.145, 0.128799) == pytest.approx(0.128799)
 
 
-def test_wick_bar_stop_price_short_uses_high_plus_tick():
-    assert wick_bar_stop_price("short", 1.20, 1.00, 0.01) == pytest.approx(1.21)
+def test_wick_bar_stop_price_short_is_bar_high():
+    assert wick_bar_stop_price("short", 1.20, 1.00, 0.01) == pytest.approx(1.20)
 
 
-def test_wick_bar_stop_price_zero_tick_uses_relative_offset():
-    assert wick_bar_stop_price("long", 1.20, 1.00, 0) == pytest.approx(1.00 - 1e-6)
-    assert wick_bar_stop_price("short", 1.20, 1.00, 0) == pytest.approx(1.20 + 1.20e-6)
+def test_merge_wick_bar_extremes():
+    assert merge_wick_bar_high(0.13, 0.1349, 0) == pytest.approx(0.1349)
+    assert merge_wick_bar_low(0.13, 0.128799, 0) == pytest.approx(0.128799)
+    assert merge_wick_bar_low(0, None, 0.13) == pytest.approx(0.13)
+
+
+def test_forming_ohlc_from_rows_matches_open_bar():
+    bar_ts = 1_762_000_260_000
+    rows = [
+        [bar_ts - 60_000, 0.14, 0.15, 0.13, 0.14, 1],
+        [bar_ts, 0.145141, 0.145141, 0.128799, 0.133233, 10],
+    ]
+    hi, lo = forming_ohlc_from_rows(rows, bar_ts)
+    assert hi == pytest.approx(0.145141)
+    assert lo == pytest.approx(0.128799)
+    # 同一分钟内的偏差（合成 ts / 秒级）仍应命中本根，不能拿上一根
+    assert forming_ohlc_from_rows(rows, bar_ts + 1)[1] == pytest.approx(0.128799)
+    assert forming_ohlc_from_rows(rows, bar_ts // 1000)[1] == pytest.approx(0.128799)
+    assert forming_ohlc_from_rows(rows, bar_ts + 60_000) == (0.0, 0.0)
+
+
+def test_resolve_wick_sl_prefers_rest_and_ignores_other_bar_trades():
+    bar_ts = 1_762_000_260_000
+    hi, lo, src = resolve_wick_sl_ohlc(
+        rest_high=0.145141,
+        rest_low=0.128799,
+        trade_high=0.20,
+        trade_low=0.10,
+        trade_bar_ts=bar_ts - 60_000,
+        snap_high=0.13,
+        snap_low=0.13,
+        bar_ts=bar_ts,
+        side="long",
+    )
+    assert src == "rest"
+    assert lo == pytest.approx(0.128799)
+    assert hi == pytest.approx(0.145141)
+
+
+def test_resolve_wick_sl_memory_fallback_same_bar_only():
+    bar_ts = 1_762_000_260_000
+    hi, lo, src = resolve_wick_sl_ohlc(
+        rest_high=0.0,
+        rest_low=0.0,
+        trade_high=0.134,
+        trade_low=0.128799,
+        trade_bar_ts=bar_ts,
+        snap_high=0.145,
+        snap_low=0.13,
+        bar_ts=bar_ts,
+        side="long",
+    )
+    assert src == "memory"
+    assert lo == pytest.approx(0.128799)
+    assert hi == pytest.approx(0.145)
+
+
+def test_wick_sl_1m_bar_ts_floors_to_minute():
+    assert wick_sl_1m_bar_ts(1_762_000_273_000) == 1_762_000_260_000
+    assert wick_sl_1m_bar_ts(1_762_000_260) == 1_762_000_260_000
+
+
+def test_resolve_wick_sl_long_ignores_rest_without_low():
+    bar_ts = 1_762_000_260_000
+    hi, lo, src = resolve_wick_sl_ohlc(
+        rest_high=0.145,
+        rest_low=0.0,
+        trade_high=0.0,
+        trade_low=0.0,
+        trade_bar_ts=bar_ts,
+        snap_high=0.145,
+        snap_low=0.128799,
+        bar_ts=bar_ts,
+        side="long",
+    )
+    assert src == "memory"
+    assert lo == pytest.approx(0.128799)
+
+
+def test_align_stop_keeps_exact_tick_low():
+    from app.services.binance_service import BinanceService
+
+    svc = BinanceService.__new__(BinanceService)
+    svc.price_tick_size = lambda _s: 0.000001
+    svc._format_symbol = lambda s: s
+    svc._round_price = lambda _s, p: float(p)
+    assert svc._align_stop_price("X", 0.128799, "sell") == pytest.approx(0.128799)
+
+
+@pytest.mark.asyncio
+async def test_fetch_forming_ohlc_uses_rest_low_not_stale_memory():
+    bar_ts = 1_762_000_260_000
+    client = SimpleNamespace(
+        fetch_klines=AsyncMock(
+            return_value=[
+                [bar_ts, 0.145141, 0.145141, 0.128799, 0.133233, 10],
+            ]
+        )
+    )
+    hi, lo = await fetch_forming_ohlc(client, "LOBSTERUSDT", "1m", bar_ts)
+    assert lo == pytest.approx(0.128799)
+    assert hi == pytest.approx(0.145141)
+    stale = 0.13
+    assert merge_wick_bar_low(stale, lo) == pytest.approx(0.128799)
+    assert wick_bar_stop_price("long", hi, merge_wick_bar_low(stale, lo)) == pytest.approx(
+        0.128799
+    )
 
 
 def test_wick_bar_sl_enabled_only_wick_and_switch():

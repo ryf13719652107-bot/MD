@@ -1248,7 +1248,7 @@ export default function StrategyForm({
                   <div className="w-9 h-5 bg-gray-600 peer-checked:bg-red-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
                 </label>
               </label>
-              <span className="text-xs text-gray-600">空按本根最高、多按本根最低挂条件限价；开启后不再马丁加仓；默认关</span>
+              <span className="text-xs text-gray-600">空按开仓前1分钟最高、多按开仓前1分钟最低挂条件限价；开启后不再马丁加仓；默认关</span>
             </div>
           )}
           {signalSource === 'wick_spike' && (
