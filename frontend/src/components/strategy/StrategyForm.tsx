@@ -66,6 +66,7 @@ const schema = z.object({
   wick_loss_scale_enabled: z.boolean(),
   wick_loss_scale_base: z.number().min(1).max(8),
   wick_loss_scale_max_mult: z.number().min(1).max(64),
+  wick_loss_scale_max_times: z.number().min(1).max(8),
   trailing_tp_enabled: z.boolean(),
   trailing_tp_window_sec: z.number().min(1).max(3600),
   trailing_tp_drawdown_base_pct: z.number().min(0).max(100),
@@ -227,6 +228,7 @@ function toFormDefaults(
       wick_loss_scale_enabled: initialData.wick_loss_scale_enabled ?? false,
       wick_loss_scale_base: initialData.wick_loss_scale_base ?? 2,
       wick_loss_scale_max_mult: initialData.wick_loss_scale_max_mult ?? 8,
+      wick_loss_scale_max_times: initialData.wick_loss_scale_max_times ?? 2,
       trailing_tp_enabled: initialData.trailing_tp_enabled ?? false,
       trailing_tp_window_sec: initialData.trailing_tp_window_sec ?? 300,
       trailing_tp_drawdown_base_pct: initialData.trailing_tp_drawdown_base_pct ?? 30,
@@ -325,6 +327,7 @@ function toFormDefaults(
     wick_loss_scale_enabled: false,
     wick_loss_scale_base: 2,
     wick_loss_scale_max_mult: 8,
+    wick_loss_scale_max_times: 2,
     trailing_tp_enabled: false,
     trailing_tp_window_sec: 300,
     trailing_tp_drawdown_base_pct: 30,
@@ -374,6 +377,7 @@ function toApiPayload(data: StrategyFormData): StrategyApiPayload {
     // disabled 的数字框 RHF 可能不带出，提交时补默认以免丢掉连亏参数
     wick_loss_scale_base: Number.isFinite(data.wick_loss_scale_base) ? data.wick_loss_scale_base : 2,
     wick_loss_scale_max_mult: Number.isFinite(data.wick_loss_scale_max_mult) ? data.wick_loss_scale_max_mult : 8,
+    wick_loss_scale_max_times: Number.isFinite(data.wick_loss_scale_max_times) ? data.wick_loss_scale_max_times : 2,
     coin_pool_refresh_seconds: nearestCoinPoolRefreshSeconds(data.coin_pool_refresh_seconds),
     coin_pool_anchor_hour: hour,
     coin_pool_anchor_minute: minute,
@@ -1287,7 +1291,22 @@ export default function StrategyForm({
                 className={inputClass}
                 disabled={!wickLossScaleEnabled}
               />
-              <span className="text-xs text-gray-600">{wickLossScaleEnabled ? '默认 2，即 ×2 / ×4 / ×8' : '连亏加倍已禁用'}</span>
+              <span className="text-xs text-gray-600">{wickLossScaleEnabled ? '默认 2，配合次数上限决定 ×2 / ×4 / …' : '连亏加倍已禁用'}</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={labelClass}>连亏加仓次数</label>
+              <input
+                type="number"
+                step="1"
+                min={1}
+                max={8}
+                {...register('wick_loss_scale_max_times', { valueAsNumber: true })}
+                className={inputClass}
+                disabled={!wickLossScaleEnabled}
+              />
+              <span className="text-xs text-gray-600">{wickLossScaleEnabled ? '默认 2：连亏 1 次×2、2 次×4，止盈后恢复初始仓' : '连亏加倍已禁用'}</span>
             </div>
           )}
           {signalSource === 'wick_spike' && (

@@ -257,7 +257,7 @@ export default function StrategyDetailPage() {
               <span className={labelClass}>连亏加倍</span>
               <div className={valClass}>
                 {strategy.wick_loss_scale_enabled
-                  ? `每次×${strategy.wick_loss_scale_base ?? 2}，上限 ${strategy.wick_loss_scale_max_mult ?? 8}`
+                  ? `每次×${strategy.wick_loss_scale_base ?? 2}，最多 ${strategy.wick_loss_scale_max_times ?? 2} 次，上限 ${strategy.wick_loss_scale_max_mult ?? 8}`
                   : '已禁用'}
               </div>
             </div>

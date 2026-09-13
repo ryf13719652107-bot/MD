@@ -31,6 +31,7 @@ from .backup_service import backup_trade
 from .account_concurrency import hold_account_sync
 from .order_times import exit_time_from_order, naive_beijing_from_ms_or_s
 from .tick_context import TickContext, SignalCandidate, OpenApiResult, exchange_legs_from_positions
+from .wick_loss_scale import infer_flat_close_reason, same_open_fill
 
 logger = logging.getLogger(__name__)
 
@@ -1026,10 +1027,11 @@ class PositionManager:
         strategy_id: int,
         *,
         keep_id: str = "",
-    ) -> None:
-        """只撤销机器人自己记下的止盈单号，绝不扫撤手动限价。"""
+    ) -> set[str]:
+        """只撤销机器人自己记下的止盈单号，绝不扫撤手动限价。返回已确认撤销的单号。"""
         keep = str(keep_id or "")
         seen: set[str] = set()
+        cancelled: set[str] = set()
         for oid in order_ids:
             oid_s = str(oid or "").strip()
             if not oid_s or oid_s == keep or oid_s in seen:
@@ -1037,6 +1039,7 @@ class PositionManager:
             seen.add(oid_s)
             ok = await self._cancel_tp_order_confirmed(auth_binance, oid_s, symbol)
             if ok:
+                cancelled.add(oid_s)
                 strategy_log_service.info(
                     strategy_id, f"{symbol} 撤销机器人止盈限价单 id={oid_s}"
                 )
@@ -1044,6 +1047,7 @@ class PositionManager:
                 strategy_log_service.warning(
                     strategy_id, f"{symbol} 撤销机器人止盈单失败 id={oid_s}"
                 )
+        return cancelled
 
     async def cancel_bot_tps_on_positions(
         self,
@@ -1053,6 +1057,8 @@ class PositionManager:
         strategy_id: int,
     ) -> None:
         """平仓前撤掉这些仓位上的机器人止盈单，避免策略停掉后残留限价继续减仓。"""
+        if auth_binance is None:
+            return
         ids = {
             str(getattr(p, "tp_limit_order_id", None) or "").strip()
             for p in positions
@@ -1060,11 +1066,12 @@ class PositionManager:
         }
         if not ids:
             return
-        await self._cancel_bot_tp_order_ids(
+        cancelled = await self._cancel_bot_tp_order_ids(
             auth_binance, symbol, ids, strategy_id, keep_id=""
         )
         for p in positions:
-            if getattr(p, "tp_limit_order_id", None):
+            oid = str(getattr(p, "tp_limit_order_id", None) or "").strip()
+            if oid and oid in cancelled:
                 p.tp_limit_order_id = None
 
     async def _cancel_bot_sl_order_ids(
@@ -1075,10 +1082,11 @@ class PositionManager:
         strategy_id: int,
         *,
         keep_id: str = "",
-    ) -> None:
-        """只撤销机器人记下的条件止损单号。"""
+    ) -> set[str]:
+        """只撤销机器人记下的条件止损单号。返回已确认撤销的单号。"""
         keep = str(keep_id or "")
         seen: set[str] = set()
+        cancelled: set[str] = set()
         for oid in order_ids:
             oid_s = str(oid or "").strip()
             if not oid_s or oid_s == keep or oid_s in seen:
@@ -1086,6 +1094,7 @@ class PositionManager:
             seen.add(oid_s)
             ok = await self._cancel_tp_order_confirmed(auth_binance, oid_s, symbol)
             if ok:
+                cancelled.add(oid_s)
                 strategy_log_service.info(
                     strategy_id, f"{symbol} 撤销机器人接针K止损单 id={oid_s}"
                 )
@@ -1093,6 +1102,7 @@ class PositionManager:
                 strategy_log_service.warning(
                     strategy_id, f"{symbol} 撤销机器人接针K止损单失败 id={oid_s}"
                 )
+        return cancelled
 
     async def cancel_bot_sls_on_positions(
         self,
@@ -1102,15 +1112,136 @@ class PositionManager:
         strategy_id: int,
     ) -> None:
         """平仓前撤掉这些仓位上的机器人条件止损单。"""
+        if auth_binance is None:
+            return
         ids = _position_sl_order_ids(positions)
         if not ids:
             return
-        await self._cancel_bot_sl_order_ids(
+        cancelled = await self._cancel_bot_sl_order_ids(
             auth_binance, symbol, ids, strategy_id, keep_id=""
         )
         for p in positions:
-            if getattr(p, "sl_stop_order_id", None):
+            oid = str(getattr(p, "sl_stop_order_id", None) or "").strip()
+            if oid and oid in cancelled:
                 p.sl_stop_order_id = None
+
+    @staticmethod
+    def _is_working_exit_order(
+        order: dict, pos_side: str, symbol: str | None = None
+    ) -> bool:
+        """平仓后应撤掉的残留挂单：必须同币种、同向；方向不明则不撤（防撤对向腿）。"""
+        if not isinstance(order, dict):
+            return False
+        st = (order.get("status") or "open").lower()
+        if st not in ("open", "new", "partially_filled", "partial", "", "working"):
+            return False
+        info = order.get("info") if isinstance(order.get("info"), dict) else {}
+        if symbol:
+            raw_sym = str(order.get("symbol") or info.get("symbol") or "")
+            if raw_sym and _norm_sym(raw_sym) != _norm_sym(symbol):
+                return False
+        ps = str(order.get("positionSide") or info.get("positionSide") or "").upper()
+        want = "LONG" if (pos_side or "").lower() == "long" else "SHORT"
+        # 双向持仓：没有 positionSide 时宁可漏撤，也不要误撤另一条策略
+        if not ps or ps not in ("BOTH", want):
+            return False
+        typ = str(
+            order.get("type") or info.get("type") or info.get("orderType") or ""
+        ).upper()
+        algo_typ = str(info.get("algoType") or "").upper()
+        if "STOP" in typ or "TAKE_PROFIT" in typ or algo_typ == "CONDITIONAL":
+            return True
+        return _order_reduce_only_flag(order) is True
+
+    async def _cancel_symbol_side_working_exits(
+        self,
+        auth_binance: BinanceService,
+        symbol: str,
+        pos_side: str,
+        strategy_id: int,
+        keep_ids: set[str] | None = None,
+    ) -> None:
+        """平仓后扫本币种同向残留止盈/止损（含 Algo 条件单）。"""
+        if auth_binance is None:
+            return
+        keep = {str(x).strip() for x in (keep_ids or set()) if str(x or "").strip()}
+        orders = await self._fetch_open_orders_raw(auth_binance, symbol)
+        algo_fn = getattr(auth_binance, "fetch_open_algo_orders", None)
+        if callable(algo_fn):
+            try:
+                extra = await algo_fn(symbol)
+                if extra:
+                    orders = list(orders) + list(extra)
+            except Exception:
+                logger.debug(
+                    "Strategy %d: fetch_open_algo_orders %s failed",
+                    strategy_id,
+                    symbol,
+                    exc_info=True,
+                )
+        seen: set[str] = set()
+        for order in orders:
+            if not self._is_working_exit_order(order, pos_side, symbol):
+                continue
+            oid = str(order.get("id") or "").strip()
+            if not oid or oid in seen or oid in keep:
+                continue
+            seen.add(oid)
+            ok = await self._cancel_tp_order_confirmed(auth_binance, oid, symbol)
+            if ok:
+                strategy_log_service.info(
+                    strategy_id, f"{symbol} 平仓后撤销残留挂单 id={oid}"
+                )
+            else:
+                strategy_log_service.warning(
+                    strategy_id, f"{symbol} 平仓后撤销残留挂单失败 id={oid}"
+                )
+
+    async def cancel_leftover_orders_after_close(
+        self,
+        auth_binance: BinanceService,
+        symbol: str,
+        positions: list,
+        strategy_id: int,
+        pos_side: str,
+        keep_ids: set[str] | None = None,
+    ) -> None:
+        """止盈/止损写库前：撤本币种机器人止盈、止损及同向残留挂单。"""
+        if auth_binance is None:
+            return
+        try:
+            await self.cancel_bot_tps_on_positions(
+                auth_binance, symbol, positions, strategy_id
+            )
+        except Exception:
+            logger.debug(
+                "Strategy %d: cancel leftover TP failed %s",
+                strategy_id,
+                symbol,
+                exc_info=True,
+            )
+        try:
+            await self.cancel_bot_sls_on_positions(
+                auth_binance, symbol, positions, strategy_id
+            )
+        except Exception:
+            logger.debug(
+                "Strategy %d: cancel leftover SL failed %s",
+                strategy_id,
+                symbol,
+                exc_info=True,
+            )
+        try:
+            await self._cancel_symbol_side_working_exits(
+                auth_binance, symbol, pos_side, strategy_id, keep_ids=keep_ids
+            )
+        except Exception:
+            logger.debug(
+                "Strategy %d: cancel leftover working exits failed %s",
+                strategy_id,
+                symbol,
+                exc_info=True,
+            )
 
     async def _cancel_duplicate_tp_limits(
         self,
@@ -2517,11 +2648,258 @@ class PositionManager:
         )
         return await self.place_open_tp_limit(auth_binance, strategy, result)
 
+    async def finalize_flat_local_opens(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        symbol: str,
+        side: str,
+        auth_binance,
+        current_price: float,
+        *,
+        allow_infer: bool = True,
+    ) -> int:
+        """交易所已空（或仅查挂单）时，把本地仍 open 的同向腿写成成交。
+
+        allow_infer=False：只认止盈/止损挂单成交，不靠现价猜（持仓轮询用）。
+        allow_infer=True：挂单查不到时用现价补记（开仓前已 REST 确认空仓）。
+        """
+        side_l = (side or "").lower()
+        rows = [
+            p
+            for p in (
+                await session.execute(
+                    self._open_positions_stmt(int(strategy.id), _norm_sym(symbol))
+                )
+            ).scalars().all()
+            if (p.side or "").lower() == side_l and p.closed_at is None
+        ]
+        if not rows:
+            return 0
+        rows = [p for p in _collapse_phantom_l0_duplicates(rows) if p.closed_at is None]
+        if not rows:
+            return 0
+
+        positions_data = [
+            {"quantity": p.quantity, "entry_price": p.entry_price} for p in rows
+        ]
+        eng = MartingaleEngine(
+            base_quantity=float(rows[0].quantity or 0),
+            multiplier=strategy.martingale_mult,
+            max_layers=strategy.max_layers,
+            price_drop_pct=getattr(strategy, "price_drop_pct", 30.0) or 30.0,
+            price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0),
+            take_profit_pct=strategy.take_profit_pct,
+        )
+        avg_entry, _ = eng.get_avg_entry_price(positions_data)
+
+        for p in rows:
+            tp_id = (p.tp_limit_order_id or "").strip()
+            if not tp_id:
+                continue
+            try:
+                order_info = await asyncio.wait_for(
+                    _fetch_order(auth_binance, tp_id, symbol),
+                    timeout=2.0,
+                )
+            except (Exception, asyncio.TimeoutError):
+                continue
+            status = (order_info.get("status") or "").lower()
+            avg_fill = _order_fill_avg_price(order_info, 0.0, allow_order_price=False)
+            if status in ("closed", "filled") and avg_fill > 0:
+                await self._close_positions(
+                    session,
+                    strategy,
+                    symbol,
+                    auth_binance,
+                    rows,
+                    eng,
+                    avg_entry,
+                    side_l,
+                    "take_profit",
+                    current_price,
+                    pre_exit_price=avg_fill,
+                    fill_order=order_info,
+                )
+                return len(rows)
+
+        sl_handled = await self._try_close_on_sl_fill(
+            session,
+            strategy,
+            symbol,
+            auth_binance,
+            rows,
+            eng,
+            avg_entry,
+            side_l,
+            current_price,
+        )
+        still_open = [p for p in rows if getattr(p, "closed_at", None) is None]
+        if not still_open:
+            return len(rows)
+        if sl_handled:
+            # 止损已成交但均价未解析：禁止用现价瞎写，交给下次/sync
+            return 0
+
+        if not allow_infer:
+            return 0
+
+        exit_px = float(current_price or 0)
+        if exit_px <= 0:
+            exit_px = float(getattr(rows[0], "mark_price", 0) or 0)
+        if exit_px <= 0:
+            logger.warning(
+                "Strategy %d: %s exchange flat but cannot infer exit — leave local open",
+                strategy.id,
+                symbol,
+            )
+            return 0
+        reason = infer_flat_close_reason(
+            side_l, avg_entry or rows[0].entry_price, exit_px
+        )
+        strategy_log_service.warning(
+            strategy.id,
+            f"{symbol} 交易所已平、本地残留仓按{reason}补记 @{exit_px:.6g}",
+        )
+        await self._close_positions(
+            session,
+            strategy,
+            symbol,
+            auth_binance,
+            rows,
+            eng,
+            avg_entry,
+            side_l,
+            reason,
+            current_price,
+            pre_exit_price=exit_px,
+        )
+        return len(rows)
+
+    async def _finalize_replaced_opens_db(
+        self,
+        session: AsyncSession,
+        strategy: Strategy,
+        stale_positions: list,
+        result: OpenApiResult,
+        auth_binance=None,
+    ) -> None:
+        """新开仓单号与本地残留行不同：先把上一轮写成成交，再允许插入新仓。"""
+        rows = [
+            p for p in (stale_positions or []) if getattr(p, "closed_at", None) is None
+        ]
+        if not rows:
+            return
+        side = (result.position_side or rows[0].side or "").lower()
+        positions_data = [
+            {"quantity": p.quantity, "entry_price": p.entry_price} for p in rows
+        ]
+        eng = MartingaleEngine(
+            base_quantity=float(rows[0].quantity or 0),
+            multiplier=strategy.martingale_mult,
+            max_layers=strategy.max_layers,
+            price_drop_multiplier=float(strategy.price_drop_multiplier or 1.0),
+            take_profit_pct=strategy.take_profit_pct,
+        )
+        avg_entry, _ = eng.get_avg_entry_price(positions_data)
+        # 新开仓可能已挂上止盈/止损：扫残留单时必须跳过这些新单号
+        keep_ids = {
+            str(getattr(result, "tp_limit_order_id", None) or "").strip(),
+            str(getattr(result, "sl_stop_order_id", None) or "").strip(),
+        }
+        keep_ids.discard("")
+        if auth_binance is not None:
+            for p in rows:
+                tp_id = str(getattr(p, "tp_limit_order_id", None) or "").strip()
+                if not tp_id:
+                    continue
+                try:
+                    order_info = await asyncio.wait_for(
+                        _fetch_order(auth_binance, tp_id, result.symbol),
+                        timeout=2.0,
+                    )
+                except (Exception, asyncio.TimeoutError):
+                    continue
+                status = (order_info.get("status") or "").lower()
+                avg_fill = _order_fill_avg_price(
+                    order_info, 0.0, allow_order_price=False
+                )
+                if status in ("closed", "filled") and avg_fill > 0:
+                    await self._close_positions(
+                        session,
+                        strategy,
+                        result.symbol,
+                        auth_binance,
+                        rows,
+                        eng,
+                        avg_entry,
+                        side,
+                        "take_profit",
+                        float(result.current_price or avg_fill),
+                        pre_exit_price=avg_fill,
+                        fill_order=order_info,
+                        keep_working_order_ids=keep_ids,
+                    )
+                    return
+            sl_handled = await self._try_close_on_sl_fill(
+                session,
+                strategy,
+                result.symbol,
+                auth_binance,
+                rows,
+                eng,
+                avg_entry,
+                side,
+                float(result.current_price or result.avg_price or 0),
+                keep_working_order_ids=keep_ids,
+            )
+            still_open = [p for p in rows if getattr(p, "closed_at", None) is None]
+            if not still_open:
+                return
+            if sl_handled:
+                # 止损已成交但均价未解析：不要用新开仓价冒充出场
+                return
+        exit_px = float(result.avg_price or result.current_price or 0)
+        if exit_px <= 0:
+            exit_px = float(
+                getattr(rows[0], "mark_price", 0) or getattr(rows[0], "entry_price", 0) or 0
+            )
+        if exit_px <= 0:
+            logger.error(
+                "Strategy %d: cannot finalize stale %s opens — no exit price",
+                strategy.id,
+                result.symbol,
+            )
+            return
+        reason = infer_flat_close_reason(
+            side, avg_entry or rows[0].entry_price, exit_px
+        )
+        strategy_log_service.warning(
+            strategy.id,
+            f"{_norm_sym(result.symbol)} 新开仓单号不同，补记上一轮 {reason} "
+            f"qty={float(rows[0].quantity or 0):g} @{exit_px:.6g}",
+        )
+        await self._close_positions(
+            session,
+            strategy,
+            result.symbol,
+            auth_binance,
+            rows,
+            eng,
+            avg_entry,
+            side,
+            reason,
+            float(result.current_price or exit_px),
+            pre_exit_price=exit_px,
+            keep_working_order_ids=keep_ids,
+        )
+
     async def execute_open_db(
         self,
         session: AsyncSession,
         strategy: Strategy,
         result: OpenApiResult,
+        auth_binance=None,
     ) -> None:
         strategy_id = strategy.id
         symbol = _norm_sym(result.symbol)
@@ -2576,6 +2954,35 @@ class PositionManager:
                         side,
                     )
                     return
+                new_oid = str((result.order or {}).get("id") or "").strip()
+                new_qty = float(getattr(result, "filled_qty", 0) or 0)
+                stale: list = []
+                mergeable: list = []
+                for p in same_side:
+                    if same_open_fill(
+                        getattr(p, "exchange_order_id", None), new_oid
+                    ):
+                        old_oid = str(getattr(p, "exchange_order_id", None) or "").strip()
+                        old_qty = float(getattr(p, "quantity", 0) or 0)
+                        # 单号缺失时，数量差太多视为上一轮残留，禁止覆盖
+                        if (
+                            (not old_oid or not new_oid)
+                            and old_qty > 0
+                            and new_qty > 0
+                            and abs(old_qty - new_qty) / max(old_qty, new_qty) > 0.02
+                        ):
+                            stale.append(p)
+                        else:
+                            mergeable.append(p)
+                    else:
+                        stale.append(p)
+                if stale:
+                    # 上一轮交易所已平、本地未落库：禁止 merge 覆盖，否则中间成交会消失
+                    await self._finalize_replaced_opens_db(
+                        session, strategy, stale, result, auth_binance
+                    )
+                same_side = mergeable
+            if same_side:
                 # 折叠竞态产生的多条 L0，只保留一条并回填成交信息
                 kept = _collapse_phantom_l0_duplicates(same_side)
                 primary = kept[0]
@@ -2907,7 +3314,7 @@ class PositionManager:
         if not api_result:
             return
         try:
-            await self.execute_open_db(session, strategy, api_result)
+            await self.execute_open_db(session, strategy, api_result, auth_binance)
         except Exception:
             try:
                 await session.rollback()
@@ -2953,7 +3360,7 @@ class PositionManager:
         )
         api_result = await self.execute_open_api(candidate, strategy, auth_binance, leverage)
         if api_result:
-            await self.execute_open_db(session, strategy, api_result)
+            await self.execute_open_db(session, strategy, api_result, auth_binance)
 
     async def _manage_positions(
         self, session, strategy, symbol, auth_binance, public_binance, open_positions, base_qty, current_price, total_margin, leverage, klines=None, ctx: TickContext | None = None
@@ -3161,6 +3568,7 @@ class PositionManager:
         avg_entry,
         pos_side,
         current_price,
+        keep_working_order_ids: set[str] | None = None,
     ) -> bool:
         """条件止损已成交则写库平仓。返回 True 表示本腿已处理完（含已成交无均价需等待）。"""
         sl_id = ""
@@ -3206,6 +3614,7 @@ class PositionManager:
             current_price,
             pre_exit_price=avg_fill,
             fill_order=order_info,
+            keep_working_order_ids=keep_working_order_ids,
         )
         return True
 
@@ -3318,6 +3727,7 @@ class PositionManager:
         current_price,
         pre_exit_price: float = 0.0,
         fill_order: dict | None = None,
+        keep_working_order_ids: set[str] | None = None,
     ):
         strategy_id = strategy.id
         # 双保险：市价减仓只针对机器人开仓行
@@ -3537,6 +3947,16 @@ class PositionManager:
                     logger.error("Strategy %d: close position failed: %s", strategy_id, e)
                     strategy_log_service.error(strategy_id, f"{symbol} 平仓异常 — {e}")
                     return
+
+        # 平仓已确定：撤本币种剩余止盈/止损（限价止盈已成交时旧路径会漏撤条件止损）
+        await self.cancel_leftover_orders_after_close(
+            auth_binance,
+            symbol,
+            open_positions,
+            strategy_id,
+            pos_side,
+            keep_ids=keep_working_order_ids,
+        )
 
         # Common: create Trade records and mark positions closed
         sym_norm = _norm_sym(symbol)

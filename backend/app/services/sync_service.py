@@ -237,6 +237,24 @@ class PositionSyncService:
                                 await binance_service.cancel_order(oid, ref.symbol)
                             except Exception:
                                 pass
+                    client = binance_service or auth_binance
+                    if client is not None:
+                        try:
+                            from .position_manager import PositionManager
+
+                            await PositionManager()._cancel_symbol_side_working_exits(
+                                client,
+                                ref.symbol,
+                                side_low,
+                                int(getattr(ref, "strategy_id", 0) or 0),
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Sync: leftover working exits cancel failed %s %s",
+                                ref.symbol,
+                                side_low,
+                                exc_info=True,
+                            )
 
                     closed_n = 0
                     async with hold_account_sync(account_id):

@@ -20,14 +20,37 @@ def _trade_symbol_norm_expr():
     )
 
 
-def wick_loss_scale_mult(
-    streak: int, max_mult: float, base: float = 2.0
-) -> float:
-    """streak=连续止损次数；0→1x，1→base，2→base²，封顶 max_mult。默认 base=2 → ×2/×4/×8。"""
+def wick_loss_scale_times_used(streak: int, max_times: int | None) -> int:
+    """实际参与加倍的连亏次数：受 max_times 封顶；None 表示不限次数。"""
     try:
         n = int(streak)
     except (TypeError, ValueError):
         n = 0
+    if n <= 0:
+        return 0
+    if max_times is None:
+        return n
+    try:
+        cap_times = int(max_times)
+    except (TypeError, ValueError):
+        cap_times = 2
+    if cap_times < 0:
+        cap_times = 0
+    return min(n, cap_times)
+
+
+def wick_loss_scale_mult(
+    streak: int,
+    max_mult: float,
+    base: float = 2.0,
+    max_times: int | None = None,
+) -> float:
+    """streak=连续止损次数；0→1x，1→base，2→base²，封顶 max_mult。
+
+    max_times 限制升档次数（默认策略字段为 2：最多 ×2 再 ×4）。
+    函数默认 None=不限次数，只受 max_mult 封顶。
+    """
+    n = wick_loss_scale_times_used(streak, max_times)
     if n <= 0:
         return 1.0
     try:
@@ -44,6 +67,32 @@ def wick_loss_scale_mult(
         cap = 1.0
     raw = step ** n
     return min(raw, cap)
+
+
+def infer_flat_close_reason(side: str, entry: float, exit_px: float) -> str:
+    """交易所已空、本地仍开时，用价差推断上一轮是止盈还是止损。"""
+    try:
+        entry_f = float(entry or 0)
+        exit_f = float(exit_px or 0)
+    except (TypeError, ValueError):
+        return "sync"
+    if entry_f <= 0 or exit_f <= 0:
+        return "sync"
+    side_l = (side or "").lower()
+    if side_l == "long":
+        return "take_profit" if exit_f >= entry_f else "stop_loss"
+    if side_l in ("short", "sell"):
+        return "take_profit" if exit_f <= entry_f else "stop_loss"
+    return "sync"
+
+
+def same_open_fill(existing_order_id: str | None, new_order_id: str | None) -> bool:
+    """同一笔成交才允许 merge：双方都有单号且不同 → 上一轮未落库，禁止覆盖。"""
+    old = str(existing_order_id or "").strip()
+    new = str(new_order_id or "").strip()
+    if not old or not new:
+        return True
+    return old == new
 
 
 def consecutive_stop_loss_streak(reasons: list[str | None]) -> int:

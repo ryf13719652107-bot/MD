@@ -809,6 +809,9 @@ class BinanceService:
             "average": avg if avg > 0 else None,
             "price": price,
             "info": info,
+            "symbol": str(info.get("symbol") or ""),
+            "positionSide": str(info.get("positionSide") or ""),
+            "type": str(info.get("type") or info.get("orderType") or "STOP"),
         }
         actual = str(info.get("actualOrderId") or "").strip()
         if actual and actual not in ("0",):
@@ -837,6 +840,35 @@ class BinanceService:
         info["child"] = child
         merged["info"] = info
         return merged
+
+    async def fetch_open_algo_orders(self, symbol: str | None = None) -> list[dict]:
+        """未完成的 Algo 条件单（接针K止损走这里，普通 fetch_open_orders 看不到）。"""
+        params: dict = {}
+        if symbol:
+            params["symbol"] = self._native_symbol(symbol)
+        fn = getattr(self.exchange, "fapiPrivateGetOpenAlgoOrders", None)
+        try:
+            if callable(fn):
+                raw = await fn(params)
+            else:
+                req = getattr(self.exchange, "request", None)
+                if not callable(req):
+                    return []
+                raw = await req("openAlgoOrders", "fapiPrivate", "GET", params)
+        except Exception as e:
+            logger.debug("fetch_open_algo_orders %s failed: %s", symbol, e)
+            return []
+        rows = raw if isinstance(raw, list) else []
+        if not rows and isinstance(raw, dict):
+            for key in ("orders", "data", "algoOrders"):
+                if isinstance(raw.get(key), list):
+                    rows = raw[key]
+                    break
+        out: list[dict] = []
+        for row in rows:
+            if isinstance(row, dict):
+                out.append(self._normalize_algo_order(row))
+        return out
 
     async def _fetch_algo_order(self, order_id: str, symbol: str) -> dict:
         native = self._native_symbol(symbol)

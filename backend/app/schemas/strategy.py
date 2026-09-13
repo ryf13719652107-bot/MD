@@ -215,6 +215,12 @@ class StrategyCreate(BaseModel):
         le=64,
         description="连亏加倍上限，封顶该值",
     )
+    wick_loss_scale_max_times: int = Field(
+        default=2,
+        ge=1,
+        le=8,
+        description="连续亏损加仓次数上限，默认 2（第1次×2、第2次×4，之后不再升档）",
+    )
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     trailing_tp_enabled: bool = Field(
         default=False,
@@ -316,6 +322,7 @@ class StrategyUpdate(BaseModel):
     wick_loss_scale_enabled: Optional[bool] = None
     wick_loss_scale_base: Optional[float] = Field(default=None, ge=1, le=8)
     wick_loss_scale_max_mult: Optional[float] = Field(default=None, ge=1, le=64)
+    wick_loss_scale_max_times: Optional[int] = Field(default=None, ge=1, le=8)
     trailing_tp_enabled: Optional[bool] = None
     trailing_tp_window_sec: Optional[float] = Field(default=None, gt=0, le=3600)
     trailing_tp_drawdown_base_pct: Optional[float] = Field(default=None, ge=0, le=100)
@@ -425,6 +432,7 @@ class StrategyResponse(BaseModel):
     wick_loss_scale_enabled: bool = False
     wick_loss_scale_base: float = 2.0
     wick_loss_scale_max_mult: float = 8.0
+    wick_loss_scale_max_times: int = 2
     trailing_tp_enabled: bool = False
     trailing_tp_window_sec: float = 300.0
     trailing_tp_drawdown_base_pct: float = 30.0

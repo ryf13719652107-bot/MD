@@ -1034,7 +1034,9 @@ class StrategyScheduler:
                             if res is None:
                                 continue
                             try:
-                                await self._position_mgr.execute_open_db(session, strategy, res)
+                                await self._position_mgr.execute_open_db(
+                                    session, strategy, res, auth_binance
+                                )
                                 await session.commit()
                             except Exception as e:
                                 logger.error(

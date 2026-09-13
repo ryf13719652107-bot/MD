@@ -70,6 +70,8 @@ export interface Strategy {
   wick_loss_scale_base: number;
   /** 连亏加倍上限（1次×2、2次×4、3次×8） */
   wick_loss_scale_max_mult: number;
+  /** 连续亏损加仓次数上限，默认 2 */
+  wick_loss_scale_max_times: number;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */
@@ -185,6 +187,8 @@ export interface StrategyFormData {
   wick_loss_scale_base: number;
   /** 连亏加倍上限（1次×2、2次×4、3次×8） */
   wick_loss_scale_max_mult: number;
+  /** 连续亏损加仓次数上限，默认 2 */
+  wick_loss_scale_max_times: number;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */

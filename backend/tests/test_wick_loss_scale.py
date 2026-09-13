@@ -9,7 +9,10 @@ from app.services.strategy_engine import Signal
 from app.services.wick_loss_scale import (
     _norm_trade_symbol,
     consecutive_stop_loss_streak,
+    infer_flat_close_reason,
+    same_open_fill,
     wick_loss_scale_mult,
+    wick_loss_scale_times_used,
 )
 from app.services.wick_spike_engine import (
     WickBarSnapshot,
@@ -32,6 +35,30 @@ def test_loss_scale_mult_powers_of_two_and_cap():
     assert wick_loss_scale_mult(2, 8, 1.5) == pytest.approx(2.25)
     assert wick_loss_scale_mult(2, 8, 3) == 8.0
     assert wick_loss_scale_mult(1, 8, 3) == 3.0
+
+
+def test_loss_scale_mult_max_times_caps_streak():
+    assert wick_loss_scale_times_used(3, 2) == 2
+    assert wick_loss_scale_mult(3, 8, 2, max_times=2) == 4.0
+    assert wick_loss_scale_mult(5, 8, 2, max_times=2) == 4.0
+    assert wick_loss_scale_mult(1, 8, 2, max_times=2) == 2.0
+    assert wick_loss_scale_mult(3, 8, 2, max_times=None) == 8.0
+
+
+def test_same_open_fill_rejects_different_order_ids():
+    assert same_open_fill("111", "111") is True
+    assert same_open_fill("111", "222") is False
+    assert same_open_fill("", "222") is True
+    assert same_open_fill("111", "") is True
+    assert same_open_fill(None, "222") is True
+
+
+def test_infer_flat_close_reason_by_pnl():
+    assert infer_flat_close_reason("short", 0.545, 0.537) == "take_profit"
+    assert infer_flat_close_reason("short", 0.541, 0.548) == "stop_loss"
+    assert infer_flat_close_reason("long", 100, 102) == "take_profit"
+    assert infer_flat_close_reason("long", 100, 99) == "stop_loss"
+    assert infer_flat_close_reason("short", 0, 1) == "sync"
 
 
 def test_norm_trade_symbol_matches_exchange_formats():
@@ -148,6 +175,48 @@ async def test_loss_scale_qty_uses_custom_base():
     assert streak == 2
     assert mult == pytest.approx(2.25)
     assert qty == pytest.approx(22.5)
+
+
+@pytest.mark.asyncio
+async def test_loss_scale_qty_respects_max_times():
+    runner = WickSpikeRunner()
+    runner.set_loss_streak(3, "NILUSDT", 3)
+    qty, streak, mult = await runner._loss_scale_qty(
+        SimpleNamespace(
+            id=3,
+            wick_loss_scale_enabled=True,
+            wick_loss_scale_base=2,
+            wick_loss_scale_max_mult=8,
+            wick_loss_scale_max_times=2,
+        ),
+        "NILUSDT",
+        10.0,
+    )
+    assert streak == 2
+    assert mult == 4.0
+    assert qty == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
+async def test_apply_wick_close_hooks_tp_resets_even_if_db_still_shows_sl():
+    runner = WickSpikeRunner()
+    runner.set_loss_streak(4, "NILUSDT", 1)
+    with patch(
+        "app.services.wick_spike_runner.count_consecutive_stop_losses",
+        new=AsyncMock(return_value=1),
+    ) as mocked:
+        await runner.apply_wick_close_hooks(
+            object(),
+            SimpleNamespace(
+                id=4,
+                signal_source="wick_spike",
+                wick_loss_scale_enabled=True,
+            ),
+            "NILUSDT",
+            "take_profit",
+        )
+    mocked.assert_not_called()
+    assert runner._loss_streaks[(4, "NILUSDT")] == 0
 
 
 @pytest.mark.asyncio

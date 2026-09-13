@@ -237,7 +237,7 @@ export default function StrategyPage() {
                 <div>止损后再开: <span className="text-gray-200">{s.wick_reopen_after_sl_enabled ? '同根可再开' : '已禁用'}</span></div>
               )}
               {s.signal_source === 'wick_spike' && (
-                <div>连亏加倍: <span className="text-gray-200">{s.wick_loss_scale_enabled ? `每次×${s.wick_loss_scale_base ?? 2} 上限${s.wick_loss_scale_max_mult ?? 8}` : '已禁用'}</span></div>
+                <div>连亏加倍: <span className="text-gray-200">{s.wick_loss_scale_enabled ? `每次×${s.wick_loss_scale_base ?? 2} 最多${s.wick_loss_scale_max_times ?? 2}次 上限${s.wick_loss_scale_max_mult ?? 8}` : '已禁用'}</span></div>
               )}
               <div>单币止损: <span className="text-gray-200">{formatSingleSymbolStopLoss(s.single_symbol_stop_loss_enabled, s.single_symbol_stop_loss_pct)}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>

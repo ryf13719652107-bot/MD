@@ -126,6 +126,10 @@ class Strategy(Base):
     wick_loss_scale_max_mult: Mapped[float] = mapped_column(
         Float, default=8.0, server_default="8.0"
     )
+    # 连亏加仓次数上限：streak 超过此值不再继续升档（默认 2 → 最多 ×2 再 ×4）
+    wick_loss_scale_max_times: Mapped[int] = mapped_column(
+        Integer, default=2, server_default="2"
+    )
 
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     # 窗口内达 take_profit_pct 则一直追踪；超时未触发立即回退限价

@@ -405,6 +405,241 @@ async def test_close_on_tp_fill_cancels_sl():
 
 
 @pytest.mark.asyncio
+async def test_close_on_tp_limit_filled_without_pre_exit_cancels_sl():
+    """限价止盈已成交、未带 pre_exit 时也必须撤条件止损。"""
+    pm = PositionManager()
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    session.add = MagicMock()
+    strategy = SimpleNamespace(
+        id=1,
+        account_id=1,
+        take_profit_limit_order=True,
+        martingale_mult=1.5,
+        max_layers=8,
+        price_drop_multiplier=1.0,
+        take_profit_pct=2.0,
+        signal_source="wick_spike",
+        wick_bar_sl_enabled=True,
+    )
+    auth = MagicMock()
+    sl_called = []
+
+    async def _spy_sl(_auth, symbol, positions, strategy_id):
+        sl_called.append(symbol)
+        for p in positions:
+            p.sl_stop_order_id = None
+
+    pm.cancel_bot_sls_on_positions = _spy_sl
+    pm.cancel_bot_tps_on_positions = AsyncMock()
+    pm._cancel_symbol_side_working_exits = AsyncMock()
+    pos = SimpleNamespace(
+        id=11,
+        strategy_id=1,
+        account_id=1,
+        symbol="BTCUSDT",
+        side="short",
+        quantity=2.0,
+        entry_price=1.1,
+        layer=0,
+        exchange_order_id="open-1",
+        tp_limit_order_id="tp-1",
+        sl_stop_order_id="sl-1",
+        stop_loss_price=1.21,
+        closed_at=None,
+        opened_at=None,
+        take_profit_price=1.08,
+        unrealized_pnl=0.0,
+    )
+    with (
+        patch(
+            "app.services.position_manager._fetch_order",
+            new=AsyncMock(
+                return_value={
+                    "id": "tp-1",
+                    "status": "filled",
+                    "average": 1.079,
+                    "filled": 2.0,
+                }
+            ),
+        ),
+        patch(
+            "app.services.position_manager.claim_open_position_close",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "app.services.position_manager.find_existing_leg_close_trade",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("app.services.position_manager.backup_trade"),
+    ):
+        await pm._close_positions(
+            session,
+            strategy,
+            "BTCUSDT",
+            auth,
+            [pos],
+            SimpleNamespace(),
+            1.1,
+            "short",
+            "take_profit",
+            1.08,
+        )
+    assert sl_called == ["BTCUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_symbol_side_algo_stop_without_local_id():
+    """本地没记下止损单号时，平仓后仍按本币种同向 Algo STOP 撤掉。"""
+    pm = PositionManager()
+    session = AsyncMock()
+    session.flush = AsyncMock()
+    session.add = MagicMock()
+    strategy = SimpleNamespace(
+        id=1,
+        account_id=1,
+        take_profit_limit_order=True,
+        martingale_mult=1.5,
+        max_layers=8,
+        price_drop_multiplier=1.0,
+        take_profit_pct=2.0,
+        signal_source="wick_spike",
+        wick_bar_sl_enabled=True,
+    )
+    auth = MagicMock()
+    auth.cancel_order = AsyncMock(return_value={"status": "canceled"})
+    auth._format_symbol = lambda s: s
+    auth.exchange_id = "binance"
+    auth.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    auth.fetch_open_algo_orders = AsyncMock(
+        return_value=[
+            {
+                "id": "algo-sl-9",
+                "status": "open",
+                "type": "STOP",
+                "info": {"positionSide": "SHORT", "algoType": "CONDITIONAL"},
+            }
+        ]
+    )
+    pos = SimpleNamespace(
+        id=11,
+        strategy_id=1,
+        account_id=1,
+        symbol="UAIAUSDT",
+        side="short",
+        quantity=18.0,
+        entry_price=0.54,
+        layer=0,
+        exchange_order_id="open-1",
+        tp_limit_order_id="tp-1",
+        sl_stop_order_id=None,
+        stop_loss_price=0.55,
+        closed_at=None,
+        opened_at=None,
+        take_profit_price=0.53,
+        unrealized_pnl=0.0,
+    )
+    with (
+        patch(
+            "app.services.position_manager.claim_open_position_close",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "app.services.position_manager.find_existing_leg_close_trade",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("app.services.position_manager.backup_trade"),
+    ):
+        await pm._close_positions(
+            session,
+            strategy,
+            "UAIAUSDT",
+            auth,
+            [pos],
+            SimpleNamespace(),
+            0.54,
+            "short",
+            "take_profit",
+            0.53,
+            pre_exit_price=0.533,
+            fill_order={"id": "tp-1", "status": "filled", "average": 0.533},
+        )
+    cancelled = [c.args[0] for c in auth.cancel_order.call_args_list]
+    assert "algo-sl-9" in cancelled
+
+
+@pytest.mark.asyncio
+async def test_symbol_scan_keeps_new_open_sl_id():
+    """补记上一轮时不得把刚挂上的新止损单一起撤掉。"""
+    pm = PositionManager()
+    auth = MagicMock()
+    auth.cancel_order = AsyncMock(return_value={"status": "canceled"})
+    auth._format_symbol = lambda s: s
+    auth.exchange_id = "binance"
+    auth.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    auth.fetch_open_algo_orders = AsyncMock(
+        return_value=[
+            {
+                "id": "old-sl",
+                "status": "open",
+                "type": "STOP",
+                "symbol": "UAIAUSDT",
+                "info": {"positionSide": "SHORT", "algoType": "CONDITIONAL"},
+            },
+            {
+                "id": "new-sl",
+                "status": "open",
+                "type": "STOP",
+                "symbol": "UAIAUSDT",
+                "info": {"positionSide": "SHORT", "algoType": "CONDITIONAL"},
+            },
+        ]
+    )
+    await pm._cancel_symbol_side_working_exits(
+        auth, "UAIAUSDT", "short", 1, keep_ids={"new-sl"}
+    )
+    cancelled = [c.args[0] for c in auth.cancel_order.call_args_list]
+    assert "old-sl" in cancelled
+    assert "new-sl" not in cancelled
+
+
+def test_working_exit_order_requires_same_side_and_symbol():
+    pm = PositionManager()
+    short_stop = {
+        "id": "1",
+        "status": "open",
+        "type": "STOP",
+        "symbol": "UAIAUSDT",
+        "info": {"positionSide": "SHORT", "algoType": "CONDITIONAL"},
+    }
+    assert pm._is_working_exit_order(short_stop, "short", "UAIAUSDT") is True
+    assert pm._is_working_exit_order(short_stop, "long", "UAIAUSDT") is False
+    assert pm._is_working_exit_order(short_stop, "short", "BTCUSDT") is False
+    no_side = {
+        "id": "2",
+        "status": "open",
+        "type": "STOP",
+        "symbol": "UAIAUSDT",
+        "info": {"algoType": "CONDITIONAL"},
+    }
+    assert pm._is_working_exit_order(no_side, "short", "UAIAUSDT") is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_bot_sls_keeps_id_when_cancel_fails():
+    pm = PositionManager()
+    auth = MagicMock()
+    auth.cancel_order = AsyncMock(side_effect=RuntimeError("timeout"))
+    p1 = SimpleNamespace(sl_stop_order_id="sl-1")
+    with patch(
+        "app.services.position_manager._fetch_order",
+        new=AsyncMock(return_value={"id": "sl-1", "status": "open"}),
+    ):
+        await pm.cancel_bot_sls_on_positions(auth, "BTCUSDT", [p1], 1)
+    assert p1.sl_stop_order_id == "sl-1"
+
+
+@pytest.mark.asyncio
 async def test_ensure_sl_replaces_when_qty_grows():
     """马丁后数量变大：撤旧单、同价重挂全腿数量。"""
     pm = PositionManager()

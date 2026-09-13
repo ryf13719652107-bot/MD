@@ -84,6 +84,7 @@ from .wick_loss_scale import (
     count_consecutive_stop_losses,
     last_close_reason,
     wick_loss_scale_mult,
+    wick_loss_scale_times_used,
 )
 from .trailing_tp_engine import (
     TrailingTpParams,
@@ -303,8 +304,13 @@ class WickSpikeRunner:
         if sid <= 0:
             return
         if bool(getattr(strategy, "wick_loss_scale_enabled", False)):
-            n = await count_consecutive_stop_losses(session, sid, symbol)
-            self.set_loss_streak(sid, symbol, n)
+            reason = (close_reason or "").strip()
+            # 止盈/同步平仓必须立刻回初始仓，不能只靠查库（中间笔漏记时仍会看到上一笔止损）
+            if reason != "stop_loss":
+                self.set_loss_streak(sid, symbol, 0)
+            else:
+                n = await count_consecutive_stop_losses(session, sid, symbol)
+                self.set_loss_streak(sid, symbol, n)
         if (
             bool(getattr(strategy, "wick_reopen_after_sl_enabled", False))
             and (close_reason or "").strip() == "stop_loss"
@@ -343,8 +349,14 @@ class WickSpikeRunner:
         streak = int(self._loss_streaks.get(key, 0) or 0)
         cap = float(getattr(strategy, "wick_loss_scale_max_mult", 8.0) or 8.0)
         step = float(getattr(strategy, "wick_loss_scale_base", 2.0) or 2.0)
-        mult = wick_loss_scale_mult(streak, cap, step)
-        return float(base_qty) * mult, streak, mult
+        try:
+            max_times = int(getattr(strategy, "wick_loss_scale_max_times", 2) or 2)
+        except (TypeError, ValueError):
+            max_times = 2
+        max_times = max(0, min(max_times, 8))
+        used = wick_loss_scale_times_used(streak, max_times)
+        mult = wick_loss_scale_mult(streak, cap, step, max_times=max_times)
+        return float(base_qty) * mult, used, mult
 
     def _fire_bg(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -779,7 +791,7 @@ class WickSpikeRunner:
                     if (
                         auth is not None
                         and (reopen_on or scale_on or wick_sl_on)
-                        and (in_pos or (reopen_on and same_bar_locked))
+                        and (in_pos or same_bar_locked)
                         and now - last_sl_reopen_check.get(sym_key, 0.0) >= 1.0
                     ):
                         last_sl_reopen_check[sym_key] = now
@@ -1771,47 +1783,15 @@ class WickSpikeRunner:
                         if (p.side or "").lower() == (side or "").lower()
                     ]
                     if open_positions:
-                        sl_id = ""
-                        for p in open_positions:
-                            sl_id = str(
-                                getattr(p, "sl_stop_order_id", None) or ""
-                            ).strip()
-                            if sl_id:
-                                break
-                        if not sl_id:
-                            return
-                        from .martingale_engine import MartingaleEngine
-
-                        positions_data = [
-                            {
-                                "quantity": p.quantity,
-                                "entry_price": p.entry_price,
-                            }
-                            for p in open_positions
-                        ]
-                        eng = MartingaleEngine(
-                            base_quantity=float(
-                                open_positions[0].quantity or 0
-                            ),
-                            multiplier=strategy.martingale_mult,
-                            max_layers=strategy.max_layers,
-                            price_drop_pct=strategy.price_drop_pct,
-                            price_drop_multiplier=float(
-                                strategy.price_drop_multiplier or 1.0
-                            ),
-                            take_profit_pct=strategy.take_profit_pct,
-                        )
-                        avg_entry, _ = eng.get_avg_entry_price(positions_data)
-                        await self._position_mgr._try_close_on_sl_fill(
+                        # 止盈常比止损先成交；只查 SL 会漏记中间盈利笔，连亏倍数清不掉
+                        await self._position_mgr.finalize_flat_local_opens(
                             session,
                             strategy,
                             symbol,
-                            auth,
-                            open_positions,
-                            eng,
-                            avg_entry,
                             side,
+                            auth,
                             current_price,
+                            allow_infer=False,
                         )
                         await session.commit()
                         return
@@ -2092,10 +2072,58 @@ class WickSpikeRunner:
                         f"{symbol} 接针触发但交易所已有同向仓，跳过",
                     )
                     return skip("has_pos", "rest_positions")
-                # REST 确认空：对齐缓存
+                # REST 确认空：对齐缓存，并先落本地残留仓（防 merge 丢中间止盈、连亏不重置）
                 tick_ctx.exchange_legs.pop((sym_key, side), None)
                 if acc_id > 0 and stream_qty is None:
                     account_position_stream.set_leg(acc_id, symbol, side, 0.0)
+                try:
+                    async with async_session() as session:
+                        db_strategy = await session.get(Strategy, strategy_id)
+                        if db_strategy is not None:
+                            n_closed = await self._position_mgr.finalize_flat_local_opens(
+                                session,
+                                db_strategy,
+                                symbol,
+                                side,
+                                auth,
+                                price,
+                                allow_infer=True,
+                            )
+                            leftover = [
+                                p
+                                for p in (
+                                    await session.execute(
+                                        self._position_mgr._open_positions_stmt(
+                                            strategy_id, sym_key
+                                        )
+                                    )
+                                ).scalars().all()
+                                if (p.side or "").lower() == side
+                            ]
+                            if n_closed:
+                                await session.commit()
+                                strategy_log_service.info(
+                                    strategy_id,
+                                    f"{symbol} 交易所已平、本地残留仓已补记 {n_closed} 笔后再开",
+                                )
+                            if leftover:
+                                strategy_log_service.warning(
+                                    strategy_id,
+                                    f"{symbol} 交易所已平但本地仓未落库，跳过本轮以免覆盖上一笔",
+                                )
+                                return skip("retryable_fail", "stale_local_still_open")
+                except Exception as fin_e:
+                    logger.warning(
+                        "wick_spike %d %s finalize stale local before open: %s",
+                        strategy_id,
+                        symbol,
+                        fin_e,
+                    )
+                    strategy_log_service.warning(
+                        strategy_id,
+                        f"{symbol} 本地残留仓补记失败，跳过本轮以免覆盖上一笔 — {fin_e}",
+                    )
+                    return skip("retryable_fail", "stale_local_finalize_failed")
             except Exception as e:
                 logger.warning(
                     "wick_spike %d %s pre-open position recheck failed: %s",
@@ -2315,7 +2343,7 @@ class WickSpikeRunner:
                                 strategy_id, _norm_sym(symbol), open_side
                             ):
                                 await self._position_mgr.execute_open_db(
-                                    session, db_strategy, api_res
+                                    session, db_strategy, api_res, auth
                                 )
                         # 开仓成功立即推入 trailing mems，消除 15s 空窗
                         # （不等 _refresh_context，下一个 tick 即开始追踪）
