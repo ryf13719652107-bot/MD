@@ -233,6 +233,12 @@ export default function StrategyPage() {
               {s.signal_source === 'wick_spike' && (
                 <div>接针K止损: <span className="text-gray-200">{s.wick_bar_sl_enabled ? '条件限价（空最高/多最低，不加仓）' : '已禁用'}</span></div>
               )}
+              {s.signal_source === 'wick_spike' && (
+                <div>止损后再开: <span className="text-gray-200">{s.wick_reopen_after_sl_enabled ? '同根可再开' : '已禁用'}</span></div>
+              )}
+              {s.signal_source === 'wick_spike' && (
+                <div>连亏加倍: <span className="text-gray-200">{s.wick_loss_scale_enabled ? `每次×${s.wick_loss_scale_base ?? 2} 上限${s.wick_loss_scale_max_mult ?? 8}` : '已禁用'}</span></div>
+              )}
               <div>单币止损: <span className="text-gray-200">{formatSingleSymbolStopLoss(s.single_symbol_stop_loss_enabled, s.single_symbol_stop_loss_pct)}</span></div>
               <div>保证金阈值: <span className="text-gray-200">{s.margin_threshold} USDT</span></div>
               <div>选币间隔: <span className="text-gray-200">{formatCoinPoolRefreshHours(s.coin_pool_refresh_seconds)} / {formatCoinPoolFetchMode(s.coin_pool_fetch_mode, s.coin_pool_anchor_hour, s.coin_pool_anchor_minute)}</span></div>

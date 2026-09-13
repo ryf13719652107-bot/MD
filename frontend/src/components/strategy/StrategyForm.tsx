@@ -62,6 +62,10 @@ const schema = z.object({
   wick_volume_mode: z.enum(['original', 'instant_early', 'real_only']),
   wick_instant_active_until_pct: z.number().min(0).max(1),
   wick_bar_sl_enabled: z.boolean(),
+  wick_reopen_after_sl_enabled: z.boolean(),
+  wick_loss_scale_enabled: z.boolean(),
+  wick_loss_scale_base: z.number().min(1).max(8),
+  wick_loss_scale_max_mult: z.number().min(1).max(64),
   trailing_tp_enabled: z.boolean(),
   trailing_tp_window_sec: z.number().min(1).max(3600),
   trailing_tp_drawdown_base_pct: z.number().min(0).max(100),
@@ -219,6 +223,10 @@ function toFormDefaults(
           : 'original',
       wick_instant_active_until_pct: initialData.wick_instant_active_until_pct ?? 0.5,
       wick_bar_sl_enabled: initialData.wick_bar_sl_enabled ?? false,
+      wick_reopen_after_sl_enabled: initialData.wick_reopen_after_sl_enabled ?? false,
+      wick_loss_scale_enabled: initialData.wick_loss_scale_enabled ?? false,
+      wick_loss_scale_base: initialData.wick_loss_scale_base ?? 2,
+      wick_loss_scale_max_mult: initialData.wick_loss_scale_max_mult ?? 8,
       trailing_tp_enabled: initialData.trailing_tp_enabled ?? false,
       trailing_tp_window_sec: initialData.trailing_tp_window_sec ?? 300,
       trailing_tp_drawdown_base_pct: initialData.trailing_tp_drawdown_base_pct ?? 30,
@@ -313,6 +321,10 @@ function toFormDefaults(
     wick_volume_mode: 'original',
     wick_instant_active_until_pct: 0.5,
     wick_bar_sl_enabled: false,
+    wick_reopen_after_sl_enabled: false,
+    wick_loss_scale_enabled: false,
+    wick_loss_scale_base: 2,
+    wick_loss_scale_max_mult: 8,
     trailing_tp_enabled: false,
     trailing_tp_window_sec: 300,
     trailing_tp_drawdown_base_pct: 30,
@@ -359,6 +371,9 @@ function toApiPayload(data: StrategyFormData): StrategyApiPayload {
   const { hour, minute } = parseAnchorTime(coin_pool_anchor_time);
   const payload = {
     ...rest,
+    // disabled 的数字框 RHF 可能不带出，提交时补默认以免丢掉连亏参数
+    wick_loss_scale_base: Number.isFinite(data.wick_loss_scale_base) ? data.wick_loss_scale_base : 2,
+    wick_loss_scale_max_mult: Number.isFinite(data.wick_loss_scale_max_mult) ? data.wick_loss_scale_max_mult : 8,
     coin_pool_refresh_seconds: nearestCoinPoolRefreshSeconds(data.coin_pool_refresh_seconds),
     coin_pool_anchor_hour: hour,
     coin_pool_anchor_minute: minute,
@@ -484,6 +499,7 @@ export default function StrategyForm({
   const wickVolumeMode = watch('wick_volume_mode', 'original');
   const wickAtrFloorEnabled = watch('wick_atr_pct_floor_enabled', false);
   const trailingTpEnabled = watch('trailing_tp_enabled', false);
+  const wickLossScaleEnabled = watch('wick_loss_scale_enabled', false);
 
   // Auto-adjust RSI threshold on mount and when direction changes
   useEffect(() => {
@@ -1233,6 +1249,60 @@ export default function StrategyForm({
                 </label>
               </label>
               <span className="text-xs text-gray-600">空按本根最高、多按本根最低挂条件限价；开启后不再马丁加仓；默认关</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>止损后再开</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_reopen_after_sl_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-amber-500 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+              </label>
+              <span className="text-xs text-gray-600">默认关。开启后止损清本根锁，再满足接针可再开（含同根）</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>连亏加倍</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_loss_scale_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-amber-500 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+              </label>
+              <span className="text-xs text-gray-600">同币种连续止损后按「每次倍数」累乘，止盈重置</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={labelClass}>每次倍数</label>
+              <input
+                type="number"
+                step="0.1"
+                min={1}
+                max={8}
+                {...register('wick_loss_scale_base', { valueAsNumber: true })}
+                className={inputClass}
+                disabled={!wickLossScaleEnabled}
+              />
+              <span className="text-xs text-gray-600">{wickLossScaleEnabled ? '默认 2，即 ×2 / ×4 / ×8' : '连亏加倍已禁用'}</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={labelClass}>加倍上限</label>
+              <input
+                type="number"
+                step="1"
+                min={1}
+                max={64}
+                {...register('wick_loss_scale_max_mult', { valueAsNumber: true })}
+                className={inputClass}
+                disabled={!wickLossScaleEnabled}
+              />
+              <span className="text-xs text-gray-600">{wickLossScaleEnabled ? '连亏倍数封顶，默认 8' : '连亏加倍已禁用'}</span>
             </div>
           )}
           <div>

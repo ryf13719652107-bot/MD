@@ -112,6 +112,20 @@ class Strategy(Base):
     wick_bar_sl_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0"
     )
+    # 接针止损后：同根只要再满足信号即可再开（默认关，保持锁根）
+    wick_reopen_after_sl_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    # 同币种连亏加倍：止损 n 次 → base^n，受上限封顶（默认 base=2 → ×2/×4/×8）
+    wick_loss_scale_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    wick_loss_scale_base: Mapped[float] = mapped_column(
+        Float, default=2.0, server_default="2.0"
+    )
+    wick_loss_scale_max_mult: Mapped[float] = mapped_column(
+        Float, default=8.0, server_default="8.0"
+    )
 
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     # 窗口内达 take_profit_pct 则一直追踪；超时未触发立即回退限价

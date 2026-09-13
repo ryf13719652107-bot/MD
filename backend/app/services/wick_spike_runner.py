@@ -71,12 +71,18 @@ from .wick_spike_engine import (
     pierce_vol_view,
     mark_bar_triggered,
     release_bar_trigger,
+    unlock_after_stop_loss,
     spike_progress,
     snapshot_extreme,
     take_diag_event,
     tip_gap_pct,
 )
 from .strategy_engine import Signal
+from .wick_loss_scale import (
+    count_consecutive_stop_losses,
+    last_close_reason,
+    wick_loss_scale_mult,
+)
 from .trailing_tp_engine import (
     TrailingTpParams,
     TrailingTpMemState,
@@ -270,6 +276,73 @@ class WickSpikeRunner:
         self._trailing_mems: dict[int, dict[str, list[TrailingTpMemState]]] = {}
         self._trailing_auth: dict[int, object] = {}
         self._trailing_close_inflight: dict[int, set[str]] = {}
+        # 热路径内存：止损后再开清锁；连亏次数避免每次开仓查库
+        self._symbol_states: dict[int, dict[str, WickSymbolState]] = {}
+        self._loss_streaks: dict[tuple[int, str], int] = {}
+
+    def set_loss_streak(self, strategy_id: int, symbol: str, streak: int) -> None:
+        sid = int(strategy_id or 0)
+        key = (sid, _norm_sym(symbol))
+        if sid <= 0 or not key[1]:
+            return
+        try:
+            n = max(0, int(streak))
+        except (TypeError, ValueError):
+            n = 0
+        self._loss_streaks[key] = n
+
+    async def apply_wick_close_hooks(
+        self, session, strategy, symbol: str, close_reason: str
+    ) -> None:
+        """平仓写库后：更新连亏次数；开关打开时止损清同根锁。"""
+        if getattr(strategy, "signal_source", None) != "wick_spike":
+            return
+        sid = int(getattr(strategy, "id", 0) or 0)
+        if sid <= 0:
+            return
+        if bool(getattr(strategy, "wick_loss_scale_enabled", False)):
+            n = await count_consecutive_stop_losses(session, sid, symbol)
+            self.set_loss_streak(sid, symbol, n)
+        if (
+            bool(getattr(strategy, "wick_reopen_after_sl_enabled", False))
+            and (close_reason or "").strip() == "stop_loss"
+        ):
+            if self.unlock_after_sl(sid, symbol):
+                strategy_log_service.info(
+                    sid,
+                    f"{symbol} 止损后再开已解锁，同根满足即可再开",
+                )
+
+    def unlock_after_sl(self, strategy_id: int, symbol: str) -> bool:
+        states = self._symbol_states.get(int(strategy_id or 0))
+        if not states:
+            return False
+        st = states.get(_norm_sym(symbol))
+        if st is None:
+            return False
+        unlock_after_stop_loss(st)
+        return True
+
+    async def _loss_scale_qty(
+        self, strategy: Strategy, symbol: str, base_qty: float
+    ) -> tuple[float, int, float]:
+        """返回 (qty, streak, mult)。未开启则 (base, 0, 1)。"""
+        if not bool(getattr(strategy, "wick_loss_scale_enabled", False)):
+            return float(base_qty), 0, 1.0
+        sid = int(getattr(strategy, "id", 0) or 0)
+        key = (sid, _norm_sym(symbol))
+        if key not in self._loss_streaks:
+            try:
+                async with async_session() as session:
+                    n = await count_consecutive_stop_losses(session, sid, symbol)
+            except Exception:
+                n = 0
+            self._loss_streaks[key] = n
+        streak = int(self._loss_streaks.get(key, 0) or 0)
+        cap = float(getattr(strategy, "wick_loss_scale_max_mult", 8.0) or 8.0)
+        step = float(getattr(strategy, "wick_loss_scale_base", 2.0) or 2.0)
+        mult = wick_loss_scale_mult(streak, cap, step)
+        return float(base_qty) * mult, streak, mult
 
     def _fire_bg(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -331,6 +404,7 @@ class WickSpikeRunner:
     async def _run_strategy(self, strategy_id: int) -> None:
         strategy_log_service.info(strategy_id, "毫秒接针价流循环已启动")
         states: dict[str, WickSymbolState] = {}
+        self._symbol_states[strategy_id] = states
         last_seq: dict[str, int] = {}
         last_kline_fp: dict[str, tuple] = {}
         last_bg_rest: dict[str, float] = {}
@@ -341,6 +415,7 @@ class WickSpikeRunner:
         last_near_miss_log: dict[str, float] = {}
         last_arm_force_ms: dict[str, int] = {}
         last_resync_forming: dict[str, float] = {}
+        last_sl_reopen_check: dict[str, float] = {}
         symbols: list[str] = []
         next_refresh = 0.0
         next_strategy_reload = 0.0
@@ -682,9 +757,36 @@ class WickSpikeRunner:
                     if stream_leg is not None:
                         if stream_leg > 0:
                             tick_ctx.exchange_legs[(sym_key, side)] = stream_leg
-                            continue
-                        # 流显示已平：清掉可能过期的 tick_ctx 腿
-                        tick_ctx.exchange_legs.pop((sym_key, side), None)
+                        else:
+                            # 流显示已平：清掉可能过期的 tick_ctx 腿
+                            tick_ctx.exchange_legs.pop((sym_key, side), None)
+                    # 持仓中或同根仍锁：后台查止损成交（连亏记账；开关开则解锁再开）
+                    reopen_on = bool(
+                        getattr(filter_strategy, "wick_reopen_after_sl_enabled", False)
+                    )
+                    scale_on = bool(
+                        getattr(filter_strategy, "wick_loss_scale_enabled", False)
+                    )
+                    in_pos = stream_leg is not None and stream_leg > 0
+                    same_bar_locked = (
+                        st.triggered_bar_ts is not None
+                        and st.bar_open_ts is not None
+                        and st.triggered_bar_ts == st.bar_open_ts
+                    )
+                    if (
+                        auth is not None
+                        and (reopen_on or scale_on)
+                        and (in_pos or (reopen_on and same_bar_locked))
+                        and now - last_sl_reopen_check.get(sym_key, 0.0) >= 1.0
+                    ):
+                        last_sl_reopen_check[sym_key] = now
+                        self._fire_bg(
+                            self._bg_confirm_sl_close(
+                                strategy_id, sym, sym_key, side, auth, price
+                            )
+                        )
+                    if in_pos:
+                        continue
 
                     # 热路径：只读 WS 内存，绝不 await REST
                     klines = kline_stream_manager.peek(public, sym, timeframe)
@@ -1031,6 +1133,7 @@ class WickSpikeRunner:
             strategy_log_service.error(strategy_id, f"毫秒接针循环异常 — {e}")
             raise
         finally:
+            self._symbol_states.pop(strategy_id, None)
             try:
                 await price_stream_manager.clear_wanted(wake_owner)
             except Exception:
@@ -1626,6 +1729,110 @@ class WickSpikeRunner:
                 self._post_trailing_expire_async(strategy_id, sym_key, mem)
             )
 
+    async def _bg_confirm_sl_close(
+        self,
+        strategy_id: int,
+        symbol: str,
+        sym_key: str,
+        side: str,
+        auth,
+        current_price: float,
+    ) -> None:
+        """持仓或同根锁着时查止损是否已成交：写库、更新连亏；开关开则清锁。"""
+        try:
+            async with hold_strategy_symbol(
+                strategy_id, sym_key, side, timeout=2.0
+            ):
+                async with async_session() as session:
+                    strategy = await session.get(Strategy, strategy_id)
+                    if strategy is None or strategy.status != "running":
+                        return
+                    reopen = bool(
+                        getattr(strategy, "wick_reopen_after_sl_enabled", False)
+                    )
+                    scale = bool(
+                        getattr(strategy, "wick_loss_scale_enabled", False)
+                    )
+                    if not reopen and not scale:
+                        return
+                    open_positions = [
+                        p
+                        for p in (
+                            await session.execute(
+                                self._position_mgr._open_positions_stmt(
+                                    strategy_id, sym_key
+                                )
+                            )
+                        ).scalars().all()
+                        if (p.side or "").lower() == (side or "").lower()
+                    ]
+                    if open_positions:
+                        sl_id = ""
+                        for p in open_positions:
+                            sl_id = str(
+                                getattr(p, "sl_stop_order_id", None) or ""
+                            ).strip()
+                            if sl_id:
+                                break
+                        if not sl_id:
+                            return
+                        from .martingale_engine import MartingaleEngine
+
+                        positions_data = [
+                            {
+                                "quantity": p.quantity,
+                                "entry_price": p.entry_price,
+                            }
+                            for p in open_positions
+                        ]
+                        eng = MartingaleEngine(
+                            base_quantity=float(
+                                open_positions[0].quantity or 0
+                            ),
+                            multiplier=strategy.martingale_mult,
+                            max_layers=strategy.max_layers,
+                            price_drop_pct=strategy.price_drop_pct,
+                            price_drop_multiplier=float(
+                                strategy.price_drop_multiplier or 1.0
+                            ),
+                            take_profit_pct=strategy.take_profit_pct,
+                        )
+                        avg_entry, _ = eng.get_avg_entry_price(positions_data)
+                        await self._position_mgr._try_close_on_sl_fill(
+                            session,
+                            strategy,
+                            symbol,
+                            auth,
+                            open_positions,
+                            eng,
+                            avg_entry,
+                            side,
+                            current_price,
+                        )
+                        await session.commit()
+                        return
+                    if scale:
+                        n = await count_consecutive_stop_losses(
+                            session, strategy_id, sym_key
+                        )
+                        self.set_loss_streak(strategy_id, sym_key, n)
+                    last = await last_close_reason(session, strategy_id, sym_key)
+                    if reopen and last == "stop_loss":
+                        if self.unlock_after_sl(strategy_id, symbol):
+                            strategy_log_service.info(
+                                strategy_id,
+                                f"{symbol} 止损后再开已解锁，同根满足即可再开",
+                            )
+        except asyncio.TimeoutError:
+            return
+        except Exception as e:
+            logger.debug(
+                "wick_spike sl-reopen poll strategy=%d %s: %s",
+                strategy_id,
+                sym_key,
+                e,
+            )
+
     async def _post_trailing_close_async(
         self,
         strategy_id: int,
@@ -1939,6 +2146,14 @@ class WickSpikeRunner:
                 strategy_id, f"{symbol} 接针无法开仓 — 余额无效"
             )
             return skip("retryable_fail", "bad_balance")
+        base_qty, loss_streak, loss_mult = await self._loss_scale_qty(
+            strategy, symbol, base_qty
+        )
+        if loss_mult > 1.0 + 1e-12:
+            strategy_log_service.info(
+                strategy_id,
+                f"{symbol} 同币种连亏{loss_streak}次，开仓×{loss_mult:g}",
+            )
 
         candidate = SignalCandidate(
             symbol=symbol,

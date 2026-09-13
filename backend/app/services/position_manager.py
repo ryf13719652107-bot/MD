@@ -3515,6 +3515,19 @@ class PositionManager:
         await session.flush()
         for trade in trades_to_backup:
             backup_trade(trade)
+        if getattr(strategy, "signal_source", None) == "wick_spike":
+            try:
+                from .wick_spike_runner import wick_spike_runner
+
+                await wick_spike_runner.apply_wick_close_hooks(
+                    session, strategy, symbol, close_reason
+                )
+            except Exception:
+                logger.debug(
+                    "Strategy %d: wick reopen/loss-scale hook failed",
+                    strategy_id,
+                    exc_info=True,
+                )
 
     async def _martingale_add(self, session, strategy, symbol, auth_binance, open_positions, eng, result, avg_entry, total_qty, pos_side, current_price, klines=None, public_binance=None):
         strategy_id = strategy.id

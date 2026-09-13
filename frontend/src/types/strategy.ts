@@ -62,6 +62,14 @@ export interface Strategy {
   wick_instant_active_until_pct: number;
   /** 接针K条件限价止损：空按本根最高、多按本根最低；默认关 */
   wick_bar_sl_enabled: boolean;
+  /** 接针止损后同根只要再满足信号即可再开；默认关 */
+  wick_reopen_after_sl_enabled: boolean;
+  /** 同币种连续止损后按 base^n 加倍开仓；默认关 */
+  wick_loss_scale_enabled: boolean;
+  /** 每次连亏加倍基数，默认 2 */
+  wick_loss_scale_base: number;
+  /** 连亏加倍上限（1次×2、2次×4、3次×8） */
+  wick_loss_scale_max_mult: number;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */
@@ -169,6 +177,14 @@ export interface StrategyFormData {
   wick_instant_active_until_pct: number;
   /** 接针K条件限价止损：空按本根最高、多按本根最低；默认关 */
   wick_bar_sl_enabled: boolean;
+  /** 接针止损后同根只要再满足信号即可再开；默认关 */
+  wick_reopen_after_sl_enabled: boolean;
+  /** 同币种连续止损后按 base^n 加倍开仓；默认关 */
+  wick_loss_scale_enabled: boolean;
+  /** 每次连亏加倍基数，默认 2 */
+  wick_loss_scale_base: number;
+  /** 连亏加倍上限（1次×2、2次×4、3次×8） */
+  wick_loss_scale_max_mult: number;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */

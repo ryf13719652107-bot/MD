@@ -246,6 +246,22 @@ export default function StrategyDetailPage() {
               <div className={valClass}>{strategy.wick_bar_sl_enabled ? '条件限价（空本根最高 / 多本根最低，不加仓）' : '已禁用'}</div>
             </div>
           )}
+          {strategy.signal_source === 'wick_spike' && (
+            <div>
+              <span className={labelClass}>止损后再开</span>
+              <div className={valClass}>{strategy.wick_reopen_after_sl_enabled ? '同根满足即可再开' : '已禁用'}</div>
+            </div>
+          )}
+          {strategy.signal_source === 'wick_spike' && (
+            <div>
+              <span className={labelClass}>连亏加倍</span>
+              <div className={valClass}>
+                {strategy.wick_loss_scale_enabled
+                  ? `每次×${strategy.wick_loss_scale_base ?? 2}，上限 ${strategy.wick_loss_scale_max_mult ?? 8}`
+                  : '已禁用'}
+              </div>
+            </div>
+          )}
           <div>
             <span className={labelClass}>单币止损</span>
             <div className={valClass}>

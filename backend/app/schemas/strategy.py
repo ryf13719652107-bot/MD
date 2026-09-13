@@ -195,6 +195,26 @@ class StrategyCreate(BaseModel):
         default=False,
         description="接针K条件限价止损：空按本根最高、多按本根最低；开启后不再马丁加仓；默认关",
     )
+    wick_reopen_after_sl_enabled: bool = Field(
+        default=False,
+        description="接针止损后同根只要再满足信号即可再开；默认关",
+    )
+    wick_loss_scale_enabled: bool = Field(
+        default=False,
+        description="同币种连续止损后按 base^n 加倍开仓；默认关",
+    )
+    wick_loss_scale_base: float = Field(
+        default=2.0,
+        ge=1,
+        le=8,
+        description="每次连亏的加倍基数，默认 2（1次×2、2次×4、3次×8）",
+    )
+    wick_loss_scale_max_mult: float = Field(
+        default=8.0,
+        ge=1,
+        le=64,
+        description="连亏加倍上限，封顶该值",
+    )
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     trailing_tp_enabled: bool = Field(
         default=False,
@@ -292,6 +312,10 @@ class StrategyUpdate(BaseModel):
     wick_volume_mode: Optional[Literal["original", "instant_early", "real_only"]] = None
     wick_instant_active_until_pct: Optional[float] = Field(default=None, ge=0, le=1)
     wick_bar_sl_enabled: Optional[bool] = None
+    wick_reopen_after_sl_enabled: Optional[bool] = None
+    wick_loss_scale_enabled: Optional[bool] = None
+    wick_loss_scale_base: Optional[float] = Field(default=None, ge=1, le=8)
+    wick_loss_scale_max_mult: Optional[float] = Field(default=None, ge=1, le=64)
     trailing_tp_enabled: Optional[bool] = None
     trailing_tp_window_sec: Optional[float] = Field(default=None, gt=0, le=3600)
     trailing_tp_drawdown_base_pct: Optional[float] = Field(default=None, ge=0, le=100)
@@ -397,6 +421,10 @@ class StrategyResponse(BaseModel):
     wick_volume_mode: str = "original"
     wick_instant_active_until_pct: float = 0.5
     wick_bar_sl_enabled: bool = False
+    wick_reopen_after_sl_enabled: bool = False
+    wick_loss_scale_enabled: bool = False
+    wick_loss_scale_base: float = 2.0
+    wick_loss_scale_max_mult: float = 8.0
     trailing_tp_enabled: bool = False
     trailing_tp_window_sec: float = 300.0
     trailing_tp_drawdown_base_pct: float = 30.0

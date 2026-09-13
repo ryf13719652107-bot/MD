@@ -329,6 +329,33 @@ class PositionSyncService:
                     if (sym, side) not in local_keys:
                         logger.warning("Sync: exchange position %s %s not in DB — no local record created", sym, side)
 
+                if trades_to_backup:
+                    from ..models.strategy import Strategy
+                    from .wick_spike_runner import wick_spike_runner
+
+                    seen_hooks: set[tuple[int, str, str]] = set()
+                    for t in trades_to_backup:
+                        sid = int(getattr(t, "strategy_id", 0) or 0)
+                        reason = str(getattr(t, "close_reason", "") or "")
+                        key = (sid, str(t.symbol or ""), reason)
+                        if sid <= 0 or key in seen_hooks:
+                            continue
+                        seen_hooks.add(key)
+                        strat = await session.get(Strategy, sid)
+                        if strat is None:
+                            continue
+                        try:
+                            await wick_spike_runner.apply_wick_close_hooks(
+                                session, strat, t.symbol, reason
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Sync: wick close hook failed %s %s",
+                                t.symbol,
+                                reason,
+                                exc_info=True,
+                            )
+
                 await session.commit()
                 for t in trades_to_backup:
                     backup_trade(t)

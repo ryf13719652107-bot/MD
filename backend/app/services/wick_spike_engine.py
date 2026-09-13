@@ -942,6 +942,17 @@ def release_bar_trigger(state: WickSymbolState) -> None:
     state.cooldown_until_ms = 0
 
 
+def unlock_after_stop_loss(state: WickSymbolState) -> None:
+    """止损后再开：清本根触发/冷却/反弹锁，同根满足信号即可再评估。"""
+    state.triggered_bar_ts = None
+    state.cooldown_until_ms = 0
+    state.rebound_done_bar_ts = None
+    state.armed_expired_bar_ts = None
+    state.armed_expired_progress = 0.0
+    clear_arm(state)
+    clear_rebound(state)
+
+
 def mark_bar_triggered(
     state: WickSymbolState,
     params: WickSpikeParams,
