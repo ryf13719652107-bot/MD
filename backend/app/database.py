@@ -2,6 +2,7 @@ import logging
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 import os
 
 from .config import settings
@@ -14,12 +15,15 @@ db_dir = os.path.dirname(db_path)
 if db_dir and not os.path.exists(db_dir):
     os.makedirs(db_dir, exist_ok=True)
 
+_is_sqlite = "sqlite" in (settings.database_url or "")
 # aiosqlite timeout：等锁秒数（与 PRAGMA busy_timeout 配合）
-engine = create_async_engine(
-    settings.database_url,
-    echo=False,
-    connect_args={"timeout": 30},
-)
+# SQLite 必须 NullPool：默认 QueuePool(5+10) 会被接针/调度/撤单占满，
+# API 等 30s 后报 QueuePool limit reached，前端就是「服务器内部错误」。
+_engine_kwargs: dict = {"echo": False}
+if _is_sqlite:
+    _engine_kwargs["connect_args"] = {"timeout": 30}
+    _engine_kwargs["poolclass"] = NullPool
+engine = create_async_engine(settings.database_url, **_engine_kwargs)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
