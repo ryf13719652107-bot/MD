@@ -130,6 +130,19 @@ class Strategy(Base):
     wick_loss_scale_max_times: Mapped[int] = mapped_column(
         Integer, default=2, server_default="2"
     )
+    # 接针首仓后针深翻倍加仓追踪：现价越过 O+(E-O)×倍数 触发马丁链第一层（数量=首仓×qty_mult）
+    wick_add_track_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    wick_add_track_threshold_mult: Mapped[float] = mapped_column(
+        Float, default=2.0, server_default="2.0"
+    )
+    wick_add_track_qty_mult: Mapped[float] = mapped_column(
+        Float, default=1.5, server_default="1.5"
+    )
+    wick_add_track_min_depth_pct: Mapped[float] = mapped_column(
+        Float, default=0.5, server_default="0.5"
+    )
 
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     # 窗口内达 take_profit_pct 则一直追踪；超时未触发立即回退限价

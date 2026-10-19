@@ -15,6 +15,8 @@ class Position(Base):
     side: Mapped[str] = mapped_column(String(10), nullable=False)  # 'long' or 'short'
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    # 首仓开仓时的本根开盘价 O（供接针针深翻倍加仓追踪计算触发价 T）
+    entry_bar_open: Mapped[float] = mapped_column(Float, nullable=True)
     mark_price: Mapped[float] = mapped_column(Float, nullable=True)
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     layer: Mapped[int] = mapped_column(Integer, default=0)

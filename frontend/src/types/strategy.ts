@@ -72,6 +72,14 @@ export interface Strategy {
   wick_loss_scale_max_mult: number;
   /** 连续亏损加仓次数上限，默认 2 */
   wick_loss_scale_max_times: number;
+  /** 接针首仓后针深翻倍加仓追踪：现价越过 O+(E-O)×倍数 触发马丁链第一层；默认关 */
+  wick_add_track_enabled: boolean;
+  /** 触发阈值倍数：T=开盘价+(成交价-开盘价)×该值；默认 2.0 */
+  wick_add_track_threshold_mult: number;
+  /** 追踪加仓数量=首仓×该值；默认 1.5 */
+  wick_add_track_qty_mult: number;
+  /** 最小针深下限%：(成交价-开盘价)/开盘价 低于此不启用；0=关闭 */
+  wick_add_track_min_depth_pct: number;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */
@@ -189,6 +197,14 @@ export interface StrategyFormData {
   wick_loss_scale_max_mult: number;
   /** 连续亏损加仓次数上限，默认 2 */
   wick_loss_scale_max_times: number;
+  /** 接针首仓后针深翻倍加仓追踪：现价越过 O+(E-O)×倍数 触发马丁链第一层；默认关 */
+  wick_add_track_enabled: boolean;
+  /** 触发阈值倍数：T=开盘价+(成交价-开盘价)×该值；默认 2.0 */
+  wick_add_track_threshold_mult: number;
+  /** 追踪加仓数量=首仓×该值；默认 1.5 */
+  wick_add_track_qty_mult: number;
+  /** 最小针深下限%：(成交价-开盘价)/开盘价 低于此不启用；0=关闭 */
+  wick_add_track_min_depth_pct: number;
   /** 时间移动止盈开关：关闭按原限价止盈逻辑运行 */
   trailing_tp_enabled: boolean;
   /** 激活窗口（秒），默认 300=5 分钟 */

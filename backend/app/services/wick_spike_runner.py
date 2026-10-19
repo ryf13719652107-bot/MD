@@ -2195,6 +2195,7 @@ class WickSpikeRunner:
             rsi=float(vol_ratio),
             signal_label="毫秒接针",
             base_qty=base_qty,
+            bar_open=float(snap.bar_open or 0),
         )
 
         # 市价下单（账户下单信号量 + 必要时设杠杆）

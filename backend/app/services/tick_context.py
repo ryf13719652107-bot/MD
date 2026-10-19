@@ -43,6 +43,7 @@ class SignalCandidate:
     rsi: float
     signal_label: str
     base_qty: float
+    bar_open: float = 0.0  # 接针首仓时的本根开盘价 O
 
 
 @dataclass
@@ -63,3 +64,4 @@ class OpenApiResult:
     tp_limit_order_id: str | None = None
     sl_price: float = 0.0
     sl_stop_order_id: str | None = None
+    entry_bar_open: float = 0.0  # 首仓开仓时的本根开盘价 O

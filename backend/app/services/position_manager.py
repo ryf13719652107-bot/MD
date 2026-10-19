@@ -23,7 +23,7 @@ from .strategy_engine import (
     calculate_supertrend,
     generate_trend_wt_signal,
 )
-from .martingale_engine import MartingaleEngine
+from .martingale_engine import MartingaleEngine, MartingaleResult
 from .risk_manager import RiskManager
 from .log_service import strategy_log_service
 from .kline_stream import kline_stream_manager, _timeframe_ms
@@ -446,6 +446,51 @@ def wick_bar_sl_enabled(strategy) -> bool:
     return (
         (getattr(strategy, "signal_source", None) or "") == "wick_spike"
         and bool(getattr(strategy, "wick_bar_sl_enabled", False))
+    )
+
+
+def wick_add_track_enabled(strategy) -> bool:
+    """接针首仓后针深翻倍加仓追踪开关（仅 wick_spike 策略生效）。"""
+    return (
+        (getattr(strategy, "signal_source", None) or "") == "wick_spike"
+        and bool(getattr(strategy, "wick_add_track_enabled", False))
+    )
+
+
+def wick_add_track_decision(
+    *,
+    side: str,
+    bar_open: float,
+    entry_price: float,
+    current_price: float,
+    threshold_mult: float,
+    qty_mult: float,
+    min_depth_pct: float,
+    base_qty: float,
+) -> MartingaleResult | None:
+    """针深翻倍加仓追踪的纯判定：触发返回马丁链第一层结果，否则 None。
+
+    做空：针深=(成交价-开盘价)/开盘价，触发价=开盘价+(成交价-开盘价)×threshold_mult，
+    现价越过触发价即命中（"针接到半山腰"）。做多对称向下。
+    """
+    if bar_open <= 0 or entry_price <= 0 or current_price <= 0 or base_qty <= 0:
+        return None
+    if (side or "").lower() == "short":
+        depth_pct = (entry_price - bar_open) / bar_open * 100.0
+        trig = bar_open + (entry_price - bar_open) * threshold_mult
+        crossed = current_price >= trig
+    else:
+        depth_pct = (bar_open - entry_price) / bar_open * 100.0
+        trig = bar_open - (bar_open - entry_price) * threshold_mult
+        crossed = current_price <= trig
+    if depth_pct < min_depth_pct - 1e-12 or not crossed:
+        return None
+    return MartingaleResult(
+        should_add=True,
+        next_quantity=base_qty * qty_mult,
+        next_layer=1,
+        last_entry_price=entry_price,
+        price_drop_from_last=depth_pct,
     )
 
 
@@ -2531,6 +2576,7 @@ class PositionManager:
             filled_qty=filled_qty,
             tp_price=tp_price,
             tp_limit_order_id=None,
+            entry_bar_open=float(candidate.bar_open or 0),
         )
 
     async def execute_open_api(
@@ -3004,6 +3050,8 @@ class PositionManager:
                     primary.stop_loss_price = float(result.sl_price)
                 if getattr(result, "sl_stop_order_id", None):
                     primary.sl_stop_order_id = result.sl_stop_order_id
+                if float(getattr(result, "entry_bar_open", 0) or 0) > 0:
+                    primary.entry_bar_open = float(result.entry_bar_open)
                 # trailing_tp：merge 只补未接管的仓；已 armed/active 禁止打回 armed
                 if getattr(strategy, "trailing_tp_enabled", False) and (
                     strategy.signal_source or ""
@@ -3046,6 +3094,8 @@ class PositionManager:
                 pos.stop_loss_price = float(result.sl_price)
             if getattr(result, "sl_stop_order_id", None):
                 pos.sl_stop_order_id = result.sl_stop_order_id
+            if float(getattr(result, "entry_bar_open", 0) or 0) > 0:
+                pos.entry_bar_open = float(result.entry_bar_open)
             # trailing_tp：仅 wick_spike 策略启用（只有 wick_spike_runner 有实时追踪）；
             # 非 wick_spike 误开则不设 armed，避免 scheduler 跳过 TP 却无追踪→裸奔
             if getattr(strategy, "trailing_tp_enabled", False) and (
@@ -3533,6 +3583,45 @@ class PositionManager:
             total_qty,
             pos_side,
         )
+
+        # --- 接针首仓后针深翻倍加仓追踪（马丁链第一层，仅 layer0→1）---
+        if current_layer == 0 and wick_add_track_enabled(strategy):
+            layer0 = next(
+                (p for p in open_positions if int(p.layer or 0) == 0), None
+            )
+            if layer0 is not None:
+                track_result = wick_add_track_decision(
+                    side=pos_side,
+                    bar_open=float(getattr(layer0, "entry_bar_open", 0) or 0),
+                    entry_price=float(getattr(layer0, "entry_price", 0) or 0),
+                    current_price=current_price,
+                    threshold_mult=float(
+                        getattr(strategy, "wick_add_track_threshold_mult", 2.0) or 2.0
+                    ),
+                    qty_mult=float(
+                        getattr(strategy, "wick_add_track_qty_mult", 1.5) or 1.5
+                    ),
+                    min_depth_pct=float(
+                        getattr(strategy, "wick_add_track_min_depth_pct", 0.5) or 0.0
+                    ),
+                    base_qty=base_qty,
+                )
+                if track_result is not None:
+                    o = float(getattr(layer0, "entry_bar_open", 0) or 0)
+                    e = float(getattr(layer0, "entry_price", 0) or 0)
+                    strategy_log_service.info(
+                        strategy_id,
+                        f"{symbol} 针深翻倍加仓追踪触发 — 开盘{o:.6g} "
+                        f"首仓{e:.6g} 针深{track_result.price_drop_from_last:.2f}% "
+                        f"加仓量=首仓×{float(getattr(strategy, 'wick_add_track_qty_mult', 1.5) or 1.5):g}",
+                    )
+                    await self._martingale_add(
+                        session, strategy, symbol, auth_binance,
+                        open_positions, eng, track_result, avg_entry,
+                        total_qty, pos_side, current_price, klines,
+                        public_binance,
+                    )
+                    return
 
         # --- Check martingale add ---
         last_entry = max(open_positions, key=lambda p: p.layer).entry_price

@@ -67,6 +67,10 @@ const schema = z.object({
   wick_loss_scale_base: z.number().min(1).max(8),
   wick_loss_scale_max_mult: z.number().min(1).max(64),
   wick_loss_scale_max_times: z.number().min(1).max(8),
+  wick_add_track_enabled: z.boolean(),
+  wick_add_track_threshold_mult: z.number().min(1).max(20),
+  wick_add_track_qty_mult: z.number().min(1).max(10),
+  wick_add_track_min_depth_pct: z.number().min(0).max(50),
   trailing_tp_enabled: z.boolean(),
   trailing_tp_window_sec: z.number().min(1).max(3600),
   trailing_tp_drawdown_base_pct: z.number().min(0).max(100),
@@ -229,6 +233,10 @@ function toFormDefaults(
       wick_loss_scale_base: initialData.wick_loss_scale_base ?? 2,
       wick_loss_scale_max_mult: initialData.wick_loss_scale_max_mult ?? 8,
       wick_loss_scale_max_times: initialData.wick_loss_scale_max_times ?? 2,
+      wick_add_track_enabled: initialData.wick_add_track_enabled ?? false,
+      wick_add_track_threshold_mult: initialData.wick_add_track_threshold_mult ?? 2,
+      wick_add_track_qty_mult: initialData.wick_add_track_qty_mult ?? 1.5,
+      wick_add_track_min_depth_pct: initialData.wick_add_track_min_depth_pct ?? 0.5,
       trailing_tp_enabled: initialData.trailing_tp_enabled ?? false,
       trailing_tp_window_sec: initialData.trailing_tp_window_sec ?? 300,
       trailing_tp_drawdown_base_pct: initialData.trailing_tp_drawdown_base_pct ?? 30,
@@ -328,6 +336,10 @@ function toFormDefaults(
     wick_loss_scale_base: 2,
     wick_loss_scale_max_mult: 8,
     wick_loss_scale_max_times: 2,
+    wick_add_track_enabled: false,
+    wick_add_track_threshold_mult: 2,
+    wick_add_track_qty_mult: 1.5,
+    wick_add_track_min_depth_pct: 0.5,
     trailing_tp_enabled: false,
     trailing_tp_window_sec: 300,
     trailing_tp_drawdown_base_pct: 30,
@@ -378,6 +390,9 @@ function toApiPayload(data: StrategyFormData): StrategyApiPayload {
     wick_loss_scale_base: Number.isFinite(data.wick_loss_scale_base) ? data.wick_loss_scale_base : 2,
     wick_loss_scale_max_mult: Number.isFinite(data.wick_loss_scale_max_mult) ? data.wick_loss_scale_max_mult : 8,
     wick_loss_scale_max_times: Number.isFinite(data.wick_loss_scale_max_times) ? data.wick_loss_scale_max_times : 2,
+    wick_add_track_threshold_mult: Number.isFinite(data.wick_add_track_threshold_mult) ? data.wick_add_track_threshold_mult : 2,
+    wick_add_track_qty_mult: Number.isFinite(data.wick_add_track_qty_mult) ? data.wick_add_track_qty_mult : 1.5,
+    wick_add_track_min_depth_pct: Number.isFinite(data.wick_add_track_min_depth_pct) ? data.wick_add_track_min_depth_pct : 0.5,
     coin_pool_refresh_seconds: nearestCoinPoolRefreshSeconds(data.coin_pool_refresh_seconds),
     coin_pool_anchor_hour: hour,
     coin_pool_anchor_minute: minute,
@@ -504,6 +519,7 @@ export default function StrategyForm({
   const wickAtrFloorEnabled = watch('wick_atr_pct_floor_enabled', false);
   const trailingTpEnabled = watch('trailing_tp_enabled', false);
   const wickLossScaleEnabled = watch('wick_loss_scale_enabled', false);
+  const wickAddTrackEnabled = watch('wick_add_track_enabled', false);
 
   // Auto-adjust RSI threshold on mount and when direction changes
   useEffect(() => {
@@ -1322,6 +1338,63 @@ export default function StrategyForm({
                 disabled={!wickLossScaleEnabled}
               />
               <span className="text-xs text-gray-600">{wickLossScaleEnabled ? '连亏倍数封顶，默认 8' : '连亏加倍已禁用'}</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={`${labelClass} flex items-center gap-2`}>
+                <span>针深翻倍加仓追踪</span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" {...register('wick_add_track_enabled')} className="sr-only peer" />
+                  <div className="w-9 h-5 bg-gray-600 peer-checked:bg-amber-500 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all"></div>
+                </label>
+              </label>
+              <span className="text-xs text-gray-600">首仓后现价越过「开盘价+(成交价-开盘价)×阈值倍数」触发马丁链第一层；默认关</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={labelClass}>触发阈值倍数</label>
+              <input
+                type="number"
+                step="0.1"
+                min={1}
+                max={20}
+                {...register('wick_add_track_threshold_mult', { valueAsNumber: true })}
+                className={inputClass}
+                disabled={!wickAddTrackEnabled}
+              />
+              <span className="text-xs text-gray-600">{wickAddTrackEnabled ? '默认 2.0，即针深翻倍' : '加仓追踪已禁用'}</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={labelClass}>追踪加仓数量倍数</label>
+              <input
+                type="number"
+                step="0.1"
+                min={1}
+                max={10}
+                {...register('wick_add_track_qty_mult', { valueAsNumber: true })}
+                className={inputClass}
+                disabled={!wickAddTrackEnabled}
+              />
+              <span className="text-xs text-gray-600">{wickAddTrackEnabled ? '默认 1.5，与马丁倍数一致' : '加仓追踪已禁用'}</span>
+            </div>
+          )}
+          {signalSource === 'wick_spike' && (
+            <div>
+              <label className={labelClass}>最小针深下限 (%)</label>
+              <input
+                type="number"
+                step="0.1"
+                min={0}
+                max={50}
+                {...register('wick_add_track_min_depth_pct', { valueAsNumber: true })}
+                className={inputClass}
+                disabled={!wickAddTrackEnabled}
+              />
+              <span className="text-xs text-gray-600">{wickAddTrackEnabled ? '针深低于此不触发；0=关闭' : '加仓追踪已禁用'}</span>
             </div>
           )}
           <div>

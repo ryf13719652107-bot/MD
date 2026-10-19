@@ -221,6 +221,28 @@ class StrategyCreate(BaseModel):
         le=8,
         description="连续亏损加仓次数上限，默认 2（第1次×2、第2次×4，之后不再升档）",
     )
+    wick_add_track_enabled: bool = Field(
+        default=False,
+        description="接针首仓后针深翻倍加仓追踪：现价越过 O+(E-O)×倍数 触发马丁链第一层；默认关",
+    )
+    wick_add_track_threshold_mult: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=20.0,
+        description="触发阈值倍数：T=开盘价+(成交价-开盘价)×该值",
+    )
+    wick_add_track_qty_mult: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=10.0,
+        description="追踪加仓数量=首仓×该值（默认1.5与马丁一致）",
+    )
+    wick_add_track_min_depth_pct: float = Field(
+        default=0.5,
+        ge=0,
+        le=50,
+        description="最小针深下限%：(成交价-开盘价)/开盘价 低于此不启用追踪加仓；0=关闭",
+    )
     # 时间移动止盈（开关关闭=按原限价止盈逻辑运行，零影响）
     trailing_tp_enabled: bool = Field(
         default=False,
@@ -323,6 +345,10 @@ class StrategyUpdate(BaseModel):
     wick_loss_scale_base: Optional[float] = Field(default=None, ge=1, le=8)
     wick_loss_scale_max_mult: Optional[float] = Field(default=None, ge=1, le=64)
     wick_loss_scale_max_times: Optional[int] = Field(default=None, ge=1, le=8)
+    wick_add_track_enabled: Optional[bool] = None
+    wick_add_track_threshold_mult: Optional[float] = Field(default=None, ge=1.0, le=20.0)
+    wick_add_track_qty_mult: Optional[float] = Field(default=None, ge=1.0, le=10.0)
+    wick_add_track_min_depth_pct: Optional[float] = Field(default=None, ge=0, le=50)
     trailing_tp_enabled: Optional[bool] = None
     trailing_tp_window_sec: Optional[float] = Field(default=None, gt=0, le=3600)
     trailing_tp_drawdown_base_pct: Optional[float] = Field(default=None, ge=0, le=100)
@@ -433,6 +459,10 @@ class StrategyResponse(BaseModel):
     wick_loss_scale_base: float = 2.0
     wick_loss_scale_max_mult: float = 8.0
     wick_loss_scale_max_times: int = 2
+    wick_add_track_enabled: bool = False
+    wick_add_track_threshold_mult: float = 2.0
+    wick_add_track_qty_mult: float = 1.5
+    wick_add_track_min_depth_pct: float = 0.5
     trailing_tp_enabled: bool = False
     trailing_tp_window_sec: float = 300.0
     trailing_tp_drawdown_base_pct: float = 30.0
