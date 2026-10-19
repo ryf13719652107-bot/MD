@@ -3585,7 +3585,12 @@ class PositionManager:
         )
 
         # --- 接针首仓后针深翻倍加仓追踪（马丁链第一层，仅 layer0→1）---
-        if current_layer == 0 and wick_add_track_enabled(strategy):
+        # 接针K止损启用时与普通马丁一致：不再加仓（含追踪加仓）
+        if (
+            current_layer == 0
+            and wick_add_track_enabled(strategy)
+            and not wick_bar_sl_enabled(strategy)
+        ):
             layer0 = next(
                 (p for p in open_positions if int(p.layer or 0) == 0), None
             )
